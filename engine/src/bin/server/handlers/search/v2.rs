@@ -6,7 +6,14 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::{
+        rejection::{JsonRejection, QueryRejection},
+        Query, State,
+    },
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -14,6 +21,7 @@ use crate::dto::{ApiError, HitSource};
 use crate::metrics::PrometheusMetrics;
 use crate::state::{AppState, ClusterAppState};
 
+use super::controls::parse_time_value;
 use super::resolve::resolve_percolate;
 use super::DocBody;
 
@@ -31,6 +39,7 @@ thread_local! {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BoostBody {
     key: String,
     value: String,
@@ -38,6 +47,7 @@ struct BoostBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RankProgramBody {
     priority_field: Option<String>,
     #[serde(default)]
@@ -62,23 +72,57 @@ impl RankProgramBody {
 
 /// A PIT reference on a page-one cursor request (ADR-113).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PitRefBody {
     id: String,
 }
 
+/// The v2 ranked API consumes only the title field. Rejecting siblings avoids
+/// making product metadata look searched or persisted when it is actually
+/// ignored; the legacy `/_mpercolate` DTO remains permissive.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V2DocumentBody {
+    title: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct V2SearchParams {
+    size: Option<usize>,
+    track_total_hits_up_to: Option<u64>,
+    /// ES/OS spelling for the bounded numeric threshold. Boolean exact/off
+    /// modes cannot be represented honestly under the fixed 10k cap.
+    track_total_hits: Option<u64>,
+    query_scope: Option<reverse_rusty::QueryScope>,
+    explain: Option<bool>,
+    #[serde(rename = "_source")]
+    source: Option<bool>,
+    timeout_ms: Option<u64>,
+    timeout: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct V2SearchBody {
-    document: Option<DocBody>,
+    document: Option<V2DocumentBody>,
     filter: Option<serde_json::Value>,
     result_mode: Option<reverse_rusty::ResultMode>,
     query_scope: Option<reverse_rusty::QueryScope>,
     size: Option<usize>,
     track_total_hits_up_to: Option<u64>,
+    /// ES/OS numeric threshold alias for `track_total_hits_up_to`.
+    track_total_hits: Option<u64>,
     rank: Option<RankProgramBody>,
     include_source: Option<bool>,
+    /// ES/OS spelling for `include_source`.
+    #[serde(rename = "_source")]
+    source: Option<bool>,
     explain: Option<bool>,
     allow_partial_results: Option<bool>,
     timeout_ms: Option<u64>,
+    /// ES/OS time value (`250ms`, `2s`, ...), equivalent to `timeout_ms`.
+    timeout: Option<String>,
     /// ADR-113 page one: bind this search to an open PIT and return
     /// `next_cursor`.
     pit: Option<PitRefBody>,
@@ -117,6 +161,10 @@ struct RankedHitsBody {
 
 #[derive(Serialize)]
 pub(crate) struct V2SearchResponse {
+    /// ES/OS-compatible whole-millisecond duration.
+    took: u64,
+    timed_out: bool,
+    /// Reverse Rusty's higher-precision duration extension.
     took_ms: f64,
     complete: bool,
     query_scope: reverse_rusty::QueryScope,
@@ -130,6 +178,24 @@ pub(crate) struct V2SearchResponse {
 
 fn validation(reason: impl Into<String>) -> (StatusCode, Json<ApiError>) {
     ApiError::response(StatusCode::BAD_REQUEST, "validation_error", reason)
+}
+
+fn one_location<T>(body: Option<T>, query: Option<T>, name: &str) -> Result<Option<T>, String> {
+    match (body, query) {
+        (Some(_), Some(_)) => Err(format!(
+            "`{name}` must be specified in either the request body or query string, not both"
+        )),
+        (body, query) => Ok(body.or(query)),
+    }
+}
+
+fn one_alias<T>(native: Option<T>, es: Option<T>, names: &str) -> Result<Option<T>, String> {
+    match (native, es) {
+        (Some(_), Some(_)) => Err(format!(
+            "`{names}` are aliases; specify exactly one of them"
+        )),
+        (native, es) => Ok(native.or(es)),
+    }
 }
 
 fn scope_label(scope: reverse_rusty::QueryScope) -> &'static str {
@@ -185,7 +251,7 @@ impl PrepareFailure {
 /// Parse and validate the public v2 contract once for both local and cluster
 /// serving. Keeping this lowering shared is what makes their defaults and 400s
 /// identical as the delivery implementations evolve independently.
-fn prepare(body: V2SearchBody) -> Result<PreparedSearch, PrepareFailure> {
+fn prepare(body: V2SearchBody, params: &V2SearchParams) -> Result<PreparedSearch, PrepareFailure> {
     if body.page_from.is_some() || body.documents.is_some() || body.query.is_some() {
         return Err(PrepareFailure::Validation(validation(
             "v2 ranked search accepts one `document`; from, documents and query are not supported",
@@ -224,15 +290,75 @@ fn prepare(body: V2SearchBody) -> Result<PreparedSearch, PrepareFailure> {
         PrepareFailure::Validation(validation("request must include one `document`"))
     })?;
     let title = document.title.clone();
-    let (_, _, filter) = resolve_percolate(Some(document), None, body.filter, None)
+    let (_, _, filter) = resolve_percolate(
+        Some(DocBody {
+            title: document.title,
+        }),
+        None,
+        body.filter,
+        None,
+    )
+    .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let size = one_location(body.size, params.size, "size")
         .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let body_total = one_alias(
+        body.track_total_hits_up_to,
+        body.track_total_hits,
+        "track_total_hits_up_to` and `track_total_hits",
+    )
+    .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let query_total = one_alias(
+        params.track_total_hits_up_to,
+        params.track_total_hits,
+        "track_total_hits_up_to` and `track_total_hits",
+    )
+    .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let track_total_hits_up_to = one_location(body_total, query_total, "track_total_hits")
+        .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let query_scope = one_location(body.query_scope, params.query_scope, "query_scope")
+        .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let explain = one_location(body.explain, params.explain, "explain")
+        .map_err(|reason| PrepareFailure::Validation(validation(reason)))?
+        .unwrap_or(false);
+    let body_source = one_alias(
+        body.include_source,
+        body.source,
+        "include_source` and `_source",
+    )
+    .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let include_source = one_location(body_source, params.source, "_source")
+        .map_err(|reason| PrepareFailure::Validation(validation(reason)))?
+        .unwrap_or(true);
+    let body_timeout = one_alias(
+        body.timeout_ms.map(Duration::from_millis),
+        body.timeout
+            .as_deref()
+            .map(parse_time_value)
+            .transpose()
+            .map_err(|reason| PrepareFailure::Validation(validation(reason)))?,
+        "timeout_ms` and `timeout",
+    )
+    .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let query_timeout = one_alias(
+        params.timeout_ms.map(Duration::from_millis),
+        params
+            .timeout
+            .as_deref()
+            .map(parse_time_value)
+            .transpose()
+            .map_err(|reason| PrepareFailure::Validation(validation(reason)))?,
+        "timeout_ms` and `timeout",
+    )
+    .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let timeout = one_location(body_timeout, query_timeout, "timeout")
+        .map_err(|reason| PrepareFailure::Validation(validation(reason)))?
+        .unwrap_or(Duration::from_secs(5));
     let options = reverse_rusty::TopKOptions {
         search_after: None,
-        size: body.size.unwrap_or(reverse_rusty::DEFAULT_TOP_K),
-        track_total_hits_up_to: body
-            .track_total_hits_up_to
+        size: size.unwrap_or(reverse_rusty::DEFAULT_TOP_K),
+        track_total_hits_up_to: track_total_hits_up_to
             .unwrap_or(reverse_rusty::DEFAULT_TRACK_TOTAL_HITS_UP_TO),
-        query_scope: body.query_scope.unwrap_or_default(),
+        query_scope: query_scope.unwrap_or_default(),
     };
     if options.size > reverse_rusty::MAX_TOP_K {
         return Err(PrepareFailure::Admission(
@@ -270,9 +396,9 @@ fn prepare(body: V2SearchBody) -> Result<PreparedSearch, PrepareFailure> {
             .rank
             .map(RankProgramBody::into_spec)
             .unwrap_or_default(),
-        include_source: body.include_source.unwrap_or(true),
-        include_explain: body.explain.unwrap_or(false),
-        timeout: Duration::from_millis(body.timeout_ms.unwrap_or(5_000)),
+        include_source,
+        include_explain: explain,
+        timeout,
         page,
     })
 }
@@ -295,15 +421,91 @@ fn prepare_failure(
     failure.response()
 }
 
+type Reject = (StatusCode, Json<ApiError>);
+
+fn request_rejection<S: delivery::RankedSearchCtx>(
+    state: &S,
+    status: StatusCode,
+    error_type: &'static str,
+    reason: String,
+) -> Reject {
+    state
+        .prom()
+        .http_requests_total
+        .with_label_values(&["v2_search", status.as_str()])
+        .inc();
+    record_outcome(
+        state.prom(),
+        "validation",
+        reverse_rusty::QueryScope::default(),
+    );
+    ApiError::response(status, error_type, reason)
+}
+
+fn body_rejection<S: delivery::RankedSearchCtx>(state: &S, error: &JsonRejection) -> Reject {
+    let status = error.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE || status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+        let error_type = if status == StatusCode::PAYLOAD_TOO_LARGE {
+            "payload_too_large"
+        } else {
+            "unsupported_media_type"
+        };
+        return request_rejection(
+            state,
+            status,
+            error_type,
+            format!("invalid v2 search body: {error}"),
+        );
+    }
+    request_rejection(
+        state,
+        StatusCode::BAD_REQUEST,
+        "validation_error",
+        format!("invalid v2 search body: {error}"),
+    )
+}
+
+fn query_rejection<S: delivery::RankedSearchCtx>(state: &S, error: &QueryRejection) -> Reject {
+    request_rejection(
+        state,
+        StatusCode::BAD_REQUEST,
+        "validation_error",
+        format!("invalid v2 search query parameters: {error}"),
+    )
+}
+
+/// HTTP extractor boundary for local `POST /v2/_search`: supported ES/OS
+/// controls may live in the body or query string, and every unknown or
+/// malformed input returns the structured API error envelope.
+#[instrument(skip_all)]
+pub(crate) async fn v2_search_route(
+    State(state): State<Arc<AppState>>,
+    params: Result<Query<V2SearchParams>, QueryRejection>,
+    body: Result<Json<V2SearchBody>, JsonRejection>,
+) -> Result<Json<V2SearchResponse>, Reject> {
+    let Query(params) = params.map_err(|error| query_rejection(&*state, &error))?;
+    let Json(body) = body.map_err(|error| body_rejection(&*state, &error))?;
+    v2_search_inner(state, body, params).await
+}
+
 /// One-document, local-only, exact bounded top-K search.
+#[cfg(test)]
 #[instrument(skip_all)]
 pub(crate) async fn v2_search(
     State(state): State<Arc<AppState>>,
     Json(body): Json<V2SearchBody>,
-) -> Result<Json<V2SearchResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<V2SearchResponse>, Reject> {
+    v2_search_inner(state, body, V2SearchParams::default()).await
+}
+
+async fn v2_search_inner(
+    state: Arc<AppState>,
+    body: V2SearchBody,
+    params: V2SearchParams,
+) -> Result<Json<V2SearchResponse>, Reject> {
     let started = Instant::now();
-    let requested_scope = body.query_scope.unwrap_or_default();
-    let prepared = match prepare(body) {
+    let requested_scope = body.query_scope.or(params.query_scope).unwrap_or_default();
+    let prepared = match prepare(body, &params) {
         Ok(prepared) => prepared,
         Err(failure) => return Err(prepare_failure(&state.prom, failure, requested_scope)),
     };
@@ -352,7 +554,7 @@ pub(crate) async fn v2_search(
     // Arm only after decode/validation and include both permit queuing and compute.
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         record_outcome(&state.prom, "validation", options.query_scope);
-        return Err(validation("timeout_ms is too large"));
+        return Err(validation("timeout is too large"));
     };
     let enrichment_limit = state.max_ranked_enrichment_bytes;
     let mint_state = Arc::clone(&state);
@@ -380,20 +582,29 @@ pub(crate) async fn v2_search(
             })
         })
     };
-    delivery::drive(state, started, options, timeout, deadline, work).await
+    delivery::drive(state, started, options, timeout, deadline, true, work).await
 }
 
-/// Coordinator-mode exact bounded top-K plus current-view winner fetch. No
-/// partial response is possible: every routed position, every final source, and
-/// every requested explanation must succeed before the response is built.
+/// HTTP extractor boundary for coordinator `POST /v2/_search`.
 #[instrument(skip_all)]
-pub(crate) async fn cluster_v2_search(
+pub(crate) async fn cluster_v2_search_route(
     State(state): State<Arc<ClusterAppState>>,
-    Json(body): Json<V2SearchBody>,
-) -> Result<Json<V2SearchResponse>, (StatusCode, Json<ApiError>)> {
+    params: Result<Query<V2SearchParams>, QueryRejection>,
+    body: Result<Json<V2SearchBody>, JsonRejection>,
+) -> Result<Json<V2SearchResponse>, Reject> {
+    let Query(params) = params.map_err(|error| query_rejection(&*state, &error))?;
+    let Json(body) = body.map_err(|error| body_rejection(&*state, &error))?;
+    cluster_v2_search_inner(state, body, params).await
+}
+
+async fn cluster_v2_search_inner(
+    state: Arc<ClusterAppState>,
+    body: V2SearchBody,
+    params: V2SearchParams,
+) -> Result<Json<V2SearchResponse>, Reject> {
     let started = Instant::now();
-    let requested_scope = body.query_scope.unwrap_or_default();
-    let prepared = match prepare(body) {
+    let requested_scope = body.query_scope.or(params.query_scope).unwrap_or_default();
+    let prepared = match prepare(body, &params) {
         Ok(prepared) => prepared,
         Err(failure) => return Err(prepare_failure(&state.prom, failure, requested_scope)),
     };
@@ -484,37 +695,66 @@ pub(crate) async fn cluster_v2_search(
     };
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         record_outcome(&state.prom, "validation", options.query_scope);
-        return Err(validation("timeout_ms is too large"));
+        return Err(validation("timeout is too large"));
     };
     let enrichment_limit = state.max_ranked_enrichment_bytes;
     let cluster_state = Arc::clone(&state);
+    let mutation_fenced = include_source || include_explain;
     let work = move || {
-        // The cluster read lock is taken INSIDE the blocking closure (never
-        // across an await) and held for match + fetch + assembly, exactly as
-        // before the unification.
-        let cluster = cluster_state.cluster.read();
-        delivery::cluster_delivery(
-            &cluster,
-            mint.as_ref().map(|mint| mint.pit),
-            &program,
-            &filter,
-            &delivery::DeliverySpec {
-                title: &title,
-                options,
-                include_source,
-                include_explain,
-                enrichment_limit,
-                deadline,
-            },
-        )
-        .map(|mut result| {
+        let spec = delivery::DeliverySpec {
+            title: &title,
+            options,
+            include_source,
+            include_explain,
+            enrichment_limit,
+            deadline,
+        };
+        let result = if mutation_fenced {
+            // Do not occupy a shared Rayon worker while waiting for the
+            // request/write and direct-mutation fences. Once acquired, match,
+            // winner fetch, and explanation stay inside one coherent view.
+            let _write_guard = cluster_state.write_serial.lock();
+            let cluster = cluster_state.cluster.read();
+            let stable_view = cluster.consistent_read_view();
+            cluster_state.pool.install(|| {
+                delivery::cluster_delivery(
+                    &stable_view,
+                    mint.as_ref().map(|mint| mint.pit),
+                    &program,
+                    &filter,
+                    &spec,
+                )
+            })
+        } else {
+            // Source-free top-K retains the fully concurrent path.
+            let cluster = cluster_state.cluster.read();
+            delivery::cluster_delivery(
+                &*cluster,
+                mint.as_ref().map(|mint| mint.pit),
+                &program,
+                &filter,
+                &spec,
+            )
+        };
+        result.map(|mut result| {
             if let Some(mint) = &mint {
                 page::attach_next_cursor(&cluster_state.pit_tokens, mint, options, &mut result);
             }
             result
         })
     };
-    delivery::drive(state, started, options, timeout, deadline, work).await
+    // Fenced requests enter Rayon only after acquiring their mutation view;
+    // source-free requests retain the driver's ordinary pool installation.
+    delivery::drive(
+        state,
+        started,
+        options,
+        timeout,
+        deadline,
+        !mutation_fenced,
+        work,
+    )
+    .await
 }
 
 #[cfg(test)]

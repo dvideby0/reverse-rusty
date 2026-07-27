@@ -80,7 +80,7 @@ use handlers::{
     get_alias_feedback, get_aliases, get_doc, get_job, get_job_stream, get_settings, get_vocab,
     health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
     mpercolate, open_pit, prometheus_metrics, put_doc, put_settings, put_vocab,
-    reset_alias_feedback, search_route, stats, v2_mpercolate, v2_search,
+    reset_alias_feedback, search_route, stats, v2_mpercolate, v2_search_route,
     validate_and_apply_feedback,
 };
 use metrics::PrometheusMetrics;
@@ -420,7 +420,7 @@ async fn main() {
         .route("/", get(api_root))
         .route("/_doc/{id}", get(get_doc).put(put_doc).delete(delete_doc))
         .route("/_search", get(search_route).post(search_route))
-        .route("/v2/_search", post(v2_search))
+        .route("/v2/_search", post(v2_search_route))
         .route("/v2/_mpercolate", post(v2_mpercolate))
         .route("/v2/_pit", post(open_pit).delete(close_pit))
         .route("/_percolate/jobs", post(create_job))

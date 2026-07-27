@@ -52,7 +52,7 @@ fn one_location<T>(body: Option<T>, query: Option<T>, name: &str) -> Result<Opti
     }
 }
 
-fn parse_timeout(raw: &str) -> Result<Duration, String> {
+pub(super) fn parse_time_value(raw: &str) -> Result<Duration, String> {
     const UNITS: [(&str, u64); 7] = [
         ("nanos", 1),
         ("micros", 1_000),
@@ -104,7 +104,7 @@ pub(crate) fn resolve_search_controls(
     let explicit_timeout = input.timeout_ms.is_some() || es_timeout.is_some();
     let timeout = match (input.timeout_ms, es_timeout) {
         (Some(ms), None) => Duration::from_millis(ms),
-        (None, Some(raw)) => parse_timeout(&raw)?,
+        (None, Some(raw)) => parse_time_value(&raw)?,
         (None, None) => Duration::from_secs(30),
         (Some(_), Some(_)) => unreachable!("conflict rejected above"),
     };
@@ -129,15 +129,15 @@ mod tests {
     #[test]
     fn parses_es_timeout_units_and_rejects_ambiguity() {
         assert_eq!(
-            parse_timeout("2s").expect("seconds"),
+            parse_time_value("2s").expect("seconds"),
             Duration::from_secs(2)
         );
         assert_eq!(
-            parse_timeout("250ms").expect("milliseconds"),
+            parse_time_value("250ms").expect("milliseconds"),
             Duration::from_millis(250)
         );
-        assert!(parse_timeout("30").is_err());
-        assert!(parse_timeout("18446744073709551615d").is_err());
+        assert!(parse_time_value("30").is_err());
+        assert!(parse_time_value("18446744073709551615d").is_err());
 
         let result = resolve_search_controls(
             SearchControlInput {

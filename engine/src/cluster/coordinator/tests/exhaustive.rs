@@ -275,6 +275,74 @@ fn consistent_read_view_blocks_direct_replacement_until_source_is_read() {
         .contains(&5));
 }
 
+/// Ranked v2 delivery performs a bounded match and a later winner-source fetch.
+/// The public read view must cover both phases so a same-ID replacement cannot
+/// pair an old hit with the replacement query's source.
+#[test]
+fn consistent_read_view_fences_ranked_match_and_source_fetch() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![(5u64, "1994 topps".to_string())];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster");
+    let program = cluster
+        .compile_rank_program(&crate::rank::RankProgramSpec::default())
+        .expect("rank program");
+    let view = cluster.consistent_read_view();
+    let ranked = view
+        .try_percolate_filtered_top_k(
+            "1994 topps card",
+            &[],
+            crate::result::TopKOptions::default(),
+            &program,
+            None,
+        )
+        .expect("old-view ranked match");
+    assert_eq!(
+        ranked
+            .hits
+            .iter()
+            .map(|hit| hit.logical_id)
+            .collect::<Vec<_>>(),
+        vec![5]
+    );
+
+    let (write_started_tx, write_started_rx) = mpsc::sync_channel(0);
+    let (write_done_tx, write_done_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let write = scope.spawn(|| {
+            write_started_tx.send(()).expect("signal writer");
+            let result = cluster.upsert_query(5, "1995 fleer", 2);
+            write_done_tx.send(()).expect("signal completion");
+            result
+        });
+        write_started_rx.recv().expect("writer started");
+        assert!(
+            write_done_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "direct upsert crossed the ranked consistent read view"
+        );
+        assert_eq!(
+            view.fetch_ranked_sources_bounded(&ranked, 1_024, None)
+                .expect("old-view winner sources"),
+            vec!["1994 topps".to_string()]
+        );
+        drop(view);
+        write.join().expect("writer thread").expect("upsert");
+    });
+
+    assert_eq!(
+        cluster.get_source(5).expect("new source").as_deref(),
+        Some("1995 fleer")
+    );
+    assert!(!cluster
+        .percolate("1994 topps card")
+        .expect("new-view match")
+        .contains(&5));
+}
+
 /// A partially-applied re-placement can leave the old body live at its prior
 /// owner while the new body is already live at a different owner. Both rows
 /// legitimately pass ADR-109 ownership for a title containing both bodies, so

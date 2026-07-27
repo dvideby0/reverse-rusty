@@ -45,6 +45,57 @@ impl ClusterReadView<'_> {
             .percolate_filtered_ranked(title, filter, include_broad, rank)
     }
 
+    /// Exact bounded top-K matching under this mutation-frozen view.
+    pub fn try_percolate_filtered_top_k(
+        &self,
+        title: &str,
+        filter: &[(String, Vec<String>)],
+        options: crate::result::TopKOptions,
+        program: &crate::rank::CompiledRankProgram,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<crate::cluster::ClusterRankedMatch, crate::cluster::ClusterRankedError> {
+        self.cluster
+            .try_percolate_filtered_top_k(title, filter, options, program, deadline)
+    }
+
+    /// PIT-scoped bounded top-K matching under this mutation-frozen view.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_percolate_filtered_top_k_pit(
+        &self,
+        pit: crate::pit::PitId,
+        title: &str,
+        filter: &[(String, Vec<String>)],
+        options: crate::result::TopKOptions,
+        program: &crate::rank::CompiledRankProgram,
+        deadline: Option<std::time::Instant>,
+        now: std::time::Instant,
+    ) -> Result<crate::cluster::ClusterRankedMatch, crate::cluster::ClusterRankedError> {
+        self.cluster
+            .try_percolate_filtered_top_k_pit(pit, title, filter, options, program, deadline, now)
+    }
+
+    /// Fetch finalized winner sources while direct mutations remain frozen.
+    pub fn fetch_ranked_sources_bounded(
+        &self,
+        ranked: &crate::cluster::ClusterRankedMatch,
+        max_source_bytes: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<String>, crate::cluster::ClusterRankedError> {
+        self.cluster
+            .fetch_ranked_sources_bounded(ranked, max_source_bytes, deadline)
+    }
+
+    /// Compile a winner explanation under the same coordinator vocabulary.
+    pub fn explain_ranked_source(
+        &self,
+        logical_id: u64,
+        source: &str,
+        title: &str,
+    ) -> Option<crate::explain::ExplainDetail> {
+        self.cluster
+            .explain_ranked_source(logical_id, source, title)
+    }
+
     /// Fetch one live source under the same mutation-frozen view as matching.
     pub fn get_source(&self, logical: u64) -> Result<Option<String>, ShardError> {
         self.cluster.get_source(logical)

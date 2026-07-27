@@ -27,7 +27,9 @@ use crate::dto::{ApiError, HitSource};
 use crate::metrics::PrometheusMetrics;
 use crate::state::{AppState, ClusterAppState};
 
-use reverse_rusty::cluster::{ClusterEngine, ClusterRankedError};
+use reverse_rusty::cluster::{
+    ClusterEngine, ClusterRankedError, ClusterRankedMatch, ClusterReadView,
+};
 use reverse_rusty::exact::TagPredicate;
 use reverse_rusty::segment::MatchScratch;
 use reverse_rusty::{CompiledRankProgram, EngineSnapshot, RankedMatchError, TopKOptions};
@@ -330,35 +332,108 @@ pub(super) fn local_delivery(
 /// set — then the phase-two winner fetch under one global credit, then
 /// assembly. A stale PIT surfaces as `Backend(StalePit)` and rides the
 /// existing classification (409 via `v2_http_class`) with no new driver arms.
-pub(super) fn cluster_delivery(
-    cluster: &ClusterEngine,
+pub(super) trait RankedClusterRead {
+    fn top_k(
+        &self,
+        pit: Option<reverse_rusty::PitId>,
+        title: &str,
+        filter: &[(String, Vec<String>)],
+        options: TopKOptions,
+        program: &CompiledRankProgram,
+        deadline: Instant,
+    ) -> Result<ClusterRankedMatch, ClusterRankedError>;
+
+    fn fetch_sources(
+        &self,
+        ranked: &ClusterRankedMatch,
+        enrichment_limit: usize,
+        deadline: Instant,
+    ) -> Result<Vec<String>, ClusterRankedError>;
+
+    fn explain(
+        &self,
+        logical_id: u64,
+        source: &str,
+        title: &str,
+    ) -> Option<reverse_rusty::ExplainDetail>;
+}
+
+macro_rules! impl_ranked_cluster_read {
+    ($type:ty) => {
+        impl RankedClusterRead for $type {
+            fn top_k(
+                &self,
+                pit: Option<reverse_rusty::PitId>,
+                title: &str,
+                filter: &[(String, Vec<String>)],
+                options: TopKOptions,
+                program: &CompiledRankProgram,
+                deadline: Instant,
+            ) -> Result<ClusterRankedMatch, ClusterRankedError> {
+                match pit {
+                    None => self.try_percolate_filtered_top_k(
+                        title,
+                        filter,
+                        options,
+                        program,
+                        Some(deadline),
+                    ),
+                    Some(pit) => self.try_percolate_filtered_top_k_pit(
+                        pit,
+                        title,
+                        filter,
+                        options,
+                        program,
+                        Some(deadline),
+                        Instant::now(),
+                    ),
+                }
+            }
+
+            fn fetch_sources(
+                &self,
+                ranked: &ClusterRankedMatch,
+                enrichment_limit: usize,
+                deadline: Instant,
+            ) -> Result<Vec<String>, ClusterRankedError> {
+                self.fetch_ranked_sources_bounded(ranked, enrichment_limit, Some(deadline))
+            }
+
+            fn explain(
+                &self,
+                logical_id: u64,
+                source: &str,
+                title: &str,
+            ) -> Option<reverse_rusty::ExplainDetail> {
+                self.explain_ranked_source(logical_id, source, title)
+            }
+        }
+    };
+}
+
+impl_ranked_cluster_read!(ClusterEngine);
+impl_ranked_cluster_read!(ClusterReadView<'_>);
+
+pub(super) fn cluster_delivery<C: RankedClusterRead>(
+    cluster: &C,
     pit: Option<reverse_rusty::PitId>,
     program: &CompiledRankProgram,
     filter: &[(String, Vec<String>)],
     spec: &DeliverySpec<'_>,
 ) -> Result<DeliveryResult, DeliveryError<ClusterRankedError>> {
-    let ranked = match pit {
-        None => cluster.try_percolate_filtered_top_k(
-            spec.title,
-            filter,
-            spec.options,
-            program,
-            Some(spec.deadline),
-        ),
-        Some(pit) => cluster.try_percolate_filtered_top_k_pit(
+    let ranked = cluster
+        .top_k(
             pit,
             spec.title,
             filter,
             spec.options,
             program,
-            Some(spec.deadline),
-            Instant::now(),
-        ),
-    }
-    .map_err(DeliveryError::Backend)?;
+            spec.deadline,
+        )
+        .map_err(DeliveryError::Backend)?;
     let sources = if spec.include_source || spec.include_explain {
         cluster
-            .fetch_ranked_sources_bounded(&ranked, spec.enrichment_limit, Some(spec.deadline))
+            .fetch_sources(&ranked, spec.enrichment_limit, spec.deadline)
             .map_err(|error| match error {
                 ClusterRankedError::EnrichmentLimit { .. } => DeliveryError::EnrichmentLimit,
                 other => DeliveryError::Backend(other),
@@ -376,7 +451,7 @@ pub(super) fn cluster_delivery(
                 .next()
                 .ok_or(DeliveryError::SourceUnavailable(logical_id))
         },
-        |logical_id, source| cluster.explain_ranked_source(logical_id, source, spec.title),
+        |logical_id, source| cluster.explain(logical_id, source, spec.title),
     )?;
     if deadline_expired(spec.deadline) {
         return Err(DeliveryError::Deadline);
@@ -446,6 +521,7 @@ pub(super) enum DeliveryFailure<E> {
 pub(super) async fn run_bounded<S, T, F>(
     state: &Arc<S>,
     deadline: Instant,
+    install_pool: bool,
     work: F,
 ) -> Result<Result<T, tokio::task::JoinError>, tokio::time::error::Elapsed>
 where
@@ -463,7 +539,11 @@ where
         .await;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            state_inner.pool().install(work)
+            if install_pool {
+                state_inner.pool().install(work)
+            } else {
+                work()
+            }
         })
         .await
     };
@@ -552,6 +632,7 @@ pub(super) async fn drive<S, E, F>(
     options: TopKOptions,
     timeout: Duration,
     deadline: Instant,
+    install_pool: bool,
     work: F,
 ) -> Result<Json<V2SearchResponse>, (StatusCode, Json<ApiError>)>
 where
@@ -559,7 +640,7 @@ where
     E: RankedBackendError + std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<DeliveryResult, DeliveryError<E>> + Send + 'static,
 {
-    let delivered = match run_bounded(&state, deadline, work).await {
+    let delivered = match run_bounded(&state, deadline, install_pool, work).await {
         Ok(Ok(Ok(result))) => result,
         Ok(Ok(Err(error))) => {
             return Err(failure_response(
@@ -638,6 +719,8 @@ where
         );
     }
     Ok(Json(V2SearchResponse {
+        took: took_ms.floor() as u64,
+        timed_out: false,
         took_ms,
         complete: true,
         query_scope: options.query_scope,

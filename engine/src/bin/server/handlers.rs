@@ -41,7 +41,8 @@ pub(crate) use jobs::{
 };
 pub(crate) use pit::{close_pit, cluster_close_pit, cluster_open_pit, open_pit};
 pub(crate) use search::{
-    cluster_v2_mpercolate, cluster_v2_search, mpercolate, search_route, v2_mpercolate, v2_search,
+    cluster_v2_mpercolate, cluster_v2_search_route, mpercolate, search_route, v2_mpercolate,
+    v2_search_route,
 };
 pub(crate) use vocab::{
     get_settings, get_vocab, learn_and_apply_vocab, learn_vocab, put_settings, put_vocab,

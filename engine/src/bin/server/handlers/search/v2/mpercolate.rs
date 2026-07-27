@@ -127,7 +127,7 @@ where
     E: super::delivery::RankedBackendError + std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<BatchDelivered, DeliveryError<E>> + Send + 'static,
 {
-    let delivered = match run_bounded(&state, deadline, work).await {
+    let delivered = match run_bounded(&state, deadline, true, work).await {
         Ok(Ok(Ok(result))) => result,
         Ok(Ok(Err(error))) => {
             return Err(failure_response(

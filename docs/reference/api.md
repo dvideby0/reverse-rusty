@@ -180,7 +180,7 @@ The full method/path matrix is below.
 | `/_doc/{id}` | PUT | Register or atomically replace/create-only a query (`op_type=index|create`; strict `refresh`; ES/OS response metadata, ADR-117) |
 | `/_doc/{id}` | DELETE | Remove a stored query (strict `refresh`; ES/OS identity metadata; logical delete count; explicit partial-repair contract, ADR-125) |
 | `/_search` | GET/POST | Percolate one or more titles (strict native or ES/OS percolate request; per-slot `stats`, `explain`, `profile`, paging; ADR-126) |
-| `/v2/_search` | POST | Single-node or cluster, single-document exact bounded top-K + winner-only enrichment (ADR-107/108/110); accepts `pit`/`cursor` pages (ADR-113) |
+| `/v2/_search` | POST | Strict single-document exact bounded top-K with ES/OS control aliases, winner-only enrichment, and no partial results (ADR-107/108/110/127); accepts `pit`/`cursor` pages (ADR-113) |
 | `/v2/_pit` | POST/DELETE | Open / close a point-in-time snapshot for cursor pagination (in-process modes; remote assemblies 501 — ADR-113) |
 | `/v2/_mpercolate` | POST | Bounded top-K batch search; PIT/cursor pagination is rejected (ADR-112/113) |
 | `/_percolate/jobs` | POST | Start one exact exhaustive background match; returns 202 with status and stream URLs (ADR-114) |
@@ -288,8 +288,10 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   exact coordinator merge, honest thresholded totals, current-source fetch for final winners, and
   coordinator-compiled explanations. It defaults `include_source=true`, supports remote shards, and
   fails the whole response on timeout, stale placement, missing source, fetch/protocol failure, or
-  enrichment overflow; partial results are unsupported. Strict typed `rank_fields.priority` remains
-  signed and available after tag-dict freeze.
+  enrichment overflow; partial results are unsupported. Source/explanation requests fence direct
+  mutations through match and fetch, while source-free reads stay concurrent. ES/OS aliases
+  `_source`, numeric `track_total_hits`, and time-value `timeout` are strict body/query controls
+  (ADR-127). Strict typed `rank_fields.priority` remains signed and available after tag-dict freeze.
 - **Compatibility `include_source` defaults to `false`** (`_source` costs a per-hit source probe);
   explicitly requesting it on a remote cluster answers 501. ADR-110 source streaming applies only to
   `/v2/_search`.

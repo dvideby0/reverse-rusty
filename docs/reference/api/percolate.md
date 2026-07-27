@@ -2,14 +2,16 @@
 
 > Part of the [REST API reference](../api.md). Query language: [`dsl.md`](../dsl.md).
 
-## `POST /v2/_search` — Exact bounded ranked percolation (ADR-107/108/110)
+## `POST /v2/_search` — Exact bounded ranked percolation (ADR-107/108/110/127)
 
 Single-node and cluster-coordinator modes serve exact bounded top-K ranking without first
 materializing every matching ID. The route accepts exactly one `document`; batching and
 approximate `terminated` delivery reject loudly, as does `from` (deep pagination is the
 PIT/cursor flow below, ADR-113). Exact exhaustive `all` is deliberately a separate background
 job/stream surface below (ADR-114), not a giant `/v2/_search` response. Existing `/_search` and
-`/_mpercolate` behavior and response bytes are unchanged.
+`/_mpercolate` behavior and response bytes are unchanged. The v2 document is strict and contains
+only `title`; unknown top-level, document, PIT, rank, or boost fields are 400 errors rather than
+ignored input.
 
 ```json
 {
@@ -17,20 +19,22 @@ job/stream surface below (ADR-114), not a giant `/v2/_search` response. Existing
   "query_scope": "standard",
   "result_mode": "top_k",
   "size": 100,
-  "track_total_hits_up_to": 10000,
+  "track_total_hits": 10000,
   "rank": {
     "priority_field": "priority",
     "boosts": [{"key": "tenant", "value": "acme", "boost": 1000}]
   },
-  "include_source": true,
+  "_source": true,
   "explain": false,
   "allow_partial_results": false,
-  "timeout_ms": 5000
+  "timeout": "5s"
 }
 ```
 
 ```json
 {
+  "took": 0,
+  "timed_out": false,
   "took_ms": 0.31,
   "complete": true,
   "query_scope": "standard",
@@ -48,12 +52,25 @@ job/stream surface below (ADR-114), not a giant `/v2/_search` response. Existing
 }
 ```
 
+The familiar controls `size`, numeric `track_total_hits`, `query_scope`, `explain`, boolean
+`_source`, and `timeout` may be supplied in the JSON body or query string. The native aliases
+`track_total_hits_up_to` and `timeout_ms` work in either location; `include_source` remains
+body-only. Aliases are mutually exclusive, and a control in both body and query string is a 400
+even when the values agree. `timeout` is a non-negative integer plus `nanos`, `micros`, `ms`, `s`,
+`m`, `h`, or `d`. Boolean `track_total_hits` is deliberately rejected: `true` would promise an
+uncapped exact count and `false` would suppress count work, neither of which matches this
+endpoint's bounded threshold contract. Unknown query parameters, malformed values, or unsupported
+ES/OS search controls are also 400s.
+
 `complete=true` means the exact best K was computed over the selected visibility scope; it does not
 mean every true match appears in the page. Winner order is always `(score desc, _id asc)` and
 integer addition saturates at the `i64` bounds. Totals are exact while unique matches do not exceed
-`track_total_hits_up_to`; after the next distinct match the result is
+the selected total threshold; after the next distinct match the result is
 `{"value": threshold, "relation": "gte"}`. `size=0` returns no hits but still computes the
-thresholded total.
+thresholded total. `took` is whole milliseconds and `timed_out` is always false on a successful
+response; a deadline returns a structured 408 instead of partial hits. `took_ms` is Reverse Rusty's
+higher-precision extension. Native v2 keeps numeric `_id` and does not synthesize an `_index`,
+because stored queries are logical IDs rather than resources in a caller-selected index.
 
 Defaults are `result_mode="top_k"`, `query_scope="standard"`, `size=100`, typed `priority` ranking,
 `track_total_hits_up_to=10000`, `include_source=true`, `explain=false`,
@@ -70,14 +87,19 @@ shard totals are summed; `eq` is returned only when every shard is exact and the
 within the threshold. The coordinator then fetches **current** source only for final winners, grouped
 by owning position, and compiles explanations locally. A shard/fetch failure, missing source,
 placement-generation drift, timeout, or malformed reply fails the whole response—partial hits never
-escape. Enrichment is current-view even under a PIT (ADR-113): matching, scores, order, and totals
-are snapshot-stable, but `_source` text is read from the live store — a winner deleted after the
-PIT was opened fails its enriched page typed (`include_source: false` pages stay fully pinned).
+escape. A source/explanation request takes a request-scoped mutation-frozen cluster view across
+matching, winner fetch, and explanation; a same-ID replacement cannot splice its source onto an
+older hit. Source-free requests remain concurrent. Enrichment is current-view even under a PIT
+(ADR-113): matching, scores, order, and totals are snapshot-stable, but `_source` text is read from
+the live store as it exists when the request obtains that fence. A winner deleted before that point
+fails its enriched page typed (`include_source: false` pages stay fully pinned).
 
 Winner source text is charged once against `--max-ranked-enrichment-bytes` (default 16 MiB), even when
 both `_source` and explanation use it. Exceeding the cap returns `413 rank_enrichment_limit` with no
 partial response. Cluster transport/protocol failures return 502; stale placement or unavailable
-cluster configuration returns 503. `allow_partial_results=true` remains a 400.
+cluster configuration returns 503. `allow_partial_results=true` remains a 400. Malformed JSON uses
+the same structured 400 envelope; missing/wrong content type remains 415 and an oversized body
+remains 413 rather than being flattened into a generic validation status.
 
 The optional rank program supports only `priority_field="priority"` plus additive integer tag boosts.
 Unknown rank fields return `unsupported_rank_field`. `result_mode="all"` or `"terminated"`,

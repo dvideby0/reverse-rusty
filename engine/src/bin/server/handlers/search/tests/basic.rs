@@ -141,7 +141,7 @@ async fn search_rejects_unknown_and_duplicate_controls_as_json_400s() {
 }
 
 #[test]
-fn compatibility_document_strictness_does_not_change_shared_endpoint_dtos() {
+fn compatibility_document_strictness_does_not_change_legacy_batch_dto() {
     let mpercolate: MPercolateBody = serde_json::from_value(serde_json::json!({
         "documents": [{"title": "topps chrome", "sku": "ABC-1"}]
     }))
@@ -150,11 +150,6 @@ fn compatibility_document_strictness_does_not_change_shared_endpoint_dtos() {
         mpercolate.documents.expect("documents")[0].title,
         "topps chrome"
     );
-
-    let _: V2SearchBody = serde_json::from_value(serde_json::json!({
-        "document": {"title": "topps chrome", "sku": "ABC-1"}
-    }))
-    .expect("v2 product document remains permissive");
 }
 
 #[tokio::test]
