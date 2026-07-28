@@ -24,6 +24,9 @@ use crate::dto::ApiError;
 use crate::metrics::PrometheusMetrics;
 use crate::state::{AppState, RequestCtx};
 
+mod document;
+use document::{SynonymRule, SynonymsSet};
+
 /// Alias files are bounded independently from the server's bulk-ingest ceiling.
 pub(crate) const ALIAS_IMPORT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const ALIAS_IMPORT_BODY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -54,23 +57,6 @@ struct AliasImportDocument {
     /// OpenSearch synonym-filter spelling. Reverse Rusty equivalences expand.
     #[serde(default)]
     expand: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SynonymsSet {
-    One(SynonymRule),
-    Many(Vec<SynonymRule>),
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SynonymRule {
-    /// Accepted for Elasticsearch request familiarity. Reverse Rusty's
-    /// governed registry keys canonical form groups rather than rule IDs.
-    #[serde(default)]
-    id: Option<String>,
-    synonyms: String,
 }
 
 impl AliasImportDocument {

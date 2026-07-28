@@ -325,6 +325,31 @@ async fn transport_and_solr_rules_are_strict_and_bounded() {
         assert_error(status, &headers, &bytes, "validation_error");
     }
 
+    let too_many_rules = serde_json::json!({
+        "synonyms_set": (0..=reverse_rusty::vocab::MAX_ALIAS_IMPORT_RULES)
+            .map(|index| serde_json::json!({
+                "id": format!("rule-{index}"),
+                "synonyms": "a, b"
+            }))
+            .collect::<Vec<_>>()
+    })
+    .to_string();
+    let (status, headers, bytes) = send(
+        &state,
+        Method::POST,
+        "/_vocab/aliases/import",
+        too_many_rules,
+        Some("application/json"),
+        ALIAS_IMPORT_BODY_LIMIT,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body = assert_error(status, &headers, &bytes, "validation_error");
+    assert!(body["error"]["reason"]
+        .as_str()
+        .expect("reason")
+        .contains("at most 10000"));
+
     let (status, headers, bytes) = send(
         &state,
         Method::POST,
