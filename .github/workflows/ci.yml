@@ -164,7 +164,7 @@ jobs:
   gate:
     name: gate + benchmarks
     needs: [core-gate, distributed-gate]
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require every code-gate lane

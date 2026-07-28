@@ -36,10 +36,9 @@ release-plus-LTO compilation.
    workflow, but does not save test artifacts back into that cache.
 
 3. A small aggregate job retains the established required status name `gate + benchmarks`. It runs
-   after both lanes, including after an ordinary lane failure, and succeeds only when both lane
-   results are `success`. A canceled workflow stays canceled rather than starting new summary work.
-   This preserves branch-protection continuity while ensuring the newly separate distributed lane
-   cannot become advisory.
+   after both lanes regardless of success, failure, or cancellation, and succeeds only when both
+   lane results are `success`. This preserves branch-protection continuity while ensuring a failed
+   or canceled lane—and especially the newly separate distributed lane—cannot become advisory.
 
 4. ADR-124's performance contract, the local deploy smoke, and exploratory benchmark captures stay
    on the core pinned runner after core validation. They never execute concurrently with the timing
