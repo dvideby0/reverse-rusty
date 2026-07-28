@@ -24,7 +24,7 @@ fn test_state() -> Arc<AppState> {
         EngineConfig::default(),
     );
     engine
-        .try_insert_live("1994 topps", 7, 1)
+        .try_insert_live("2024 acme keyboard", 7, 1)
         .expect("fixture insert");
     let snapshot = Arc::new(engine.snapshot());
     let pool = rayon::ThreadPoolBuilder::new()
