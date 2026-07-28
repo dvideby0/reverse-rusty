@@ -138,6 +138,14 @@ fn identical_alias_retry_accepts_an_exact_just_published_manifest() {
         .expect("publish the current-generation manifest");
     let published_epoch = cluster.epoch();
     cluster.epoch.store(published_epoch - 1, Ordering::Relaxed);
+    // Model `write_cluster_manifest` returning after rename but before the
+    // parent directory sync: the attempted manifest is visible, while the
+    // process still remembers only the predecessor as committed.
+    let predecessor = cluster.pending_alias_import_predecessor.clone();
+    *cluster
+        .committed_manifest
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = predecessor;
 
     let retry = cluster
         .import_alias_synonyms("package, pkg")
@@ -153,6 +161,11 @@ fn identical_alias_retry_accepts_an_exact_just_published_manifest() {
         cluster.pending_alias_import_predecessor.is_none(),
         "successful repair clears the retained predecessor identity"
     );
+    let later = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("the adopted manifest must become the committed identity");
+    assert!(!later.applied);
+    assert_eq!(later.recompiled, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

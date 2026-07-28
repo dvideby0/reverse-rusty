@@ -44,10 +44,9 @@ type LiveTaggedMetadata = (
     crate::ownership::QueryPlacement,
 );
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AliasImportManifestState {
     Committed,
-    PublishedCurrent(u64),
+    PublishedCurrent(crate::storage::ClusterManifest),
     ImmediatePredecessor,
 }
 
@@ -337,7 +336,7 @@ impl ClusterEngine {
 
         match manifest_state {
             AliasImportManifestState::Committed => {}
-            AliasImportManifestState::PublishedCurrent(epoch) => {
+            AliasImportManifestState::PublishedCurrent(manifest) => {
                 let dir = self.data_dir.as_ref().ok_or_else(|| {
                     ShardError::Log(
                         "alias-import retry lost its durable directory before sync".into(),
@@ -350,7 +349,11 @@ impl ClusterEngine {
                             "syncing the published alias-import manifest directory: {error}"
                         ))
                     })?;
-                self.epoch.store(epoch, Ordering::Relaxed);
+                self.epoch.store(manifest.epoch, Ordering::Relaxed);
+                *self
+                    .committed_manifest
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(manifest);
             }
             AliasImportManifestState::ImmediatePredecessor => self.checkpoint()?,
         }
@@ -441,7 +444,7 @@ impl ClusterEngine {
                 && (pending_manifest.as_ref() == Some(&manifest)
                     || committed_manifest.as_ref() == Some(&manifest))
             {
-                return Ok(AliasImportManifestState::PublishedCurrent(manifest.epoch));
+                return Ok(AliasImportManifestState::PublishedCurrent(manifest));
             }
             if manifest.epoch == self.epoch() && committed_manifest.as_ref() == Some(&manifest) {
                 return Ok(AliasImportManifestState::Committed);
