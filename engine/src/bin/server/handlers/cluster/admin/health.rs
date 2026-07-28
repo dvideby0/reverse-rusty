@@ -5,12 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    body::Bytes,
-    extract::{
-        rejection::{BytesRejection, QueryRejection},
-        Query, State,
-    },
-    http::{Method, StatusCode},
+    extract::{rejection::QueryRejection, Query, State},
+    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
@@ -20,8 +16,8 @@ use tracing::{error, instrument, warn};
 use reverse_rusty::cluster::{ClusterEngine, ShardError};
 
 use crate::handlers::admin::{
-    finish_health_response, validate_health_method, validate_health_request, wait_delay,
-    HealthAdmission, HealthParams, HealthStatus, HEALTH_ENDPOINT,
+    finish_health_response, validate_health_request, wait_delay, HealthParams, HealthStatus,
+    HealthTransport, HEALTH_ENDPOINT,
 };
 use crate::state::ClusterAppState;
 
@@ -52,20 +48,15 @@ struct ClusterHealthResponse {
 #[instrument(skip_all)]
 pub(crate) async fn cluster_health(
     State(state): State<Arc<ClusterAppState>>,
-    method: Method,
     params: Result<Query<HealthParams>, QueryRejection>,
-    _admission: HealthAdmission,
-    body: Result<Bytes, BytesRejection>,
+    transport: HealthTransport,
 ) -> Response {
     let _duration = state
         .prom
         .http_request_duration
         .with_label_values(&[HEALTH_ENDPOINT])
         .start_timer();
-    let head = match validate_health_method(&state.prom, &method) {
-        Ok(head) => head,
-        Err(response) => return *response,
-    };
+    let (_permit, head, body) = transport.into_parts();
     let request = match validate_health_request(&state.prom, params, body, head) {
         Ok(request) => request,
         Err(response) => return *response,

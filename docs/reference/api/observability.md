@@ -379,7 +379,9 @@ parameters and unsupported values, returns structured 400/405/413 errors, sends
 response. `GET` and `HEAD` remain open even with `--auth-protect-reads` so orchestrator probes do
 not need bearer credentials. Admission occurs before body buffering and allows at most eight
 concurrent health requests; additional work fails immediately with 429, `Retry-After: 1`, and a
-structured `rejected_execution_exception`. The cap therefore also covers slow request bodies.
+structured `rejected_execution_exception`. The cap therefore also covers slow request bodies, and
+body buffering has an independent 250 ms deadline. A body that does not complete by then returns
+408 with a structured `request_timeout`, releasing its health permit.
 
 Supported query controls:
 

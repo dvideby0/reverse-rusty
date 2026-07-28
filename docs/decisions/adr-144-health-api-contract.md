@@ -32,7 +32,9 @@ engine does not have.
 - Admit at most eight concurrent health requests before buffering their bodies. Additional work
   fails immediately with 429 and `Retry-After: 1`, independently bounding the open health
   surface's share of the server-wide request and stats limits even when a client streams a body
-  slowly. The permit covers the entire request, including coordinator probes and status waits.
+  slowly. Body buffering while admitted has a separate 250 ms deadline and fails with a structured
+  408, so stalled clients cannot retain all eight permits indefinitely. The permit covers the
+  entire request, including coordinator probes and status waits.
 - Return `mode` and `timed_out` in both payloads. Green and yellow return 200, native red returns
   503, and an expired coordinator observation or unmet `wait_for_status` returns 408 with
   `timed_out=true`. Preserve the last completed observation when a later coordinator probe reaches
@@ -59,7 +61,7 @@ Operators get one strict readiness contract in standalone and coordinator modes,
 familiar way to wait during rollout without polling client-side. Red is now reliably fail-loud at
 the HTTP layer, and coordinator green attests to both serving positions and a complete committed
 topology rather than only successful count probes. At most eight health requests can occupy global
-request slots.
+request slots, and an incomplete request body can hold one of those slots for at most 250 ms.
 
 The endpoint remains deliberately native. ES/OpenSearch clients that require
 `/_cluster/health` allocation fields cannot treat it as a drop-in replacement. A timed-out

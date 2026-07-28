@@ -180,6 +180,47 @@ async fn admission_precedes_buffering_an_untrusted_request_body() {
     assert_eq!(body["error"]["type"], "rejected_execution_exception");
 }
 
+#[tokio::test]
+async fn slow_body_times_out_and_releases_health_admission() {
+    let state = test_state();
+    let pending_body = Body::from_stream(tokio_stream::pending::<Result<Bytes, Infallible>>());
+
+    let (status, headers, bytes) = tokio::time::timeout(
+        Duration::from_secs(1),
+        send(
+            &state,
+            HEALTH_BODY_LIMIT,
+            Method::GET,
+            "/_health",
+            pending_body,
+        ),
+    )
+    .await
+    .expect("the body read has its own deadline");
+
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+    assert_eq!(body["error"]["type"], "request_timeout");
+    assert_eq!(
+        state.health_permits.available_permits(),
+        crate::state::MAX_CONCURRENT_HEALTH_REQUESTS
+    );
+
+    let (status, _, _) = send(
+        &state,
+        HEALTH_BODY_LIMIT,
+        Method::GET,
+        "/_health",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn status_reached_after_the_deadline_is_still_timed_out() {
     let state = test_state();

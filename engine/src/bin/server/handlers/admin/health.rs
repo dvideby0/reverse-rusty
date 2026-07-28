@@ -5,7 +5,6 @@
 //! native path and payload, while adopting the familiar `wait_for_status` and
 //! `timeout` controls whose behavior maps exactly.
 
-use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,9 +12,9 @@ use axum::{
     body::{Body, Bytes},
     extract::{
         rejection::{BytesRejection, QueryRejection},
-        FromRequestParts, Query, State,
+        FromRequest, Query, Request, State,
     },
-    http::{header, request::Parts, HeaderValue, Method, StatusCode},
+    http::{header, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -29,6 +28,7 @@ use crate::state::{AppState, RequestCtx};
 
 pub(crate) const HEALTH_ENDPOINT: &str = "health";
 pub(crate) const HEALTH_BODY_LIMIT: usize = 64 * 1024;
+pub(crate) const HEALTH_BODY_READ_TIMEOUT: Duration = Duration::from_millis(250);
 pub(crate) const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -149,31 +149,50 @@ struct HealthResponse {
     stale_segments: usize,
 }
 
-/// Admission extracted before Axum buffers the request body.
+/// Method validation, admission, and bounded body extraction for `/_health`.
 ///
 /// `/_health` intentionally bypasses read authentication, so its independent
-/// cap must be held before the final `Bytes` extractor can wait on a slow body.
-/// The permit remains in the handler future until the response is complete.
-pub(crate) struct HealthAdmission {
-    _permit: OwnedSemaphorePermit,
+/// cap must be held before buffering an untrusted body. Body extraction itself
+/// has a short deadline so a handful of slow clients cannot retain every permit
+/// indefinitely. The permit then remains held until the response is complete.
+pub(crate) struct HealthTransport {
+    permit: OwnedSemaphorePermit,
+    head: bool,
+    body: Result<Bytes, BytesRejection>,
 }
 
-impl<S> FromRequestParts<Arc<S>> for HealthAdmission
+impl HealthTransport {
+    pub(crate) fn into_parts(self) -> (OwnedSemaphorePermit, bool, Result<Bytes, BytesRejection>) {
+        (self.permit, self.head, self.body)
+    }
+}
+
+impl<S> FromRequest<Arc<S>> for HealthTransport
 where
     S: RequestCtx,
 {
     type Rejection = Response;
 
-    fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<S>,
-    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        let head = parts.method == Method::HEAD;
-        std::future::ready(
-            try_acquire_health_work(state.health_permits(), state.prom(), head)
-                .map(|permit| Self { _permit: permit })
-                .map_err(|response| *response),
+    async fn from_request(request: Request, state: &Arc<S>) -> Result<Self, Self::Rejection> {
+        let head =
+            validate_health_method(state.prom(), request.method()).map_err(|response| *response)?;
+        let permit = try_acquire_health_work(state.health_permits(), state.prom(), head)
+            .map_err(|response| *response)?;
+        let body = tokio::time::timeout(
+            HEALTH_BODY_READ_TIMEOUT,
+            Bytes::from_request(request, state),
         )
+        .await
+        .map_err(|_| {
+            health_rejection(
+                state.prom(),
+                StatusCode::REQUEST_TIMEOUT,
+                "request_timeout",
+                "health request body did not complete within 250ms",
+                head,
+            )
+        })?;
+        Ok(Self { permit, head, body })
     }
 }
 
@@ -184,20 +203,15 @@ where
 /// with `timed_out=true`.
 pub(crate) async fn health(
     State(state): State<Arc<AppState>>,
-    method: Method,
     params: Result<Query<HealthParams>, QueryRejection>,
-    _admission: HealthAdmission,
-    body: Result<Bytes, BytesRejection>,
+    transport: HealthTransport,
 ) -> Response {
     let _duration = state
         .prom
         .http_request_duration
         .with_label_values(&[HEALTH_ENDPOINT])
         .start_timer();
-    let head = match validate_health_method(&state.prom, &method) {
-        Ok(head) => head,
-        Err(response) => return *response,
-    };
+    let (_permit, head, body) = transport.into_parts();
     let request = match validate_health_request(&state.prom, params, body, head) {
         Ok(request) => request,
         Err(response) => return *response,
