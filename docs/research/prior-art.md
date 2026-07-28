@@ -8,8 +8,8 @@ self-tuning classification — is [`broad-scaling-prior-art.md`](broad-scaling-p
 
 ## The problem in one paragraph
 
-We have ~100M *stored queries* expressing product intent ("1994 Upper Deck Michael Jordan
-SP Preview PSA 10, not auto, not BGS/SGC"). A stream of ~10M short *listing titles* per
+We have ~100M *stored queries* expressing product intent ("2024 North Star wireless mouse,
+pro or premium, not refurbished"). A stream of ~10M short *listing titles* per
 hour arrives (~2.8k titles/sec). For each title we must return the set of stored queries it
 satisfies, in near-real-time, with **zero false negatives** for supported semantics, while
 queries are updated frequently. This is the classic *reverse search / percolation /
@@ -65,9 +65,9 @@ across multiple "passes" / fields, and supports a minimum term weight so that ul
 - Monitor builds a **fresh Lucene index per document**. For 2.8k short titles/sec that per-doc
   indexing overhead (analysis, posting construction, term-dict build, segment teardown) is pure
   waste. We replace it with **allocation-free feature extraction** into dense integer IDs.
-- It gates on **raw terms**. Raw terms are a weak signal for product titles: `10` matches grade,
-  year suffix, lot count, set number… We gate on **semantic features** (`grade:10`,
-  `grader_grade:psa10`) which are far more selective.
+- It gates on **raw terms**. Raw terms such as `new`, `pro`, or `wireless` occur in many unrelated
+  product titles. With caller-supplied vocabulary we can gate on canonical features such as
+  `brand:north_star` and `entity:wireless_mouse`, which are more selective.
 - A single anchor per conjunction is *minimal* but not *cost-optimal* — it can still land on a
   hot term. We pick anchors (signatures) by **expected candidate cost**, not just by existence.
 
@@ -219,17 +219,17 @@ linear pass (NFA/DFA automaton). *daachorse* implements Aho-Corasick over a **co
 trie: ~12 bytes/state, constant-time transitions, and reportedly **3.0–5.2× faster** matching with
 **56–60% less memory** than `aho-corasick` on a 675K-pattern dictionary.
 
-**Why it matters here.** Title normalization must extract **aliases / multi-word entities**
-("Upper Deck" → `brand:upper_deck`, "PSA GEM MT 10" → `grader_grade:psa10`, "Michael Jordan" →
-`player:michael_jordan`) at ingestion speed over a potentially large alias dictionary, in one pass,
+**Why it matters here.** Title normalization must extract configured **aliases / multi-word entities**
+("North Star" → `brand:north_star`, "Wireless Mouse" →
+`entity:wireless_mouse`) at ingestion speed over a potentially large alias dictionary, in one pass,
 allocation-free.
 
 **What we borrow:**
 
 1. **A double-array Aho-Corasick automaton as the alias/entity extractor**, scanning normalized
    tokens once to emit dense feature IDs — no per-title hash-map lookups per token, no backtracking.
-2. **Leftmost-longest match semantics** so "PSA GEM MT 10" wins over "PSA" + "10" when both are
-   registered, giving deterministic normalization.
+2. **Leftmost-longest match semantics** so `new york city` wins over the nested `new york` in the
+   canonical view when both are registered, giving deterministic normalization.
 3. The compact-state lesson: keep the automaton small and cache-resident so it stays hot across the
    2.8k-titles/sec stream.
 

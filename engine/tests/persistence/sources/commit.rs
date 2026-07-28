@@ -15,7 +15,7 @@ fn bulk_ingest_persists_sources_across_reopen() {
 
     let batch = vec![
         (100u64, "product omega preview".to_string()),
-        (101u64, "fernando tatis jr new".to_string()),
+        (101u64, "portable monitor new".to_string()),
     ];
     let report = engine.bulk_ingest(&batch);
     assert_eq!(report.ingested, 2);

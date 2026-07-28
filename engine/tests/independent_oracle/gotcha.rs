@@ -191,11 +191,11 @@ fn diacritic_fold() {
     check(
         def_norm,
         def_vocab,
-        "jokic",
+        "cesky",
         &[
-            ("Jokić", true),
-            ("JOKIĆ", true),
-            ("jokic", true),
+            ("Český", true),
+            ("ČESKÝ", true),
+            ("cesky", true),
             ("product gamma", false),
         ],
     );

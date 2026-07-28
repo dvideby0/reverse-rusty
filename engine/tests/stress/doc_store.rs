@@ -28,7 +28,7 @@ fn doc_store_consistent_through_lifecycle() {
             let text = match i % 5 {
                 0 => format!("entity{i} 1994 north star appliance item"),
                 1 => format!("entity{i} (acme,vertex,summit) new -(manual)"),
-                2 => format!("entity{i} 1986 vertex (alpha,beta) -(replica,lot)"),
+                2 => format!("entity{i} 1986 vertex (red,blue) -(used,lot)"),
                 3 => format!("(entity{i},entity{i}) acme 1997 item"),
                 _ => format!("entity{i} appliance item"),
             };

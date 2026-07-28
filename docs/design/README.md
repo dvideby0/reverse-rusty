@@ -10,7 +10,7 @@ behavior; [`../CHANGELOG.md`](../CHANGELOG.md) records what shipped, and
 ## Topic files
 
 - [`normalization.md`](normalization.md) — query DSL, the shared query/title normalizer, the feature
-  dictionary, and the normalizer hardening from real eBay data.
+  dictionary, and marketplace title-shape hardening.
 - [`matching.md`](matching.md) — the signature-cover optimizer, the candidate index, the integer-only
   exact matcher, two-axis placement classes (A/B/C/D/H), and explain tooling.
 - [`ingestion-and-updates.md`](ingestion-and-updates.md) — immutable segments + hot delta + tombstones,

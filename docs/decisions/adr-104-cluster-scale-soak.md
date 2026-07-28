@@ -69,7 +69,7 @@
      false invariant.
 
   6. **Sizing + knobs.** Defaults 20M queries / 50k titles / K=8, seed `0x2000_0000`, generator
-     pools per the clusterbench convention (`Q/40` players, `Q/100` sets) so fan-out numbers are
+     pools per the clusterbench convention (`Q/40` entities, `Q/100` collections) so fan-out numbers are
      comparable in convention to the pinned 100k invariants. Every dimension is env-overridable
      (`RR_CLUSTER_SOAK_QUERIES` / `_TITLES` / `_SHARDS` / `_DIR`) so the harness smokes at 200k in
      ~3s and reruns anywhere. Phase order is memory-deliberate: the cluster (with its clone-heavy

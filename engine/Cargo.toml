@@ -2,7 +2,7 @@
 name = "reverse-rusty"
 version = "0.1.0"
 edition = "2021"
-description = "Domain-aware reverse product-query matcher. daachorse for multiword aliases, roaring for large postings, rayon for parallel matching."
+description = "Generic reverse product-query matcher. daachorse for multiword aliases, roaring for large postings, rayon for parallel matching."
 # Licensed under the MIT License — a permissive, widely-recognized license
 # (reuse permitted with attribution) that is compatible with the all-permissive
 # (MIT / Apache-2.0 / BSD) dependency tree. Full text in ../LICENSE.

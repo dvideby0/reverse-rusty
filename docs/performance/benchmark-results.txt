@@ -323,14 +323,16 @@ CAPTURE LOG  (newest first — append a block per run; lead with the machine)
       pin (B=223, C=212 ~= 218/shape) and the ADR-104 soak (stored B=350,192 = ~43.8k x8
       replicas, ADR-080) both fit the per-iteration reading exactly.
     * The fat 43,533-entry MAIN posting is the SHARED CLASS-B ARITY-2 PAIR posting of the
-      ~43.5k identical "psa 10" broad-shape queries (B=43,589 ~= that one shape), NOT a
-      rank-#65 class-A anchor. The per-title selective collapse (13.4k t/s/core; p95
+      ~43.5k identical fixed two-token broad-shape queries (B=43,589 ~= that one shape),
+      NOT a rank-#65 class-A anchor. The retired fixture supplied the measured labels; the
+      current domain-neutral generator preserves this branch shape as "wireless pro". The
+      per-title selective collapse (13.4k t/s/core; p95
       cand/title 43,701) is titles bearing BOTH pair tokens scanning that one posting.
       Consequences: (a) this corpus's realtime defect is an IDENTICAL-QUERY CONCENTRATION —
       the dedup lever's case (spec §5.1) and the ADR-080 deferred B-arity-2 cost note — and
       theta-reclassification (lever 2) does NOT move class B, so the hot tier alone will not
       recover this corpus's 32x; (b) the genuine lever-2 population here (non-top64 anchors
-      past theta=1024) is would_be_hot = 782 (Zipf-head players), i.e. the top-64-cliff
+      past theta=1024) is would_be_hot = 782 (Zipf-head entities), i.e. the top-64-cliff
       defect remains real by construction but is nearly absent from THIS synthetic corpus.
       Increment-1 acceptance needs recalibration against these facts (a fat-anchor corpus
       variant, or acceptance via the oracle stack + hot-empty pins + a constructed bench).
@@ -410,85 +412,85 @@ CAPTURE LOG  (newest first — append a block per run; lead with the machine)
   updates              : ~730–825k/s/core, immediate (epoch) visibility
 
 ============================================================================================
-APPENDIX — NPMI corpus-feature learner capture (2026-05-27, 4-core; preserved here as the only
-recorded copy of this one-time run).  Reproduce: learn 500000 50 0.30.  This is a
-one-time demonstration that every anchor the matcher needs is derivable from query
-co-occurrence statistics — not a recurring benchmark.
+APPENDIX — RETIRED NPMI corpus-feature learner capture (2026-05-27, 4-core)
 ============================================================================================
+This was a one-time run over the pre-reset fixture: `learn 500000 50 0.30`. Source labels were
+intentionally anonymized during the domain-neutral prototype reset, but the measured counts,
+binding strengths, and selectivity evidence are retained here rather than overwritten.
+
 corpus: 500000 queries, learning with no hand-coded vocabulary
 params: min_count=50, npmi_tau=0.3
+iteration 1: 89 bigrams discovered; 30 had all-alphabetic parts
+iteration 2: 101 longer entities discovered
+distinct unigrams: 17196
 
-=== iteration 1: discovered 89 multi-token entities (bigrams) ===
-entity (by frequency)              count     npmi
-psa_8                              86317    0.736
-upper_deck                         63696    1.073
-psa_9                              35917    0.592
-bgs_8                              35206    0.589
-psa_9.5                            27369    0.558
-sgc_8                              27341    0.560
-psa_10                             24115    0.547
-base_psa                          17449    0.415
-insert_psa                        17396    0.414
-rc_psa                            17263    0.411
-sp_psa                            17194    0.411
-preview_psa                       17190    0.412
-refractor_psa                     17146    0.412
-rookie_psa                        17036    0.406
-bgs_9                             14862    0.497
-bgs_9.5                           11471    0.476
-sgc_9                             11311    0.472
-bgs_10                             9614    0.456
+iteration-1 leading rows (original frequency order; labels anonymized)
+row                                  count     npmi
+fixture_bigram_01                    86317    0.736
+fixture_bigram_02                    63696    1.073
+fixture_bigram_03                    35917    0.592
+fixture_bigram_04                    35206    0.589
+fixture_bigram_05                    27369    0.558
+fixture_bigram_06                    27341    0.560
+fixture_bigram_07                    24115    0.547
+fixture_bigram_08                    17449    0.415
+fixture_bigram_09                    17396    0.414
+fixture_bigram_10                    17263    0.411
+fixture_bigram_11                    17194    0.411
+fixture_bigram_12                    17190    0.412
+fixture_bigram_13                    17146    0.412
+fixture_bigram_14                    17036    0.406
+fixture_bigram_15                    14862    0.497
+fixture_bigram_16                    11471    0.476
+fixture_bigram_17                    11311    0.472
+fixture_bigram_18                     9614    0.456
 
---- of which 30 are name-like (all-alphabetic), top by binding strength (npmi): ---
-entity                             count     npmi
-upper_deck                         63696    1.073
-michael_jordan                      4239    1.043
-lebron_james                        1811    1.038
-kobe_bryant                         1402    1.037
-ken_griffey                         1162    1.036
-wayne_gretzky                       1002    1.035
-tom_brady                            986    1.035
-mike_trout                           858    1.035
-patrick_mahomes                      816    1.034
-base_psa                           17449    0.415
-insert_psa                         17396    0.414
-preview_psa                        17190    0.412
+all-alphabetic subset, leading rows by binding strength (labels anonymized)
+row                                  count     npmi
+fixture_alpha_01                     63696    1.073
+fixture_alpha_02                      4239    1.043
+fixture_alpha_03                      1811    1.038
+fixture_alpha_04                      1402    1.037
+fixture_alpha_05                      1162    1.036
+fixture_alpha_06                      1002    1.035
+fixture_alpha_07                       986    1.035
+fixture_alpha_08                       858    1.035
+fixture_alpha_09                       816    1.034
+fixture_alpha_10                     17449    0.415
+fixture_alpha_11                     17396    0.414
+fixture_alpha_12                     17190    0.412
 
-=== iteration 2: discovered 101 longer entities (trigram+) ===
-entity (by frequency)              count     npmi
-base_psa_8                          8791    0.510
-insert_psa_8                        8673    0.507
-sp_psa_8                            8662    0.508
-rc_psa_8                            8649    0.507
-preview_psa_8                       8642    0.508
-refractor_psa_8                     8609    0.507
-rookie_psa_8                        8343    0.500
-base_psa_9                          3639    0.441
-insert_psa_9                        3617    0.440
-rookie_psa_9                        3605    0.442
+iteration-2 leading rows (original frequency order; labels anonymized)
+row                                  count     npmi
+fixture_long_01                       8791    0.510
+fixture_long_02                       8673    0.507
+fixture_long_03                       8662    0.508
+fixture_long_04                       8649    0.507
+fixture_long_05                       8642    0.508
+fixture_long_06                       8609    0.507
+fixture_long_07                       8343    0.500
+fixture_long_08                       3639    0.441
+fixture_long_09                       3617    0.440
+fixture_long_10                       3605    0.442
 
-=== selectivity gain: learned phrase vs its parts (lower df = better anchor) ===
-learned entity               df(phrase)   min df(part)     gain x
-psa_8                             86317         148864       1.7x
-upper_deck                        63696          63696       1.0x
-psa_9                             35917          62090       1.7x
-bgs_8                             35206          71153       2.0x
-psa_9.5                           27369          47476       1.7x
-sgc_8                             27341          54651       2.0x
-psa_10                            24115          41092       1.7x
-base_psa                          17449          49819       2.9x
-insert_psa                        17396          49783       2.9x
-rc_psa                            17263          49985       2.9x
-sp_psa                            17194          49739       2.9x
-preview_psa                       17190          49386       2.9x
-refractor_psa                     17146          49367       2.9x
-rookie_psa                        17036          50408       3.0x
+selectivity-gain rows (original frequency order; labels anonymized)
+row                                  count     npmi   min df(part)   gain
+fixture_pair_01                   86317    0.736          148864    1.7x
+fixture_pair_02                   63696    1.073           63696    1.0x
+fixture_pair_03                   35917    0.592           62090    1.7x
+fixture_pair_04                   35206    0.589           71153    2.0x
+fixture_pair_05                   27369    0.558           47476    1.7x
+fixture_pair_06                   27341    0.560           54651    2.0x
+fixture_pair_07                   24115    0.547           41092    1.7x
+fixture_pair_08                   17449    0.415           49819    2.9x
+fixture_pair_09                   17396    0.414           49783    2.9x
+fixture_pair_10                   17263    0.411           49985    2.9x
+fixture_pair_11                   17194    0.411           49739    2.9x
+fixture_pair_12                   17190    0.412           49386    2.9x
+fixture_pair_13                   17146    0.412           49367    2.9x
+fixture_pair_14                   17036    0.406           50408    3.0x
 
-=== learned feature universe (no hand-coded vocab) ===
-distinct unigrams in corpus : 17196
-entities learned (iter 1)   : 89
-entities learned (iter 2)   : 101
-
-Takeaway: every anchor the matcher needs is derivable from query co-occurrence statistics.
-The learner glues multi-token entities (raising selectivity) and the signature optimizer
-already ranks anchors purely by frequency — no taxonomy required.
+This historical capture demonstrates that repeated multi-token expressions can become more
+selective anchors from co-occurrence statistics alone. It does not validate the current generic
+fixture. Re-run `learn` against a representative generic or deployment-owned corpus before drawing
+current phrase-quality or selectivity conclusions.

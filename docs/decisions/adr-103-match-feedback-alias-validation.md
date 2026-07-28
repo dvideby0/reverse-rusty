@@ -8,8 +8,9 @@
   `POST /_vocab/aliases/validate_and_apply` (activation stays explicit).
 
 - **Context:** The Tier 2 roadmap item; technique 2 of
-  [`research/corpus-feature-learning.md`](../research/corpus-feature-learning.md) §5 — "if titles
-  that say `UD` and titles that say `upper deck` satisfy the *same* query sets, that's strong,
+  [`research/corpus-feature-learning.md`](../research/corpus-feature-learning.md) §2
+  (“Match-feedback evidence”) — "if titles
+  that say `NS` and titles that say `north star` satisfy the *same* query sets, that's strong,
   behavioral evidence of equivalence. Self-supervising and high-precision." ADR-102 (and the
   ADR-060 learners) produce *candidates*; nothing produced *evidence* — a reviewer stared at a
   pair with a similarity number and guessed. The engine is itself the title→query join point:
@@ -46,13 +47,14 @@
      sample). Order-independent (deterministic under request interleaving), exact below
      capacity, fixed memory (≤ ~16 KiB/side ⇒ ~8 MiB at the default cap). Title-side classification is by **contiguous
      token run** over `corpus::tokenize` output (multi-word forms = an adjacent run; token
-     equality, never substring — `ud` ⊄ `stud`); a title containing BOTH forms is excluded
+     equality, never substring — token `ns` does not equal token `cons`); a title containing
+     BOTH forms is excluded
      (counted `titles_both` — no discriminating signal). Evidence is **not persisted** — a
      rolling operational signal, reset on restart or `POST /_vocab/aliases/feedback/reset`.
   4. **The degenerate-evidence exclusion.** At report time, sketch members whose query source
      text references either form (contiguous-token test over the DSL text; unresolvable ids
      conservatively excluded) are dropped before the overlap is computed. Why: a query
-     *requiring* `ud` matches `ud`-titles and structurally cannot match `upper deck` titles
+     *requiring* `ns` matches `ns`-titles and structurally cannot match `north star` titles
      pre-activation — mechanically depressing a true alias's overlap — while a query already
      bridging the pair through an active equivalence inflates it; the exclusion removes both
      distortions. Report-time keeps capture cheap and is statistically sound (the k smallest
@@ -60,7 +62,7 @@
   5. **What the signal can and cannot reject — the pipeline composition.** Overlap of the
      surviving (non-form) matched-query populations validates *demand equivalence*. A pair
      whose forms satisfy disjoint demand is rejected (overlap ≈ 0). An **identical-demand
-     co-hyponym** (psa/bgs titles of the same products match the same player queries) would
+     co-hyponym** (`new`/`refurbished` titles of the same products match the same entity queries) would
      PASS this test — which is exactly why the pipeline composes: such pairs are syntagmatic
      and the ADR-102 **co-occurrence penalty keeps them out of the candidate set** (they are
      never tracked), and activation remains gated. Stated plainly in the docs rather than
@@ -111,7 +113,7 @@
 - **Proven.** Unit (`vocab/alias/feedback.rs` + `alias/tests.rs`): sketch exactness below k /
   boundedness / permutation-invariance; Jaccard identical = 1.0, disjoint = 0.0, zero-sample =
   0.0 (never NaN), ~1/3 on a half-shared population; token-run classification (multi-word
-  runs, `stud`-vs-`ud`, both-forms exclusion); the report-time exclusion drops
+  runs, `cons`-vs-`ns`, both-forms exclusion); the report-time exclusion drops
   form-referencing ids and a form-queries-only corpus never validates; tracked-pair sync
   (candidates-only, cap determinism, evidence retained across re-syncs); `record_feedback`
   stamps + maxes confidence with a NaN guard; `activate_validated` refuses `Rejected`; the

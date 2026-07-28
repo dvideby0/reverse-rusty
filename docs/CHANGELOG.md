@@ -100,7 +100,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
-- Fixed clause-boundary lowering so aliases, phrases, graders, and number context cannot leak
+- Fixed clause-boundary lowering so aliases, phrases, and numeric context cannot leak
   across intervening query clauses ([ADR-118](decisions/adr-118-clause-boundary-compiler-semantics.md)).
 - Preserved OR-of-AND semantics for multi-token any-of members
   ([ADR-119](decisions/adr-119-multi-token-anyof-member-semantics.md)).

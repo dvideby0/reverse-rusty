@@ -325,11 +325,11 @@ refinements:
 - preserve the scattered-component reading when a multi-word alias activates;
 - emit both joined and split forms for selected punctuation folds;
 - propose high-confidence edit-distance-one aliases for rare misspellings;
-- type common card-number forms such as `#866` and `#BDC-85` as one selective feature;
+- type common item-number forms such as `#866` and `#BDC-85` as one selective feature;
 - keep multi-word aliases on the columnar broad path instead of falling back to scalar evaluation.
 
 **Direction.** Treat alias, punctuation, and typo changes as bounded additive expansions; keep typo
-activation review-first. Card-number typing must use the same query/title rule and preserve the
+activation review-first. Item-number typing must use the same query/title rule and preserve the
 generic form during migration. The columnar change is evaluation-only. Every knob defaults to
 current behavior.
 
@@ -437,7 +437,7 @@ capture; microbenchmarks alone are not sufficient.
 ### Test infrastructure
 
 - **Phrase-pattern fuzzing.** Expand the parse-union alphabet with punctuation markers, number
-  context, years, and fused graders after teaching the independent reference emitter the same
+  context, years, and fused vocabulary forms after teaching the independent reference emitter the same
   documented surface grammar.
 - **Cross-seam matrix.** Combine recovery, vocabulary adoption, rebuild, and remote attach in one
   bounded matrix because point tests do not catch ordering failures between those seams.

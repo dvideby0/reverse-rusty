@@ -85,6 +85,6 @@
   green.
 - **See also:** ADR-046 (dynamic vocabulary — the rebuild this extends), ADR-049 (single-node
   tags + the carry-through precedent), ADR-055 (cluster tags + the deferral this closes),
-  ADR-061 (the multi-word refusal that stands), ADR-065 (the Distributed-v1 program), ADR-032
+  ADR-061 (the original multi-word refusal, retired by ADR-076), ADR-065 (the Distributed-v1 program), ADR-032
   (segments-only shard durability — the mode the sources fixes harden), ADR-051 (fail-closed
   persistence).

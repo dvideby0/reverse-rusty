@@ -238,7 +238,7 @@ mergers** — replace k near-duplicate filters with one broader gate that over-m
 literature's cost is false-positive *traffic*; under our contract false-positive *candidates* are
 explicitly cheap (the exact verifier rejects), so aggressive imperfect merging of near-duplicate
 posting entries — one broader gate entry fanning out to k member queries — is a zero-FN-risk index
-compression lever. Our class-D universal signature is the degenerate maximal merger; the graded
+compression lever. Our class-D universal signature is the degenerate maximal merger; the classified
 version merges within a signature's posting by shared residual shape.
 
 The hazards are equally well measured (Li/Hou/Jacobsen, ICDCS 2005): **maintenance dominates**

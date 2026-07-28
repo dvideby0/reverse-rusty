@@ -75,7 +75,7 @@ fn random_soup(rng: &mut Rng) -> String {
 /// An alias-active normalizer (multi-word alias registered ⇒ the dual view is real) and
 /// a plain one, plus a dict mixing dense and synthetic ids.
 ///
-/// The alias vocabulary also carries a provider (`alpha`), a level word (`deluxe`), and a COLLAPSE
+/// The fixture dictionary also carries an attribute (`alpha`), a variant (`pro`), and a COLLAPSE
 /// phrase (`p s`) over pool letters: without those, `force_additive` (the `P(T)` pass)
 /// is indistinguishable from the canonical pass on any fuzz input — alias-mode phrases
 /// are already additive on the title side — and a mutation that computes `N(T)` with the

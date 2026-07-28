@@ -1,7 +1,8 @@
 //! Distributional alias discovery (ADR-102) — technique 1 of the corpus-feature-learning
-//! research doc (§5): two tokens are equivalence candidates if they appear in highly similar
+//! research doc (§2, “Distributional alias proposals”): two tokens are equivalence candidates if
+//! they appear in highly similar
 //! query *contexts* (same neighbor distributions). Medium precision by nature — it conflates
-//! true substitutes (`pkg`/`new`) with co-hyponyms (`alpha`/`beta`, which fill the same slot but
+//! true substitutes (`package`/`pkg`) with co-hyponyms (`new`/`refurbished`, which fill the same slot but
 //! are NOT interchangeable) — so everything this module proposes is **review-first**: the
 //! registry files every discovered pair as a `Candidate` under the `LearnedDistributional`
 //! provenance, which `default_status_for` never auto-activates (not even variant-looking pairs).
@@ -20,7 +21,8 @@
 //!   touched; PPMI zeroes hub contexts, which is what keeps the accumulation sparse).
 //! - **The co-hyponym defense**: a `cooccurrence_rate` penalty. True substitutes are
 //!   *paradigmatic* (they fill the same slot and rarely appear together in one query);
-//!   co-hyponyms are *syntagmatic* (`(alpha,beta)` any-ofs, `product gamma pippen` duals co-occur). A pair
+//!   co-hyponyms are *syntagmatic* (`(new,refurbished)` any-ofs or two product categories
+//!   listed together). A pair
 //!   co-occurring in more than `max_cooccurrence_rate` of its rarer member's queries is dropped.
 //!   Heuristic, hence review-first — the miss cost is a reviewer's minute, never a match.
 

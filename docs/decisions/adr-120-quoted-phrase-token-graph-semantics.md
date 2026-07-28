@@ -26,12 +26,10 @@
   raw-byte equality:
   - default split punctuation makes `"red shoe"` match `red-shoe`;
   - configuring `-` as `Fold` makes `"red-shoe"` one `redshoe` token instead;
-  - case, diacritics, synonyms, grader/number typing, phrase entities, and punctuation use the same
-    normalizer on both sides;
-  - whitespace runs delimit the same positions as one space, so `"upper  deck"` and
-    `"upper deck"` have the same analyzed graph;
-  - the windowed `grader_grade` composite is a phrase-graph shortcut only for fused or immediately
-    adjacent forms (`psa10` / `psa 10`); longer spans retain their intervening lexical positions;
+  - case, diacritics, synonyms, caller-defined number typing, phrase/alias entities, and punctuation
+    use the same normalizer on both sides;
+  - whitespace runs delimit the same positions as one space, so `"north  star"` and
+    `"north star"` have the same analyzed graph;
   - analyzer-silent structural/context positions receive a normalized raw-term edge only when no
     semantic edge covers them, so quoting never erases a lexical position.
 
@@ -50,10 +48,9 @@
   title-side aliases/entities add alternate graph paths. Independently of whether an alias is
   configured, `P(T)` unions the canonical path, force-additive analysis, positioned raw-token
   readings, and every overlapping declared entity edge; otherwise an ordinary collapse phrase
-  could erase a valid component or overlapping-entity path. Retaining every live grader start
-  preserves alternate stateful paths. Forbidden phrases are checked against the canonical
+  could erase a valid component or overlapping-entity path. Forbidden phrases are checked against the canonical
   leftmost-longest graph `N(T)` and are never equivalence-expanded. Thus
-  `"new york" knicks` can match `ny knicks`, while `foo -"new york"` retains the established
+  `"new york" inventory` can match `ny inventory`, while `foo -"new york"` retains the established
   canonical behavior on `foo new york city`.
 
 - **Decision — candidate-only, default-visible retrieval proxy.** Every label on a required phrase
@@ -96,9 +93,7 @@
 
 - **Decision — bounded complexity fails open.** Graph intersection admits at most 65,536 visited
   `(query-position, title-position)` states and 65,536 charged query/title arc inspections per
-  candidate. Positioned positive analysis retains up to 64 live starts per canonical grader;
-  exceeding that crafted-title guard marks the graph incomplete rather than discarding a path
-  silently. Missing/incomplete positioned context, scratch re-entry, or either graph budget's
+  candidate. Missing/incomplete positioned context, scratch re-entry, or either graph budget's
   exhaustion is interpreted by polarity: a required phrase does not reject and a forbidden phrase
   does not trip. Explain applies the same budgets and polarity rule, so it cannot contradict the
   verifier. That can over-match, but can never create a false negative. Persisted query graphs
@@ -138,9 +133,9 @@
   - Treat aliases as unordered alternatives: restores the original conjunction bug around the alias.
 
 - **Proof.** Hand-authored tests pin required/forbidden order and adjacency, default split vs
-  configured fold punctuation, alias compression/expansion, stateful raw-token paths, repeated
-  grader starts, non-skipping grader composites, default visibility, graph-label isolation from
-  bare rows, replicated cluster routing, alias-free collapse/overlap paths, whitespace-run parity,
+  configured fold punctuation, alias compression/expansion, raw-token paths, repeated overlapping
+  entity paths, default visibility, graph-label isolation from bare rows, replicated cluster routing,
+  alias-free collapse/overlap paths, whitespace-run parity,
   scalar vs requested-columnar batch parity, and structured explain. PIT tests distinguish
   reordered positional inputs. Predicate-program units cover v2 truth and malformed graphs. `.seg`
   v10 round-trip/malformed refusal and semantics-2 source migration pin persistence. The independent

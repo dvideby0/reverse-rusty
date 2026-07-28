@@ -46,9 +46,9 @@ fn sample_vocab() -> Normalizer {
 #[test]
 fn diacritics_fold_to_ascii() {
     let n = Normalizer::default_vocab().unwrap();
-    // normalization.md §4: Café->cafe, Jokić->jokic, Jalapeño->jalapeno (ñ no longer splits).
+    // normalization.md §2: Café->cafe, Český->cesky, Jalapeño->jalapeno (ñ no longer splits).
     assert_eq!(names(&n, "café"), s(&["term:cafe"]));
-    assert_eq!(names(&n, "Jokić"), s(&["term:jokic"]));
+    assert_eq!(names(&n, "Český"), s(&["term:cesky"]));
     assert_eq!(
         names(&n, "Ronald Jalapeño"),
         s(&["term:jalapeno", "term:ronald"])
@@ -220,7 +220,7 @@ fn synonyms_converge_alternate_surface_forms() {
 fn fold_is_a_normalization_fixpoint() {
     let n = Normalizer::default_vocab().unwrap();
     assert_eq!(names(&n, "café"), names(&n, "cafe"));
-    assert_eq!(names(&n, "Jokić"), names(&n, "jokic"));
+    assert_eq!(names(&n, "Český"), names(&n, "cesky"));
 }
 
 #[test]

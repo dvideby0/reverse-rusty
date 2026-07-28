@@ -162,27 +162,27 @@ fn wal_recovery_inserts() {
 
     // These go to the memtable + WAL but are NOT flushed to segments
     engine.insert_live("product omega preview", 100, 1);
-    engine.insert_live("fernando tatis jr new", 101, 1);
+    engine.insert_live("portable monitor new", 101, 1);
 
     let title_wander = "Product Omega 2019 Summit Chrome Preview";
-    let title_tatis = "Fernando Tatis Jr 2019 Acme Chrome New";
+    let title_monitor = "Portable Monitor 2019 Acme Chrome New";
     let expected_wander = match_ids(&engine, title_wander);
-    let expected_tatis = match_ids(&engine, title_tatis);
+    let expected_monitor = match_ids(&engine, title_monitor);
 
     drop(engine); // simulate crash
 
     // 2) Recover
     let engine2 = Engine::open(make_norm(), config).unwrap();
     let actual_wander = match_ids(&engine2, title_wander);
-    let actual_tatis = match_ids(&engine2, title_tatis);
+    let actual_monitor = match_ids(&engine2, title_monitor);
 
     assert_eq!(
         expected_wander, actual_wander,
         "WAL recovery lost wander insert"
     );
     assert_eq!(
-        expected_tatis, actual_tatis,
-        "WAL recovery lost tatis insert"
+        expected_monitor, actual_monitor,
+        "WAL recovery lost monitor insert"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

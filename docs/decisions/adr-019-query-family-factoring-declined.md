@@ -6,7 +6,7 @@
 - **Context:** The design carried an explicit **query-family / shared-prefix DAG** as a roadmap item
   (formerly `matching.md` §5, listed in the roadmap at the time as "the next optimization to push
   selective candidates below ~54"). The idea: near-duplicate product queries share a required-feature prefix
-  (`1994 upper_deck series0001 michael_jordan` + per-leaf card term / grade / negatives); store the
+  (`2024 north_star wireless_mouse` plus per-leaf variant and negative clauses); store the
   shared prefix once and, at match time, check it once — if the title lacks a shared feature, prune the
   whole subtree in one test instead of rejecting each leaf. This ADR records the decision **not** to
   build it, so the rationale is durable and the item is not silently re-added later.

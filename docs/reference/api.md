@@ -86,7 +86,7 @@ export RR_AUTH_TOKEN=$(openssl rand -hex 32)
 cargo run --release --bin server -- --host 0.0.0.0
 # clients:
 curl -X PUT localhost:9200/_doc/1 -H "Authorization: Bearer $RR_AUTH_TOKEN" \
-  -H 'content-type: application/json' -d '{"query": "michael jordan"}'
+  -H 'content-type: application/json' -d '{"query": "wireless mouse"}'
 ```
 
 With a token configured (`RR_AUTH_TOKEN` env var or `--auth-token`; the env var is preferred — flag

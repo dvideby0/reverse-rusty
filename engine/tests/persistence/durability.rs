@@ -85,17 +85,17 @@ fn failed_flush_retains_data_in_wal_and_recovers_on_reopen() {
     };
 
     let t_mouse = "Wireless Mouse 1986 Vertex New PRO";
-    let t_pippen = "Scottie Pippen 1988 Vertex";
+    let t_keyboard = "Mechanical Keyboard 1988 Vertex";
     {
         let mut engine = Engine::with_config(make_norm(), config.clone());
         // A durable base segment (writes a manifest), then a live insert that lives
         // only in the WAL + memtable until the (about-to-fail) flush.
         engine.build_from_queries(&[(1, "wireless mouse 1986 vertex".into())]);
-        engine.insert_live("scottie pippen 1988 vertex", 2, 1);
+        engine.insert_live("mechanical keyboard 1988 vertex", 2, 1);
         assert_eq!(
-            match_ids(&engine, t_pippen),
+            match_ids(&engine, t_keyboard),
             vec![2],
-            "pippen matches before flush"
+            "keyboard matches before flush"
         );
 
         // Make segments/ read-only so the flush's segment write fails.
@@ -111,7 +111,7 @@ fn failed_flush_retains_data_in_wal_and_recovers_on_reopen() {
         );
         // The in-memory fallback still serves the query — no live false negative.
         assert_eq!(
-            match_ids(&engine, t_pippen),
+            match_ids(&engine, t_keyboard),
             vec![2],
             "the in-memory fallback segment still matches after the failed flush"
         );
@@ -127,7 +127,7 @@ fn failed_flush_retains_data_in_wal_and_recovers_on_reopen() {
         "the durably-committed query survives reopen"
     );
     assert_eq!(
-        match_ids(&engine2, t_pippen),
+        match_ids(&engine2, t_keyboard),
         vec![2],
         "the acknowledged insert survives a restart even though its flush failed"
     );
@@ -155,7 +155,7 @@ fn failed_compaction_rolls_back_and_keeps_segments_on_disk() {
     let mut engine = Engine::with_config(make_norm(), config.clone());
     // Two durable base segments.
     engine.build_from_queries(&[(1, "wireless mouse 1986 vertex".into())]);
-    engine.bulk_ingest(&[(2, "scottie pippen 1988 vertex".into())]);
+    engine.bulk_ingest(&[(2, "mechanical keyboard 1988 vertex".into())]);
     assert_eq!(
         engine.metrics().base_segments,
         2,
@@ -163,7 +163,7 @@ fn failed_compaction_rolls_back_and_keeps_segments_on_disk() {
     );
 
     let t1 = "Wireless Mouse 1986 Vertex";
-    let t2 = "Scottie Pippen 1988 Vertex";
+    let t2 = "Mechanical Keyboard 1988 Vertex";
     assert_eq!(match_ids(&engine, t1), vec![1]);
     assert_eq!(match_ids(&engine, t2), vec![2]);
 

@@ -203,7 +203,7 @@ fn pit_pages_concatenate_pin_across_mutation_and_match_single_node() {
                     );
                 }
                 cluster
-                    .add_query(fresh_id, "product gamma chrome premium")
+                    .add_query(fresh_id, "product omega wireless premium")
                     .expect("fresh add");
                 fresh_id += 1;
             }

@@ -146,7 +146,7 @@ fn try_insert_live_surfaces_typed_error_without_counting() {
     assert_eq!(eng.rejected_class_d(), 1);
 
     // good insert -> Ok(Inserted(_))
-    let outcome = eng.try_insert_live("scottie pippen", 101, 2).unwrap();
+    let outcome = eng.try_insert_live("mechanical keyboard", 101, 2).unwrap();
     assert!(
         matches!(outcome, InsertOutcome::Inserted(_)),
         "expected Inserted, got {outcome:?}"
@@ -287,7 +287,7 @@ fn oversize_tag_set_rejected_loudly_not_truncated() {
     // Live insert: typed reject, nothing stored.
     let before = eng.num_queries();
     match eng
-        .try_insert_live_with_tags("scottie pippen", 1, 1, &too_many)
+        .try_insert_live_with_tags("mechanical keyboard", 1, 1, &too_many)
         .unwrap_err()
     {
         WriteError::Parse(pe) => assert_eq!(pe.kind, ParseErrorKind::TooManyTags),

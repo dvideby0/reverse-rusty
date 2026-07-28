@@ -50,7 +50,7 @@ impl RefOracle {
 
     /// Build both sides from a paired `(engine Normalizer, RefVocab)` description — the caller is
     /// responsible for the two expressing the SAME vocabulary in each side's own type. Used for the
-    /// provider / phrase / synonym pass (no equivalence map needed).
+    /// phrase / synonym pass (no equivalence map needed).
     pub fn build_with_normalizer(
         queries: &[(u64, String)],
         norm: Normalizer,

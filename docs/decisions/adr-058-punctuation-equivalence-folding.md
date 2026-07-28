@@ -3,9 +3,9 @@
 > [Normalization & vocabulary decisions](areas/normalization-and-vocabulary.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** The shared normalizer's byte-cleaning pass (`normalize::Normalizer::clean_into`) had three
-  hardcoded behaviors for non-alphanumeric characters: `.` was kept in place (so half-grades like `9.5`
-  survive), `#` and `/` became standalone marker tokens (so the number logic can tell card-numbers `#2`
-  and serials `/199` from grades), and **every other** non-alphanumeric byte became a space (a word
+  hardcoded behaviors for non-alphanumeric characters: `.` was kept in place (so decimal tokens like
+  `9.5` survive), `#` and `/` became standalone marker tokens, and **every other**
+  non-alphanumeric byte became a space (a word
   boundary). That last rule is a recall hazard on real listing text: mid-word punctuation splits a token
   that a query author wrote joined. `O'Brien` and `O-Brien` both tokenize to `[o, brien]`, while `OBrien`
   tokenizes to `[obrien]` — so a stored query `obrien` **misses** a title `O'Brien` entirely. Because this
@@ -61,9 +61,8 @@
   normalizer is the same deferred item as cross-process normalizer/alias shipping (the distributed layers
   use `default_vocab()` today; see the roadmap's
   [`feature-model work`](../roadmap.md#priority-4--feature-model-evolution-and-parity)) — out of scope here. Reclassifying the
-  number-pipeline defaults (`.`/`#`/`/`) is allowed but an operator's responsibility: e.g. folding `.`
-  would merge `9.5` → `95` and defeat half-grade detection; the defaults stay as they were precisely so
-  the number logic is unaffected unless deliberately overridden.
+  punctuation defaults (`.`/`#`/`/`) is allowed but an operator's responsibility: folding `.`, for
+  example, merges `9.5` into `95`.
 
 - **Alternatives.** (1) *Additive multi-emit* (emit the joined form **and** the split components, à la
   Lucene's `WordDelimiterGraphFilter` `preserveOriginal`/`catenateWords`, so folding is a pure recall

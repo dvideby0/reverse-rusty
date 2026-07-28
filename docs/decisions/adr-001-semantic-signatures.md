@@ -4,13 +4,11 @@
 
 
 - **Context:** Generic percolators (Lucene Monitor, ES/OS) gate on raw terms extracted from
-  queries. This works for full-text search, but product queries have structure — the same word
-  means different things in different positions ("jordan" = player, brand, or year subset).
-  Term-level gating retrieves too many false-positive candidates.
-- **Decision:** Gate on 2–3 *semantic* feature combinations (e.g., `player:jordan +
-  year:1994 + grader_grade:psa10`) produced by a domain-aware normalizer, rather than raw
-  terms.
+  queries. Product-intent queries often contain several positive requirements, and probing a common
+  raw term alone retrieves too many false-positive candidates.
+- **Decision:** Gate on lossless combinations of positive features (for example
+  `entity:wireless_mouse + year:2024 + brand:north_star`) produced by the shared generic
+  normalizer and caller-supplied vocabulary.
 - **Consequence:** Flat ~54 candidates/title regardless of corpus size (measured 1M–5M).
   Requires a shared normalizer that maps both queries and titles into the same feature space.
-  Makes the system domain-specific rather than generic.
-
+  Domain semantics remain data supplied through vocabulary; candidate planning itself is generic.

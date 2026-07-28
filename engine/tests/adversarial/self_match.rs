@@ -143,8 +143,8 @@ fn structured_queries_self_match_on_every_branch() {
         (2, "summit (new,pkg) -lot".into()),
         (3, "\"deluxe\" pro".into()),
         (4, "(north star,ns) premium".into()),
-        (5, "1986 vertex -manual -(signed,replica) sticker".into()),
-        (6, "acme (red,blue,green) parallel -damaged".into()),
+        (5, "1986 vertex -manual -(used,damaged) accessory".into()),
+        (6, "acme (red,blue,green) edition -damaged".into()),
     ];
     let eng = engine_from(&queries);
     let mut s = MatchScratch::new();
@@ -158,10 +158,10 @@ fn structured_queries_self_match_on_every_branch() {
         (3, "deluxe pro"),
         (4, "north star premium"),
         (4, "ns premium"),
-        (5, "1986 vertex sticker"),
-        (6, "acme red parallel"),
-        (6, "acme blue parallel"),
-        (6, "acme green parallel"),
+        (5, "1986 vertex accessory"),
+        (6, "acme red edition"),
+        (6, "acme blue edition"),
+        (6, "acme green edition"),
     ];
     for (id, title) in must_match {
         assert!(
@@ -173,9 +173,9 @@ fn structured_queries_self_match_on_every_branch() {
     // Negation sanity: the removed negative term really does block.
     let must_not: &[(u64, &str)] = &[
         (2, "summit new lot"),
-        (5, "1986 vertex sticker manual"),
-        (5, "1986 vertex sticker replica"),
-        (6, "acme red parallel damaged"),
+        (5, "1986 vertex accessory manual"),
+        (5, "1986 vertex accessory used"),
+        (6, "acme red edition damaged"),
     ];
     for (id, title) in must_not {
         assert!(

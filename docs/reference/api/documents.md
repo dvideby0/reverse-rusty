@@ -109,7 +109,7 @@ Local bounded ranking has one fixed signed `i64` field. Supply it separately fro
 
 ```bash
 curl -X PUT localhost:9200/_doc/1 -H 'Content-Type: application/json' \
-  -d '{"query":"topps chrome","rank_fields":{"priority":50}}'
+  -d '{"query":"acme labs chrome","rank_fields":{"priority":50}}'
 ```
 
 `rank_fields.priority` accepts an integer JSON value or a signed decimal string fitting `i64`.

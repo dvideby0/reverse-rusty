@@ -9,14 +9,15 @@ counts, and serialized/accounted sizes are deterministic for the pinned workload
 - **Correctness:** zero candidate false negatives and zero final-set mismatches in the shared-front-end
   and independent differential suites; the durable 20M K=8 soak also reports no sentinel misses,
   ghosts, or reopen drift.
-- **Selective structure:** the broad-off capture remains scale-flat at **54.56 candidates/title at
-  20M queries** (p95 96, p99 112), consistent with the pinned 1M and 5M workloads.
+- **Selective structure:** the retired fixture's broad-off capture was scale-flat through 20M
+  queries. The current generic 1M/20k pin is **53.90 candidates/title** (p95 95, p99 111);
+  generic 3M/5M/20M reruns are still pending.
 - **Broad/hot cost:** class-H scheduling is visibility-neutral. In the latest 20M broad-bearing
-  in-memory capture, canonical-body sharing reduced repeated body candidates from 6,616.65 to 53.75
-  per title while leaving the emitted match set unchanged. Flush still expands members into the
-  current mmap format, so the durable cluster does not retain that Stage-A saving.
-- **Memory and disk:** the pinned 1M `retain_source=false` baseline accounts for **5.93 B/query
-  resident** and **237.81 B/query durable**. At 20M, resident accounting is about 5.2 B/query
+  historical in-memory capture, canonical-body sharing reduced repeated body candidates from
+  6,616.65 to 53.75 per title while leaving the emitted match set unchanged. Flush still expands
+  members into the current mmap format, so the durable cluster does not retain that Stage-A saving.
+- **Memory and disk:** the current generic 1M `retain_source=false` baseline accounts for **6.01
+  B/query resident** and **244.59 B/query durable**. Historical 20M accounting was about 5.2 B/query
   without retained source and 109 B/query with it. These are engine-accounted values, not host RSS
   or page-cache guarantees.
 - **Regression policy:** deterministic work shape and resource ceilings plus variance-banded timing

@@ -221,8 +221,8 @@ fn update_visibility_across_flush_compact() {
 
     // Check v1 matches
     let v1_hit = match_ids(&eng, "wireless mouse 1986 vertex appliance item");
-    eprintln!("  v1 match for MJ: {v1_hit:?}");
-    assert!(v1_hit.contains(&1), "v1 MJ query should match");
+    eprintln!("  v1 match for query 1: {v1_hit:?}");
+    assert!(v1_hit.contains(&1), "v1 query 1 should match");
 
     // Update: delete old, re-insert with new text + higher version
     let _ = eng.delete_by_logical_id(1);
@@ -230,8 +230,11 @@ fn update_visibility_across_flush_compact() {
 
     // Before flush: should still match with updated text
     let pre_flush = match_ids(&eng, "wireless mouse 1986 vertex new item pro");
-    eprintln!("  pre-flush updated MJ: {pre_flush:?}");
-    assert!(pre_flush.contains(&1), "updated MJ should match pre-flush");
+    eprintln!("  pre-flush updated query 1: {pre_flush:?}");
+    assert!(
+        pre_flush.contains(&1),
+        "updated query 1 should match pre-flush"
+    );
 
     // Original title (without "new item") should NOT match updated query
     // if the new text requires "new" and "item"
@@ -241,10 +244,10 @@ fn update_visibility_across_flush_compact() {
     // Flush
     eng.flush();
     let post_flush = match_ids(&eng, "wireless mouse 1986 vertex new item pro");
-    eprintln!("  post-flush updated MJ: {post_flush:?}");
+    eprintln!("  post-flush updated query 1: {post_flush:?}");
     assert!(
         post_flush.contains(&1),
-        "updated MJ should match post-flush"
+        "updated query 1 should match post-flush"
     );
 
     // Bulk updates: update all 5 queries, flush, compact

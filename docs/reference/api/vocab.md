@@ -11,16 +11,16 @@ curl localhost:9200/_vocab
 ```json
 {
   "synonyms": [
-    {"token": "rc", "canonical": "term:rookie", "kind": "generic"}
+    {"token": "pkg", "canonical": "term:package", "kind": "generic"}
   ],
   "phrases": [
-    {"tokens": ["upper", "deck"], "canonical": "term:upper_deck", "kind": "generic"}
+    {"tokens": ["north", "star"], "canonical": "brand:north_star", "kind": "brand"},
+    {"tokens": ["wireless", "mouse"], "canonical": "entity:wireless_mouse", "kind": "entity"}
   ],
-  "graders": ["psa"],
-  "grade_words": ["gem"],
-  "equivalences": [["ud", "upper deck"]],
+  "equivalences": [["ns", "north star"]],
   "punctuation": [{"ch": "'", "class": "fold"}, {"ch": "-", "class": "fold"}],
-  "number_context": []
+  "number_context": ["model"],
+  "aliases": {"entries": []}
 }
 ```
 
@@ -41,7 +41,7 @@ effect immediately with zero false negatives. `recompiled` reports how many quer
 ```bash
 curl -X PUT localhost:9200/_vocab \
   -H 'Content-Type: application/json' \
-  -d '{"synonyms": [{"token": "rc", "canonical": "term:rookie", "kind": "category"}], "phrases": [], "graders": [], "grade_words": []}'
+  -d '{"synonyms":[{"token":"pkg","canonical":"term:package","kind":"generic"}],"phrases":[],"equivalences":[],"punctuation":[],"number_context":[],"aliases":{"entries":[]}}'
 ```
 
 ```json
@@ -52,7 +52,7 @@ curl -X PUT localhost:9200/_vocab \
 ```
 
 **Declaring equivalences (ADR-054).** The optional `equivalences` block is a list of groups of
-surface forms treated as the same entity (e.g. `[["ud", "upper deck"], ["rc", "rookie"]]`). Unlike
+surface forms treated as the same entity (e.g. `[["ns", "north star"], ["pkg", "package"]]`). Unlike
 `synonyms` (which *collapse* a form to a canonical via the normalizer), equivalences are applied by
 **expansion**: a query requiring one form is widened to an any-of over the group, so it matches a
 title bearing any form. Expansion only grows a query's match set, so it is **false-negative-safe** —
@@ -66,16 +66,14 @@ characters are handled in byte-cleaning. Each rule is `{"ch": "<char>", "class":
 `OBrien` all become `obrien` — closing a recall gap for punctuation-only spelling differences), `split`
 makes it a word boundary, `keep` leaves it literally in place, and `marker` emits it as its own token. The
 default — `.` is `keep`, `#`/`/` are `marker`, everything else is `split` — is reproduced exactly when the
-block is omitted (so older vocab payloads are unchanged). The same table applies to both queries and
+block is omitted. The same table applies to both queries and
 titles, so the lossless-cover contract is preserved under any configuration.
 
 **Number-context words (ADR-069).** The optional `number_context` array lists tokens that demote an
-immediately-following number to a generic term (`pop 1995` → `term:1995`, never `year:1995`). When the
-field is **omitted** the built-in default `["pop"]` applies — the historical population rule,
-byte-identical for older payloads. An explicit **empty array disables the rule** — the
-percolator-parity mode: number typing becomes position-insensitive, so a 4-digit year is `year:N` in
-every position. A custom list substitutes other context words. Like every vocab change, applying it
-recompiles stored queries under the new typing; the same list runs over queries and titles.
+immediately-following number to a generic term (`model 1995` → `term:1995`, never `year:1995`).
+Omitted or empty means position-insensitive typing, so a four-digit year is `year:N` everywhere.
+Like every vocabulary change, applying a custom list recompiles stored queries under the new typing;
+the same list runs over queries and titles.
 
 ## `POST /_vocab/learn` — Learn vocabulary from queries
 
@@ -86,7 +84,7 @@ vocabulary without applying it — review and then `PUT /_vocab` to use it.
 curl -X POST localhost:9200/_vocab/learn \
   -H 'Content-Type: application/json' \
   -d '{
-    "queries": [[1, "(rookie,rc) 2024"], [2, "(rookie,rc) 2023"]],
+    "queries": [[1, "(package,pkg) 2024"], [2, "(package,pkg) 2023"]],
     "min_count": 2
   }'
 ```
@@ -94,11 +92,12 @@ curl -X POST localhost:9200/_vocab/learn \
 ```json
 {
   "synonyms": [
-    {"token": "rc", "canonical": "term:rookie", "kind": "generic"}
+    {"token": "pkg", "canonical": "term:package", "kind": "generic"}
   ],
   "phrases": [],
-  "graders": [],
-  "grade_words": []
+  "equivalences": [],
+  "punctuation": [],
+  "aliases": {"entries": []}
 }
 ```
 
@@ -107,7 +106,7 @@ different queries before it's included. Higher values reduce noise. See [`dsl.md
 for how vocabulary affects matching.
 
 **Opt-in NPMI corpus phrase induction (ADR-053).** Add `"corpus_phrases": true` to ALSO induce
-multi-token entity **phrases** (e.g. `upper deck` → `upper_deck`) from the supplied query text via NPMI
+multi-token entity **phrases** (e.g. `north star` → `north_star`) from the supplied query text via NPMI
 collocation mining, on top of the any-of synonyms. Phrases only — never aliases. They are applied
 **additively** (a match emits the phrase feature AND keeps the component features), so a query
 referencing a component never loses a candidate — important because this is a recall-first
@@ -123,7 +122,7 @@ exactly as before. Add `"learn_equivalences": true` to instead learn the any-of 
 ```bash
 curl -X POST localhost:9200/_vocab/learn \
   -H 'Content-Type: application/json' \
-  -d '{"queries": [[1,"upper deck 1994"],[2,"upper deck rookie"]],
+  -d '{"queries": [[1,"north star 2024"],[2,"north star wireless mouse"]],
        "corpus_phrases": true, "npmi_min_count": 2}'
 ```
 
@@ -201,9 +200,9 @@ curl 'localhost:9200/_vocab/aliases'
 {
   "aliases": {
     "entries": [
-      { "forms": ["autograph", "autographs"], "provenance": "learned_from_queries",
+      { "forms": ["package", "packages"], "provenance": "learned_from_queries",
         "kind": "single_token_variant", "status": "active", "confidence": 0.6 },
-      { "forms": ["bgs", "psa", "sgc"], "provenance": "learned_from_queries",
+      { "forms": ["new", "refurbished"], "provenance": "learned_from_queries",
         "kind": "single_token_distinct", "status": "candidate", "confidence": 0.5 }
     ]
   },
@@ -222,12 +221,12 @@ operator declaration. An unexpressible or mixed-feature-kind group remains a can
 ```bash
 curl -X POST localhost:9200/_vocab/aliases/import \
   -H 'Content-Type: application/json' \
-  -d '{"synonyms": "autograph, autographs\nrc => rookie card"}'
+  -d '{"synonyms": "package, pkg\nwireless mouse => cordless mouse"}'
 ```
 
 ```json
-{ "acknowledged": true, "activated": 1, "recompiled": 1280,
-  "summary": { "active": 1, "candidate": 1, "rejected": 0 } }
+{ "acknowledged": true, "activated": 2, "recompiled": 1280,
+  "summary": { "active": 2, "candidate": 0, "rejected": 0 } }
 ```
 
 `activated` is the number of groups switched to active; `recompiled` is the number of stored queries
@@ -249,7 +248,7 @@ explicit corpus is accepted in either mode:
 
 ```json
 {
-  "queries": [[1, "upper deck rookie"], [2, "ud rookie"]],
+  "queries": [[1, "north star wireless mouse"], [2, "ns wireless mouse"]],
   "min_token_freq": 5,
   "min_similarity": 0.60,
   "max_pairs": 100,
@@ -261,7 +260,7 @@ explicit corpus is accepted in either mode:
 ```
 
 The fields shown are the defaults. The response is
-`{"count":N,"proposals":[{"forms":["ud","upper deck"],"similarity":0.91,
+`{"count":N,"proposals":[{"forms":["ns","north star"],"similarity":0.91,
 "cooccurrence_rate":0.0}]}` in best-first deterministic order. Cluster mode requires the explicit
 `queries` corpus because the coordinator has no cross-shard source-gather operation; omitting it is
 a 400.
@@ -305,7 +304,7 @@ two-form candidate. Capture is single-node, in memory, default off, and applies 
   "min_titles": 50,
   "min_queries": 20,
   "pairs": [{
-    "forms": ["ud", "upper deck"],
+    "forms": ["ns", "north star"],
     "titles_a": 75,
     "titles_b": 81,
     "titles_both": 2,

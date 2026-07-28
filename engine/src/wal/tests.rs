@@ -18,7 +18,7 @@ fn append_surfaces_write_errors_instead_of_swallowing() {
     assert!(wal.append_insert(1, 1, "wireless mouse", &[]).is_ok());
     // Once the file can no longer be written, the error is returned (not swallowed).
     wal.break_writes_for_test();
-    assert!(wal.append_insert(2, 1, "scottie pippen", &[]).is_err());
+    assert!(wal.append_insert(2, 1, "mechanical keyboard", &[]).is_err());
     assert!(wal.append_tombstone(u32::MAX, 0).is_err());
     let _ = std::fs::remove_file(&path);
 }
@@ -250,7 +250,7 @@ fn last_seq_is_monotonic_across_reset() {
     assert_eq!(wal.last_seq(), 2);
     wal.reset().unwrap();
     assert_eq!(wal.last_seq(), 2, "reset must not rewind the watermark");
-    wal.append_insert(2, 1, "scottie pippen", &[]).unwrap();
+    wal.append_insert(2, 1, "mechanical keyboard", &[]).unwrap();
     assert_eq!(wal.last_seq(), 3);
     let _ = std::fs::remove_file(&path);
 }

@@ -32,6 +32,12 @@ decision, and consequences.
 ADRs are **append-only and never renumbered**. Mark a superseded, reversed, or declined decision in
 place; never delete the record that explains the old constraint.
 
+One owner-authorized exception applies to the 2026-07 domain-neutral prototype reset: obsolete
+product-specific examples and specialized implementation details were sanitized in place so the
+public tree contains no deployment-domain vocabulary. The reset retains decision numbers, status,
+architecture constraints, evaluated alternatives, measurements, and revision outcomes in generic
+form. New decisions return to the append-only rule.
+
 ---
 
 *Documentation placement and single-source-of-truth rules → [README.md](README.md).*

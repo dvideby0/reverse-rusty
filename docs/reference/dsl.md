@@ -24,9 +24,8 @@ negations. **All top-level clauses are implicitly ANDed together.**
 Every top-level element is required (AND logic). Use groups for OR within that structure, and prefix
 with `-` for exclusion.
 
-Negation applies to the complete analyzed clause. If one unquoted spelling produces several
-canonical features (for example a configured grader token such as `psa10`), `-psa10` rejects only
-when that whole analyzed term predicate is present; a title containing merely `psa` is not enough.
+Negation applies to the complete analyzed clause. A negated any-of member with multiple terms is
+rejected only when the complete member matches; seeing one component is not enough.
 
 Consecutive positive bare terms are normalized together only within one uninterrupted run, so a
 configured multi-word entity can be recognized (`new york`). Every phrase, any-of group, or negated
@@ -60,8 +59,8 @@ language rule and is not implied by this unquoted-member contract.
 A quoted clause is an **analyzed, ordered, contiguous path** (ADR-120). It uses the same normalizer as
 titles and has zero slop: every analyzed edge must connect directly to the next one, although a
 configured synonym or multi-word alias may represent one alternate analyzer path. Runs of
-whitespace still delimit the same token positions, so `"upper  deck"` is equivalent to
-`"upper deck"`.
+whitespace still delimit the same token positions, so `"north  star"` is equivalent to
+`"north star"`.
 
 | Query | Title | Result |
 |---|---|---|
@@ -75,9 +74,8 @@ whitespace still delimit the same token positions, so `"upper  deck"` is equival
 Adjacency is over normalized positions, not raw bytes. Case/diacritic folding, number typing, and the
 configured punctuation table therefore apply before the phrase check. For example, declaring `-` as
 `Fold` turns `red-shoe` into the single token `redshoe`; it no longer has the two-position path
-`red → shoe`. A declared `ny ↔ new york` alias lets `"new york" knicks` match `ny knicks` without
-allowing `new vintage york knicks`. Likewise, the grader composite lets `"psa 10"` match `psa10`,
-but `"psa foo 10"` still requires the `foo` position and does not match `psa bar 10`.
+`red → shoe`. A declared `ny ↔ new york` alias lets `"new york" inventory` match `ny inventory`
+without allowing `new vintage york inventory`.
 
 There is currently no slop parameter or transposition syntax. DSL quotes are also distinct from a
 vocabulary `phrases` entry: quotes constrain a stored query to adjacency, while vocabulary phrases
@@ -115,31 +113,32 @@ This last query matches titles that contain: `vintage`, either `leather` or `sue
 Both queries and titles pass through the **same** normalization pipeline before matching — that
 shared pipeline is what makes synonyms and aliases work automatically:
 
-- **Case folding and diacritic removal** — `Café` becomes `cafe`, `Jokić` becomes `jokic`.
-- **Number disambiguation** — years, quantities, model numbers, and other numeric types are
-  classified separately based on context.
-- **No built-in entity dictionary** — named phrases, synonyms, aliases, graders, and grade words
-  come from vocabulary configuration. The stock compatibility rules still include numeric typing
-  and the default number-context word `pop`; set `number_context: []` to disable that special case.
+- **Case folding and diacritic removal** — `Café` becomes `cafe`.
+- **Generic number handling** — four-digit values from 1900 through 2099 are years; other values are
+  ordinary terms. A caller-supplied `number_context` list can keep a following value generic.
+- **No built-in product semantics** — named phrases, synonyms, aliases, categories, brands, and
+  entities come entirely from vocabulary configuration. `number_context` is empty by default.
 
 Because the same normalizer processes both sides, a query containing `sneakers` will match a title
 containing `running shoes` if those are configured as equivalent in the vocabulary. The normalizer
-hardening derived from real eBay data (diacritics, card numbers, serials, populations) is documented
+hardening derived from marketplace title shapes is documented
 in [`../research/real-data-findings.md`](../research/real-data-findings.md) and
-[`../design/normalization.md`](../design/normalization.md) §4.
+[`../design/normalization.md`](../design/normalization.md) §2.
 
 ## Vocabulary
 
-The engine's domain knowledge is managed through a **vocabulary** — a JSON-serializable collection of
-phrases, synonyms, grader keywords, and grade words. Vocabulary can come from three sources:
+The engine's domain knowledge is managed through a **vocabulary** — a JSON-serializable collection
+of phrases, synonyms, equivalences, aliases, punctuation rules, and numeric context. Vocabulary can
+come from three sources:
 
 1. **Learned from queries** — the engine scans any-of groups in your query corpus to discover synonym
-   relationships. If many queries contain `(rookie,rc)`, the engine learns that `rookie ≈ rc` and maps
-   both to the same canonical feature (ADR-015). Use [`POST /_vocab/learn`](api/vocab.md#post-_vocablearn--learn-vocabulary-from-queries)
+   relationships. If many queries contain `(package,pkg)`, the engine can learn the relationship
+   (ADR-015). Use [`POST /_vocab/learn`](api/vocab.md#post-_vocablearn--learn-vocabulary-from-queries)
    to preview learned vocabulary.
 
-2. **Manual configuration** — add phrases, synonyms, graders, and grade words through the `Vocab` API
-   or the [`PUT /_vocab`](api/vocab.md#put-_vocab--replace-vocabulary) REST endpoint.
+2. **Manual configuration** — add phrases, synonyms, equivalences, aliases, punctuation, and numeric
+   context through `Vocab` or
+   [`PUT /_vocab`](api/vocab.md#put-_vocab--replace-vocabulary).
 
 3. **File-based** — load a vocabulary JSON file at startup with `--vocab-file`, or save/load at
    runtime. Vocabularies are composable via `merge()`.
@@ -147,18 +146,19 @@ phrases, synonyms, grader keywords, and grade words. Vocabulary can come from th
 ```json
 {
   "synonyms": [
-    {"token": "rc", "canonical": "term:rookie", "kind": "category"},
-    {"token": "ud", "canonical": "term:upper_deck", "kind": "generic"}
+    {"token": "pkg", "canonical": "term:package", "kind": "generic"},
+    {"token": "ns", "canonical": "brand:north_star", "kind": "brand"}
   ],
   "phrases": [
-    {"tokens": ["upper", "deck"], "canonical": "term:upper_deck", "kind": "generic"}
+    {"tokens": ["north", "star"], "canonical": "brand:north_star", "kind": "brand"},
+    {"tokens": ["wireless", "mouse"], "canonical": "entity:wireless_mouse", "kind": "entity"}
   ],
-  "graders": ["psa", "bgs", "sgc"],
-  "grade_words": ["gem", "mint", "pristine"],
+  "equivalences": [["ns", "north star"]],
   "punctuation": [
     {"ch": "'", "class": "fold"},
     {"ch": "-", "class": "fold"}
-  ]
+  ],
+  "number_context": ["model"]
 }
 ```
 
@@ -173,7 +173,7 @@ byte-cleaning, so punctuation-only spelling differences stop dropping candidates
 - `"marker"` — emit it as its own standalone token.
 
 By default `.` is `keep`, `#`/`/` are `marker`, and every other non-alphanumeric character is `split`;
-omit the array (as older vocab files do) to get exactly that historical behavior. The same table applies
+omit the array to use that behavior. The same table applies
 to **both** queries and titles, so a query and a title that differ only in punctuation match.
 
 The `NormalizerBuilder` API remains available for programmatic vocabulary construction when you need

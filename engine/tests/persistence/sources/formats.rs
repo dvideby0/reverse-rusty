@@ -44,10 +44,7 @@ fn lazy_sources_round_trip_and_reopen() {
             e.build_from_queries(&queries);
             e
         };
-        for title in [
-            "1986 Vertex Wireless Mouse PRO",
-            "Luka Doncic Contoso Silver",
-        ] {
+        for title in ["1986 Vertex Wireless Mouse PRO", "USB Hub Contoso Silver"] {
             assert_eq!(
                 match_ids(&eng, title),
                 match_ids(&mem, title),
@@ -64,7 +61,7 @@ fn lazy_sources_round_trip_and_reopen() {
     );
     assert_eq!(
         eng.get_query_source(7).as_deref(),
-        Some("luka doncic contoso silver")
+        Some("usb hub contoso silver")
     );
 
     // A later WAL-backed flush selects and remaps a new immutable generation;

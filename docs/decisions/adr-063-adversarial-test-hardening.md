@@ -66,8 +66,8 @@
   power directly) but hours of wall-clock per run on a release-profile LTO crate; targeted hand-mutation
   spot-checks during this work validated the new suites instead. *A second independent normalizer for the
   oracle* — re-declined for the ADR-050 reasons (an unverified second copy in permanent lockstep);
-  reference-free properties get independence without a second implementation. *Pulling production eBay
-  titles into the repo* — licensing + nondeterminism; the seeded mess layer reproduces the relevant
+  reference-free properties get independence without a second implementation. *Pulling production
+  title data into the repo* — licensing + nondeterminism; the seeded mess layer reproduces the relevant
   hostile surfaces deterministically.
 - **Why this is safe / what it buys:** purely additive — no production code changed except a new
   `#[cfg(test)]` module in `src/index.rs` and new pub functions in `src/gen.rs` (test/bench tooling, off

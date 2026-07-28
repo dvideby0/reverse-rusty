@@ -110,7 +110,7 @@ Verification of one candidate against a title's feature set `F` (also reduced to
 sorted tail):
 
 1. **Common-mask gate (1–2 instructions):** `(req_mask & F.mask) == req_mask` and
-   `(forb_mask & F.mask) == 0`. The ~64 hottest features (grades, top graders, common card terms)
+   `(forb_mask & F.mask) == 0`. The ~64 hottest corpus features (common brands, categories, and terms)
    live here, so the overwhelming majority of rejects happen in a couple of AND/compare ops with no
    memory traffic beyond the candidate's two `u64`s.
 2. **Required tail:** every ID in `required_blob[off..off+len]` must be present in `F.tail`
@@ -166,8 +166,8 @@ once per distinct label per query—even when several quoted/bare clauses share 
 cannot perturb the frozen top-64 visibility boundary. Phrase covers stay on the default-visible main
 lane; every cluster cover that uses a phrase proxy is replicated rather than selectively placed by
 graph-only labels. Graph work is capped at 65,536 visited position pairs and 65,536 charged arc
-inspections, and positioned analysis bounds same-grader starts. Exhaustion or an incomplete bounded
-graph fails open by polarity (required does not reject; forbidden does not trip), so the safety valve
+inspections. Exhaustion or an incomplete bounded graph fails open by polarity (required does not
+reject; forbidden does not trip), so the safety valve
 can add an over-match but never a false negative. Explain mirrors the same bounded outcome. Each
 segment maintains a live phrase-row count; the engine refreshes an aggregate after mutations and
 captures it in each snapshot, keeping the phrase-capability decision O(1) per title.
@@ -184,7 +184,7 @@ Since ADR-105 the classification answers TWO independent questions — **who can
 |---|---|---|---|
 | **A** | highly selective (rare arity-1 anchor) | default-visible (every request) | main index, realtime per-title |
 | **B** | acceptable selectivity (arity-2 pair / selective any-of) | default-visible | main index, realtime per-title |
-| **C** | broad — only a **top-64** anchor available (`PSA 10`, `rookie`) | **opt-in** (`include_broad`) | broad lane, columnar batch |
+| **C** | broad — only a **top-64** anchor available (`pro`, `new`) | **opt-in** (`include_broad`) | broad lane, columnar batch |
 | **D** | negation-only (only forbidden clauses) | opt-in, and rejected at ingest by default (`accept_class_d` stores it as an **always-candidate**, ADR-068) | broad lane, universal signature |
 | **H** | **θ-hot anchor** (frequency ≥ `hot_anchor_threshold`, *no* top-64 mask bit — the ADR-104 rank-cliff population) | **default-visible** — probed on every request | **hot index**, columnar batch (per-title inline on the scalar path) |
 

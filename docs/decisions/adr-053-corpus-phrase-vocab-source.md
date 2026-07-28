@@ -7,7 +7,7 @@
 > therefore remains stock-vocabulary-only; that part of the original scope remains current.
 
 - **Context.** Two corpus learners existed but were never connected. The `learn` binary
-  (`src/bin/learn.rs`) mines multi-token **entities** (e.g. `upper deck` → `upper_deck`) from query
+  (`src/bin/learn.rs`) mines multi-token **entities** (e.g. `north star` → `north_star`) from query
   text via **NPMI collocation mining** (the word2vec/Mikolov phrase trick) — proven in the research
   spike ([corpus-feature-learning.md](../research/corpus-feature-learning.md)) to rediscover every
   hand-built anchor with zero hand-coded vocabulary. But its core was inline in the binary, printed to
@@ -48,7 +48,7 @@
   rebuild) and titles (match), so the differential oracle — an independent brute force using that
   normalizer — stays equivalent (engine ≡ brute), faithful to the model.
 - **Honest scope (the residual).** Phrase induction is still a *re-tokenization*: a query whose text
-  is *phrased* as the entity (e.g. `upper deck`) tightens to require the adjacent phrase, so it no
+  is *phrased* as the entity (e.g. `north star`) tightens to require the adjacent phrase, so it no
   longer matches a title where the two tokens are non-adjacent. For genuine entities (which appear
   adjacent in real titles) this is negligible, and the feature is **opt-in + reviewable + reversible**;
   it is *not* a blanket "no prior match ever changes" guarantee. The contract that always holds is the

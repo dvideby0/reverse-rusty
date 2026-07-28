@@ -12,8 +12,10 @@ recover. The measurement-gated persisted follow-on lives in the
 
 PR-A's observe telemetry falsified the program spec's corpus sizing: the ADR-104 32× is not a
 population of θ-classifiable fat class-A anchors (`would_be_hot` = **782** at θ=1024) — it is
-**~43.5k byte-identical "psa 10"-shaped queries** whose shared class-B pair posting is the
-single 43,533-entry list every hitting title scans and verifies end-to-end. Every peer system
+**~43.5k byte-identical fixed two-token queries** whose shared class-B pair posting is the
+single 43,533-entry list every hitting title scans and verifies end-to-end. The retired fixture
+supplied the measured token labels; the current domain-neutral generator preserves the same branch
+shape as `wireless pro`. Every peer system
 surveyed deduplicates stored queries before optimizing their evaluation
 ([`../research/broad-scaling-prior-art.md`](../research/broad-scaling-prior-art.md) ranked it
 #1-unanimous); we stored every copy as an independent posting entry.

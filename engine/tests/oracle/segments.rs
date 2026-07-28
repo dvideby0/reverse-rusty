@@ -38,8 +38,8 @@ fn multi_segment_identical_to_single_build() {
     let b2 = &rest[2 * chunk..];
 
     // pick some logical ids from the initial batch to update with new text
-    let new_text = "1994 north star wireless mouse limited preview pro -(manual,signed,gamma,beta)"
-        .to_string();
+    let new_text =
+        "2024 north star wireless mouse limited pro -(manual,used,damaged,refurbished)".to_string();
     let mut updates: Vec<(u64, String)> = Vec::new();
     let mut i = 7usize;
     while i < n_init && updates.len() < 200 {
@@ -208,8 +208,7 @@ fn compaction_preserves_correctness() {
     eng.bulk_ingest(&q[4 * chunk..]); // segment 4
 
     // Simulate updates: re-insert some queries with new text, tombstone originals
-    let new_text =
-        "1994 north star wireless mouse limited preview pro -(manual,signed)".to_string();
+    let new_text = "2024 north star wireless mouse limited pro -(manual,used)".to_string();
     let mut updated_ids: HashSet<u64> = HashSet::new();
     let mut i = 11usize;
     while i < chunk && updated_ids.len() < 150 {

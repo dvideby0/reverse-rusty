@@ -94,15 +94,14 @@ fn durable_reopen_migrates_legacy_context_without_aliases() {
         data_dir: Some(dir.clone()),
         ..EngineConfig::default()
     };
+    let mut vocab = Vocab::new();
+    vocab.set_number_context_words(&["model"]);
 
     {
-        let mut engine = Engine::with_config(
-            Normalizer::default_vocab().expect("normalizer"),
-            config.clone(),
-        );
-        engine.build_from_queries(&[(1, "pop -used 1994".into())]);
+        let mut engine = Engine::with_vocab(vocab.clone(), config.clone()).expect("with vocab");
+        engine.build_from_queries(&[(1, "model -used 1994".into())]);
         assert!(
-            match_ids(&engine, "pop vintage 1994").contains(&1),
+            match_ids(&engine, "model vintage 1994").contains(&1),
             "current compiler isolates number context at the negated clause"
         );
     }
@@ -113,11 +112,10 @@ fn durable_reopen_migrates_legacy_context_without_aliases() {
         stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
     }
 
-    // The old joint stream could also leak provider/number context across a
+    // The old joint stream could also leak caller-defined number context across a
     // clause, so semantics-v0 is rebuilt even without any alias vocabulary.
-    let reopened = Engine::open(Normalizer::default_vocab().expect("normalizer"), config)
-        .expect("context-sensitive migration");
-    assert!(match_ids(&reopened, "pop vintage 1994").contains(&1));
+    let reopened = Engine::open_with_vocab(vocab, config).expect("context-sensitive migration");
+    assert!(match_ids(&reopened, "model vintage 1994").contains(&1));
     let current =
         reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
     assert!(current.segment_files.iter().all(|name| {

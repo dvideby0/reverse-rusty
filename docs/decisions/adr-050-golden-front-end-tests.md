@@ -17,7 +17,7 @@
   pipeline. So a semantic bug in the parser, the extractor, or the normalization model corrupts the ground
   truth and the engine identically — both agree on the wrong answer and the oracle stays green. Worse, the
   oracle builds both sides with the empty `default_vocab` (ADR-010), so the entire vocab-driven
-  normalization path (multiword phrases, synonyms, graders) is **never exercised at all** — the generator
+  normalization path (multiword phrases, synonyms, aliases) is **never exercised at all** — the generator
   side-steps it with any-of groups of alternate surface forms. The contract's `positively_matches(T, Q)`
   is *assumed* correct; the oracle proves the index+verify agrees with a brute force over the **same
   extracted features**, not that the extraction itself is right.
@@ -26,23 +26,23 @@
      the spec — [`reference/dsl.md`](../reference/dsl.md), [`design/normalization.md`](../design/normalization.md)
      §1–§4, [`design/matching.md`](../design/matching.md) §1 — **not** captured from running the code, so a
      human-authored constant cannot inherit a code bug. `dsl.rs` asserts full `Ast` structure per operator;
-     `normalize.rs` asserts exact feature-*name* sets (diacritics, the number-disambiguation matrix, the
-     vocab-driven phrase/synonym/grader paths, fold-stability + no-drift determinism); `compile.rs` asserts
+     `normalize.rs` asserts exact feature-*name* sets (diacritics, generic year/context handling, the
+     vocab-driven phrase/synonym/alias paths, fold-stability + no-drift determinism); `compile.rs` asserts
      exact required/forbidden/any-of name sets (joint multiword normalization, singleton-any-of promotion,
      dedup, the §1 worked example) plus the **forbidden-never-anchors** invariant at the data level.
   2. **Exercise the vocab-driven normalizer end-to-end** with a second oracle pass built on a populated
      `NormalizerBuilder` vocab. Still a coherence check (shared front end), so it *complements* the golden
-     tests rather than replacing them — but it makes the phrase/synonym/grader machinery reachable, which
+     tests rather than replacing them — but it makes the phrase/synonym/alias machinery reachable, which
      the empty-vocab oracle never did.
   3. **Author conservatively where the spec is silent.** Cases the docs don't define (serial-vs-year
-     precedence, doubled commas, ambiguous `mj`) are omitted or labelled regression-guards, never presented
+     precedence, doubled commas, ambiguous `xy`) are omitted or labelled regression-guards, never presented
      as spec-blessed.
   4. **Keep them in-module, not in a new `tests/` file.** They are `--lib` unit tests next to the code they
      pin (matching the existing `dsl.rs`/`dict.rs` convention), so no module-map / suite-table registration
      is needed and a future visibility tightening can't break them.
 - **Alternatives declined:** *A fully independent reference extractor* — reimplement parse + normalize +
   extract a second time inside the oracle and diff the two feature representations. Rejected: it is a second
-  copy of nontrivial, evolving logic (the daachorse phrase scan, the number-disambiguation rules) that
+  copy of nontrivial, evolving logic (the daachorse phrase scan and numeric-context rules) that
   would itself be unverified and would have to be kept in lockstep with every normalizer change; a
   divergence could not be attributed to the engine vs. the copy, muddying the zero-false-negative signal.
   Golden constants traceable to a spec section are cheaper, stronger, and localize a failure to one stage.

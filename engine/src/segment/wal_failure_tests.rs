@@ -75,7 +75,9 @@ fn wal_insert_failure_is_rejected_not_acknowledged() {
     assert!(eng.get_query_source(1).is_some());
 
     eng.wal.as_mut().unwrap().break_writes_for_test();
-    let err = eng.try_insert_live("scottie pippen", 2, 1).unwrap_err();
+    let err = eng
+        .try_insert_live("mechanical keyboard", 2, 1)
+        .unwrap_err();
     assert!(
         matches!(err, WriteError::Wal(_)),
         "expected Wal error, got {err:?}"

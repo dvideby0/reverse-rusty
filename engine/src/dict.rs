@@ -1,6 +1,6 @@
 //! Feature dictionary — interns feature strings to dense `u32` IDs.
 //!
-//! Design: docs/design/normalization.md §5
+//! Design: docs/design/normalization.md §3
 //! Invariant: Strings die here — everything downstream is integers only
 //! Hot path: ID lookup is on the hot path; frequency tracking is compile-time
 //!
