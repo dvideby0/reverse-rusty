@@ -77,3 +77,40 @@ fn identical_alias_retry_repairs_a_failed_control_transition() {
     );
     assert_eq!(repaired.dict_fingerprint, cluster.dict.fingerprint());
 }
+
+#[test]
+fn identical_alias_retry_refuses_to_misrepair_a_failed_resize_transition() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("in-memory cluster");
+    cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("install alias before resize");
+    let initial = cluster.control_state().expect("pre-resize control state");
+    cluster = cluster.with_control_plane(Box::new(FailFirstProposal::new(initial)));
+
+    let resize = cluster.resize(4);
+    assert!(
+        matches!(resize, Err(ShardError::ControlPlane(_))),
+        "resize proposal must fail after the live topology swap: {resize:?}"
+    );
+    assert_eq!(cluster.num_shards(), 4, "the live resize already swapped");
+    let stale = cluster.control_state().expect("stale control topology");
+    assert_eq!(stale.num_shards, 3);
+
+    let error = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect_err("alias retry must not disguise a pending resize as a model bump");
+    assert!(
+        matches!(error, ShardError::ControlPlane(_)),
+        "unexpected retry error: {error:?}"
+    );
+    assert_eq!(
+        cluster.control_state().expect("control state after retry"),
+        stale,
+        "the refused alias retry must not mutate the stale topology"
+    );
+}

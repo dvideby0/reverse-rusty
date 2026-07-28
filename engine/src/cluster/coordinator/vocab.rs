@@ -273,6 +273,28 @@ impl ClusterEngine {
         let generation = self.placement_generation();
         let dict_fingerprint = self.dict.fingerprint();
         let state = self.control.cluster_state()?;
+        let live_shards = u32::try_from(self.ring.num_shards()).map_err(|_| {
+            ShardError::ControlPlane(
+                "live shard count exceeds the control-plane representation".into(),
+            )
+        })?;
+        let assignments_match = state.assignments.len() == self.ring.num_shards()
+            && state
+                .assignments
+                .iter()
+                .enumerate()
+                .all(|(position, assignment)| assignment.position as usize == position);
+        if state.num_shards != live_shards || state.vnodes != self.vnodes || !assignments_match {
+            return Err(ShardError::ControlPlane(format!(
+                "alias-import retry found control topology with {} shards, {} vnodes, and {} \
+                 assignment(s); live topology has {} shards and {} vnodes",
+                state.num_shards,
+                state.vnodes,
+                state.assignments.len(),
+                self.ring.num_shards(),
+                self.vnodes
+            )));
+        }
         if state.placement_generation != generation.0 || state.dict_fingerprint != dict_fingerprint
         {
             let prior_generation = generation.0.checked_sub(1).ok_or_else(|| {
@@ -322,7 +344,12 @@ impl ClusterEngine {
                     "validating persisted cluster vocab before alias-import retry: {error}"
                 ))
             })?;
-            Vocab::from_json(persisted).map_err(|error| {
+            let persisted_vocab = Vocab::from_json(persisted).map_err(|error| {
+                ShardError::Log(format!(
+                    "validating persisted cluster vocab before alias-import retry: {error}"
+                ))
+            })?;
+            persisted_vocab.to_normalizer().map_err(|error| {
                 ShardError::Log(format!(
                     "validating persisted cluster vocab before alias-import retry: {error}"
                 ))
