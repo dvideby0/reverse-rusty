@@ -227,15 +227,18 @@ ADR-124 adds a deliberately smaller automated contract in `perfgate`:
 - exact structure: classes, dictionary, posting shape, candidate sum/p95/p99/max, match sum;
 - resources: persistent `retain_source=false` resident bytes and logical durable bytes may grow at
   most 5%; durable file count is exact;
-- timing: seven p50/p95/p99 rounds plus nine selective and columnar throughput windows. The
-  reference band is `max(30% of the six-run median, 3 × historical MAD)`; a timing-only breach
-  retries the whole timing window once. Structure/resources never retry.
+- timing: seven p50/p95/p99 rounds plus nine selective and columnar throughput windows. Absolute
+  safety limits always apply: p50 ≤ 7.5 µs, p95 ≤ 75 µs, p99 ≤ 100 µs, selective throughput ≥
+  120k titles/s, and columnar throughput ≥ 180k titles/s. Once reviewed history is populated, the
+  additional relative band is `max(30% of the reference median, 3 × historical MAD)`; a timing-only
+  breach retries the whole timing window once. Structure/resources never retry.
 
 After an intentional workload-semantic rewrite, the checked-in baseline may temporarily carry no
 timing source runs or samples. In that explicit all-empty state, `perfgate check` still blocks on
-deterministic structure and resources, captures and uploads the normal timing attempt, but reports
-timing comparison as pending. Partial histories fail validation. The normal `rebaseline` command
-requires five fresh reviewed CI reports and atomically restores the timing gate.
+deterministic structure, resources, and the absolute timing safety limits; only the more sensitive
+variance-band comparison is pending. Partial histories fail validation. The normal `rebaseline`
+command requires five fresh reviewed CI reports and atomically adds the relative history without
+removing the safety limits.
 
 The reviewed baseline is
 [`performance/perf-baseline.json`](performance/perf-baseline.json). Every PR uploads its

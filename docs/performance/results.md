@@ -115,10 +115,23 @@ over that exact workload, not a measured OpenSearch comparison. The count includ
 conservative arity-2 hot-pair generation; the exact matcher then rejects candidates that do not
 survive verification.
 
+The generic pin records 5,234,864 confirmed row matches versus 6,610,573 in the retired fixture
+(20.8% fewer). That is not a recall or coverage score. A small difference in the title-hit
+probability of one repeated broad-query family is multiplied across thousands of identical stored
+rows, while the candidate sum changes by only 0.4% and candidate p95/p99 remain exactly 95/111.
+The new workload therefore retains retrieval and rejection pressure but asks exact verification to
+reject more broad candidates. At this pool size, independently sampled
+entity+year+brand+collection families contribute effectively no confirmed rows; `match_sum` is
+therefore a broad-lane output-volume metric, while the selective timing lane primarily measures
+candidate rejection. Correctness and successful selective matching remain owned by the
+differential/self-match oracles, not by making this benchmark's `match_sum` resemble the retired
+fixture.
+
 The **common-mask gate** in the exact matcher (two `u64` ops over the 64 hottest features) is what
 makes each of those 54 verifications cheap: most are rejected before any memory traffic beyond the
 candidate's two mask words. The historical p99 latency of ~2–3 µs for the full normalize → generate
-→ verify cycle reflects this; timing for the generic fixture is pending the reviewed CI rebaseline.
+→ verify cycle reflects this. The generic fixture now has permanent absolute timing safety limits;
+its more sensitive variance history is pending the reviewed CI rebaseline.
 
 ---
 

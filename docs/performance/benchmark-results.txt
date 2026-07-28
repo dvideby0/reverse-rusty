@@ -72,9 +72,12 @@ ADR-124 AUTOMATED GATE — merge-blocking on pinned ubuntu-24.04 x64 / 4 vCPU
   VARIANCE-AWARE TIMING:
     seven complete latency rounds -> median p50/p95/p99;
     nine 100k-title windows -> median selective scalar and columnar broad throughput;
+    permanent safety limits: p50<=7.5us, p95<=75us, p99<=100us,
+      selective>=120k titles/s, columnar>=180k titles/s;
     reference = median/MAD across >=5 reviewed CI runs;
     allowed delta = max(30% of reference median, 3 * reference MAD);
     timing-only breach repeats one complete timing window and must breach twice to fail.
+    When reviewed history is pending, the safety limits still block regressions.
 
   REBASELINE:
     at least five distinct `perf-current.json` CI artifacts + a non-empty reason;

@@ -2,7 +2,7 @@ use super::measure::{measure_static_report, measure_timing};
 use super::{
     median, print_failures, runner_contract, timing_histories, workload_contract, write_json,
     Baseline, BaselineReference, Distribution, GatePolicy, Report, ResourceMetrics, TimingAttempt,
-    TimingHistory, RAYON_THREADS, RUNNER_CONTRACT_ID, SCHEMA_VERSION,
+    TimingHistory, TimingSafetyLimits, RAYON_THREADS, RUNNER_CONTRACT_ID, SCHEMA_VERSION,
 };
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -21,18 +21,7 @@ pub(super) fn check(baseline_path: &Path, report_path: &Path) -> Result<(), Box<
         print_failures("deterministic/resource", &static_failures);
         return Err(io::Error::other("performance gate failed without a timing retry").into());
     }
-    if baseline.reference.source_run_ids.is_empty() {
-        report
-            .timing_attempts
-            .push(measure_timing(&engine, &titles)?);
-        write_json(report_path, &report)?;
-        super::print_report_summary(&report);
-        println!(
-            "performance gate: PASS structure/resources; timing captured but comparison pending five reviewed CI reports"
-        );
-        return Ok(());
-    }
-
+    let history_pending = baseline.reference.source_run_ids.is_empty();
     let first = measure_timing(&engine, &titles)?;
     let first_failures = compare_timing(&first, &baseline);
     report.timing_attempts.push(first);
@@ -40,7 +29,14 @@ pub(super) fn check(baseline_path: &Path, report_path: &Path) -> Result<(), Box<
     if first_failures.is_empty() {
         write_json(report_path, &report)?;
         super::print_report_summary(&report);
-        println!("performance gate: PASS");
+        if history_pending {
+            println!(
+                "performance gate: PASS structure/resources + timing safety limits; \
+                 variance-band comparison pending five reviewed CI reports"
+            );
+        } else {
+            println!("performance gate: PASS");
+        }
         return Ok(());
     }
 
@@ -58,7 +54,14 @@ pub(super) fn check(baseline_path: &Path, report_path: &Path) -> Result<(), Box<
 
     if second_failures.is_empty() {
         super::print_report_summary(&report);
-        println!("performance gate: PASS on timing retry");
+        if history_pending {
+            println!(
+                "performance gate: PASS timing safety limits on retry; \
+                 variance-band comparison pending five reviewed CI reports"
+            );
+        } else {
+            println!("performance gate: PASS on timing retry");
+        }
         Ok(())
     } else {
         print_failures("timing attempt 2", &second_failures);
@@ -101,10 +104,31 @@ fn validate_baseline_definition(baseline: &Baseline) -> Result<(), Box<dyn Error
         ))
         .into());
     }
+    validate_timing_safety_limits(&baseline.policy.timing_safety_limits)?;
     validate_timing_reference(
         &baseline.reference.source_run_ids,
         &baseline.reference.timing,
     )
+}
+
+fn validate_timing_safety_limits(limits: &TimingSafetyLimits) -> Result<(), Box<dyn Error>> {
+    if limits.latency_p50_max_ns == 0
+        || limits.latency_p95_max_ns == 0
+        || limits.latency_p99_max_ns == 0
+        || limits.selective_titles_per_sec_min == 0
+        || limits.columnar_titles_per_sec_min == 0
+    {
+        return Err(io::Error::other("timing safety limits must all be non-zero").into());
+    }
+    if limits.latency_p50_max_ns > limits.latency_p95_max_ns
+        || limits.latency_p95_max_ns > limits.latency_p99_max_ns
+    {
+        return Err(io::Error::other(
+            "timing latency safety limits must be ordered p50 <= p95 <= p99",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn validate_timing_reference(
@@ -302,7 +326,10 @@ fn compare_upper_resource(
 }
 
 fn compare_timing(attempt: &TimingAttempt, baseline: &Baseline) -> Vec<String> {
-    let mut failures = Vec::new();
+    let mut failures = compare_timing_safety_limits(attempt, &baseline.policy.timing_safety_limits);
+    if baseline.reference.source_run_ids.is_empty() {
+        return failures;
+    }
     compare_latency(
         "latency p50",
         &attempt.latency_p50_ns,
@@ -338,6 +365,57 @@ fn compare_timing(attempt: &TimingAttempt, baseline: &Baseline) -> Vec<String> {
         &baseline.policy,
         &mut failures,
     );
+    failures
+}
+
+fn compare_timing_safety_limits(
+    attempt: &TimingAttempt,
+    limits: &TimingSafetyLimits,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (name, current, limit) in [
+        (
+            "latency p50",
+            attempt.latency_p50_ns.median,
+            limits.latency_p50_max_ns,
+        ),
+        (
+            "latency p95",
+            attempt.latency_p95_ns.median,
+            limits.latency_p95_max_ns,
+        ),
+        (
+            "latency p99",
+            attempt.latency_p99_ns.median,
+            limits.latency_p99_max_ns,
+        ),
+    ] {
+        println!("{name} safety floor: current_median={current} upper_limit={limit}");
+        if current > limit {
+            failures.push(format!(
+                "{name} exceeded the absolute safety limit: {current} > {limit}"
+            ));
+        }
+    }
+    for (name, current, limit) in [
+        (
+            "selective throughput",
+            attempt.selective_titles_per_sec.median,
+            limits.selective_titles_per_sec_min,
+        ),
+        (
+            "columnar throughput",
+            attempt.columnar_titles_per_sec.median,
+            limits.columnar_titles_per_sec_min,
+        ),
+    ] {
+        println!("{name} safety floor: current_median={current} lower_limit={limit}");
+        if current < limit {
+            failures.push(format!(
+                "{name} fell below the absolute safety limit: {current} < {limit}"
+            ));
+        }
+    }
     failures
 }
 
@@ -413,6 +491,16 @@ fn distribution_unchecked(samples: &[u64]) -> Distribution {
 mod tests {
     use super::*;
 
+    fn timing_safety_limits() -> TimingSafetyLimits {
+        TimingSafetyLimits {
+            latency_p50_max_ns: 7_500,
+            latency_p95_max_ns: 75_000,
+            latency_p99_max_ns: 100_000,
+            selective_titles_per_sec_min: 120_000,
+            columnar_titles_per_sec_min: 180_000,
+        }
+    }
+
     #[test]
     fn timing_allowance_takes_material_or_noise_band_whichever_is_larger() {
         let policy = GatePolicy {
@@ -420,6 +508,7 @@ mod tests {
             timing_mad_multiplier: 3,
             resource_material_regression_basis_points: 500,
             retry_timing_failures_once: true,
+            timing_safety_limits: timing_safety_limits(),
         };
         let quiet = Distribution::from_samples(vec![100; 5]).expect("quiet");
         assert_eq!(timing_allowance(&quiet, &policy), 30);
@@ -447,6 +536,42 @@ mod tests {
     fn pending_timing_reference_must_be_completely_empty() {
         validate_timing_reference(&[], &timing_history(0)).expect("empty pending state");
         assert!(validate_timing_reference(&[], &timing_history(1)).is_err());
+    }
+
+    #[test]
+    fn timing_safety_limits_must_be_nonzero_and_ordered() {
+        validate_timing_safety_limits(&timing_safety_limits()).expect("valid safety limits");
+
+        let mut zero = timing_safety_limits();
+        zero.selective_titles_per_sec_min = 0;
+        assert!(validate_timing_safety_limits(&zero).is_err());
+
+        let mut unordered = timing_safety_limits();
+        unordered.latency_p50_max_ns = unordered.latency_p95_max_ns + 1;
+        assert!(validate_timing_safety_limits(&unordered).is_err());
+    }
+
+    #[test]
+    fn timing_safety_limits_block_regressions_without_history() {
+        let dist = |value| Distribution::from_samples(vec![value; 3]).expect("distribution");
+        let mut attempt = TimingAttempt {
+            latency_p50_ns: dist(7_500),
+            latency_p95_ns: dist(75_000),
+            latency_p99_ns: dist(100_000),
+            selective_titles_per_sec: dist(120_000),
+            columnar_titles_per_sec: dist(180_000),
+        };
+        assert!(
+            compare_timing_safety_limits(&attempt, &timing_safety_limits()).is_empty(),
+            "limits are inclusive"
+        );
+
+        attempt.latency_p99_ns = dist(100_001);
+        attempt.selective_titles_per_sec = dist(119_999);
+        let failures = compare_timing_safety_limits(&attempt, &timing_safety_limits());
+        assert_eq!(failures.len(), 2);
+        assert!(failures.iter().any(|failure| failure.contains("p99")));
+        assert!(failures.iter().any(|failure| failure.contains("selective")));
     }
 
     #[test]

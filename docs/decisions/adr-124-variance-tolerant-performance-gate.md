@@ -89,6 +89,8 @@ manual because its recorded ~16 GiB peak consumes the entire standard public run
 
 - A material regression in the agreed latency, throughput, memory, footprint, or seed-fixed work
   shape now blocks the already-required CI job.
+- Absolute timing safety limits remain active even while a workload migration is collecting fresh
+  variance history, and remain a second line of defense after that history is installed.
 - The broad exploratory sweeps remain advisory and continue to expose signals too noisy or
   expensive for every PR.
 - Hosted-runner image or hardware-contract changes fail loud and require a five-run rebaseline.
@@ -98,8 +100,9 @@ manual because its recorded ~16 GiB peak consumes the entire standard public run
 ## Current outcome
 
 The domain-neutral fixture migration changed workload semantics, invalidating the original six-run
-timing history. Rather than compare unlike workloads, the baseline now uses the ADR's explicit
-all-empty pending state: deterministic structure and resource checks remain active, while timing
-is still captured in each CI report but comparison is visibly suspended until five fresh reviewed
-reports are passed through the same `perfgate rebaseline` workflow. Any partial baseline history
-fails validation.
+timing history. Rather than compare unlike workloads, schema v2 keeps the source-run history in an
+explicit all-empty pending state while enforcing conservative absolute limits on every pinned-runner
+attempt: p50 ≤ 7.5 µs, p95 ≤ 75 µs, p99 ≤ 100 µs, selective throughput ≥ 120k titles/s, and
+columnar throughput ≥ 180k titles/s. Five fresh reviewed reports passed through the same
+`perfgate rebaseline` workflow add the more sensitive median/MAD comparison; rebaseline preserves
+the absolute limits. Any partial baseline history or malformed safety policy fails validation.

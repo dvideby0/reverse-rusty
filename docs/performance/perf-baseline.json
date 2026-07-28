@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "runner": {
     "id": "github-hosted-ubuntu-24.04-x64-public-standard",
     "os": "linux",
@@ -25,7 +25,14 @@
     "timing_material_regression_basis_points": 3000,
     "timing_mad_multiplier": 3,
     "resource_material_regression_basis_points": 500,
-    "retry_timing_failures_once": true
+    "retry_timing_failures_once": true,
+    "timing_safety_limits": {
+      "latency_p50_max_ns": 7500,
+      "latency_p95_max_ns": 75000,
+      "latency_p99_max_ns": 100000,
+      "selective_titles_per_sec_min": 120000,
+      "columnar_titles_per_sec_min": 180000
+    }
   },
   "reference": {
     "source_run_ids": [],
@@ -60,5 +67,5 @@
       "columnar_titles_per_sec": []
     }
   },
-  "rebaseline_reason": "Domain-neutral fixture migration: deterministic structure and resource values were recalculated from the pinned workload. Timing comparison is explicitly pending until five fresh reviewed CI reports are available; the rebaseline command will populate provenance and re-enable it."
+  "rebaseline_reason": "Domain-neutral fixture migration: deterministic structure and resource values were recalculated from the pinned workload. Absolute timing safety limits remain merge-blocking while five fresh reviewed CI reports are collected; rebaseline will add the more sensitive variance band without removing those limits."
 }

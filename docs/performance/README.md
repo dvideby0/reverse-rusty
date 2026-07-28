@@ -20,15 +20,17 @@ counts, and serialized/accounted sizes are deterministic for the pinned workload
   B/query resident** and **244.59 B/query durable**. Historical 20M accounting was about 5.2 B/query
   without retained source and 109 B/query with it. These are engine-accounted values, not host RSS
   or page-cache guarantees.
-- **Regression policy:** deterministic work shape and resource ceilings plus variance-banded timing
-  are merge-blocking through ADR-124; the 10M mixed-operations soak runs weekly and on demand.
+- **Regression policy:** deterministic work shape, resource ceilings, and absolute timing safety
+  limits are merge-blocking through ADR-124; variance bands add sensitivity when reviewed history
+  is available. The 10M mixed-operations soak runs weekly and on demand.
 
 Full analysis, tables, bottlenecks, and the 100M extrapolation are in [`results.md`](results.md).
 The **benchmark runbook** — how to run each harness, the machine-independent **invariants** to
 verify, and the dated **capture log** — is in [`benchmark-results.txt`](benchmark-results.txt).
 The merge-blocking ADR-124 subset and its reviewed runner history live in
 [`perf-baseline.json`](perf-baseline.json): exact seed-fixed work shape, 5% persistent
-resident/durable ceilings, and variance-banded p50/p95/p99 plus selective/columnar throughput.
+resident/durable ceilings, permanent timing safety limits, and reviewed variance histories for
+p50/p95/p99 plus selective/columnar throughput.
 The ADR-107 pre-collector baseline and ADR-108 bounded K=10/100/1,000/10,000 post-integration
 latency, structural-memory, result-byte, and checksum capture are in
 [`ranked-percolation-baseline.txt`](ranked-percolation-baseline.txt). It also records the
@@ -65,11 +67,11 @@ windows. Each timing bound is the more tolerant of a 30% material-change band an
 MADs; a timing-only breach gets one complete retry. Deterministic structure and the 5% resource
 ceilings never retry.
 
-The current domain-neutral workload migration has an explicit pending timing baseline: source-run
-IDs and all timing histories are empty together, so structure and resources remain merge-blocking
-while timing is still measured and uploaded but comparison is skipped with a visible message. Five
-fresh reviewed CI reports supplied to `perfgate rebaseline` repopulate the histories and
-automatically restore timing enforcement.
+The current domain-neutral workload migration has an explicit pending timing history: source-run
+IDs and all timing histories are empty together. Structure, resources, and conservative absolute
+timing limits remain merge-blocking; only the more sensitive variance-band comparison waits for
+five fresh reviewed CI reports. Supplying those reports to `perfgate rebaseline` repopulates the
+histories without removing the permanent safety limits.
 
 The broader capture log remains valuable but advisory. Full policy, rebaseline procedure, and
 scheduled-soak contract → [`../testing.md`](../testing.md) and

@@ -76,10 +76,11 @@ jobs:
         run: ./deploy/local-smoke.sh --prebuilt engine/target/release
 
       # The merge-blocking performance subset: fixed seed/workload, exact
-      # structural checks, 5% memory + durable-footprint ceilings, and timing
-      # medians compared to six reviewed runner samples with max(30%, 3*MAD)
-      # bands. A timing-only failure repeats the complete timing window once;
-      # deterministic/resource failures never retry.
+      # structural checks, 5% memory + durable-footprint ceilings, absolute
+      # timing safety limits, and (once fresh history is populated) timing
+      # medians compared with max(30%, 3*MAD) variance bands. A timing-only
+      # failure repeats the complete timing window once; deterministic/resource
+      # failures never retry.
       - name: Performance regression gate
         working-directory: engine
         env:
