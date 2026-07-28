@@ -1,9 +1,10 @@
 name: CI
 
-# Runs the exact same code gate as engine/check.sh (fmt + clippy + test + audit
-# + deny) on every PR and push to main, then runs ADR-124's reviewed performance
-# contract on a pinned runner. The legacy deep benchmarks remain exploratory;
-# perfgate is the small variance-aware subset that is safe to make blocking.
+# Runs the exact same lanes as engine/check.sh on every PR and push to main.
+# Core/default and distributed feature builds execute on separate runners; the
+# long-lived `gate + benchmarks` status requires both, preserving one required
+# gate without serializing unlike feature builds. ADR-124's reviewed performance
+# contract stays on its pinned core runner. Deep benchmarks remain exploratory.
 on:
   push:
     branches: [main]
@@ -32,8 +33,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  gate:
-    name: gate + benchmarks
+  core-gate:
+    name: core gate + benchmarks
     # ADR-124 runner contract: public standard x64 = 4 vCPU / 16 GiB. Do not
     # float this to `ubuntu-latest`; changing the label requires an intentional
     # five-run rebaseline.
@@ -50,6 +51,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
+          # Preserve the cache namespace used by the former `gate` job after
+          # renaming the execution job to `core-gate`.
+          shared-key: gate
 
       # Prebuilt binaries — far faster than `cargo install` from source.
       - name: Install cargo-audit and cargo-deny
@@ -57,10 +61,12 @@ jobs:
         with:
           tool: cargo-audit,cargo-deny
 
-      # The must-pass gate: fmt + clippy + cargo test --release (now including
-      # the committed stress/pressure tests) + audit + deny.
-      - name: check.sh (fmt + clippy + test + audit + deny)
-        run: ./engine/check.sh
+      # The core half of the must-pass gate: fmt + default/lean clippy +
+      # cargo test --release (including stress/pressure) + audit + deny +
+      # reference independence + crash injection. The distributed half runs
+      # concurrently below; the final gate job requires both results.
+      - name: check.sh (core lane)
+        run: ./engine/check.sh --lane core
 
       # The Tier 5 M1 deployable smoke (ADR-098): run → ingest → search → restart →
       # search again → restore, over the release bin, for BOTH local modes
@@ -126,6 +132,51 @@ jobs:
           cargo test --release --test stress
           soak::ten_million_queries_mixed_ops --
           --ignored --nocapture --exact
+
+  # The distributed feature compiles a different dependency and cfg graph, and
+  # shares no ordering requirement with the default/core lane. Keeping it on a
+  # separate runner removes its release+LTO build from the serial critical path
+  # while executing the exact same clippy and test commands as local check.sh.
+  distributed-gate:
+    name: distributed gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pinned toolchain
+        working-directory: engine
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          # Reuse distributed dependency artifacts without letting this test
+          # lane overwrite the production-bin cache shared by harness/release.
+          shared-key: distributed
+          save-if: false
+
+      - name: check.sh (distributed lane)
+        run: ./engine/check.sh --lane distributed
+
+  # Preserve the established required-check context. Branch protection can keep
+  # requiring `gate + benchmarks`; it turns green only when both code-gate lanes
+  # succeed, even though they run concurrently.
+  gate:
+    name: gate + benchmarks
+    needs: [core-gate, distributed-gate]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every code-gate lane
+        env:
+          CORE_RESULT: ${{ needs.core-gate.result }}
+          DISTRIBUTED_RESULT: ${{ needs.distributed-gate.result }}
+        run: |
+          set -euo pipefail
+          echo "core gate: $CORE_RESULT"
+          echo "distributed gate: $DISTRIBUTED_RESULT"
+          [[ "$CORE_RESULT" == "success" ]]
+          [[ "$DISTRIBUTED_RESULT" == "success" ]]
 
   # The multi-machine harness (ADR-072, Distributed-v1 criterion 3): a fully secured
   # containerized cluster (3 durable shard nodes + handoff target + REST coordinator +

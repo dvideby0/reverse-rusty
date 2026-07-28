@@ -27,6 +27,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [148](../adr-148-vocab-learn-api-contract.md) | Vocabulary learning REST API contract | Makes review-first learning strict, bounded, mode-consistent, and explicit about its native scope. | Accepted |
 | [149](../adr-149-vocab-learn-apply-api-contract.md) | Vocabulary learn-and-apply REST API contract | Makes stored-corpus learning strict, off-runtime, mode-consistent, and durably fail-loud. | Accepted |
 | [150](../adr-150-alias-registry-read-api-contract.md) | Alias-registry read REST API contract | Makes governed-alias review strict, pageable, observable, and bounded off async workers. | Accepted |
+| [151](../adr-151-parallel-ci-code-gate-lanes.md) | Parallel CI code-gate lanes | Runs exact core and distributed gates concurrently behind one required result. | Accepted |
 
 ---
 

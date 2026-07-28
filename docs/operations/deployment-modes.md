@@ -12,11 +12,12 @@ pages ([`disaster-recovery.md`](disaster-recovery.md), [`rolling-upgrade.md`](ro
 [`sizing.md`](sizing.md), [`alerting.md`](alerting.md), [`backup-restore.md`](backup-restore.md)).
 
 > TL;DR: four supported modes. The two **local** modes are CI-gated on every PR
-> (`deploy/local-smoke.sh` runs inside the required `gate + benchmarks` job); the two **remote**
-> modes are smoke-gated per PR (the compose smoke + the lifecycle harness + the compose↔chart
-> topology-parity tripwire) and per release (`release.yml` runs both `cluster-smoke.sh` and the
-> kind `k8s-smoke.sh` against the exact candidate image before it is published). "Deployable feature complete" here is deliberately distinct from the scale
-> proof — representative-corpus and real-cluster acceptance remain open under
+> (`deploy/local-smoke.sh` runs inside the pinned `core gate + benchmarks` job required by the
+> aggregate `gate + benchmarks` result); the two **remote** modes are smoke-gated per PR (the
+> compose smoke + the lifecycle harness + the compose↔chart topology-parity tripwire) and per
+> release (`release.yml` runs both `cluster-smoke.sh` and the kind `k8s-smoke.sh` against the exact
+> candidate image before it is published). "Deployable feature complete" here is deliberately
+> distinct from the scale proof — representative-corpus and real-cluster acceptance remain open under
 > [ADR-065](../decisions/adr-065-distributed-v1-graduation.md) and the
 > [roadmap](../roadmap.md#priority-1--real-world-acceptance-evidence).
 

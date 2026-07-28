@@ -5,8 +5,10 @@
 # security advisories, and dependency/license policy. Run it before pushing or
 # opening a PR — every step must pass for the gate to succeed.
 #
-#   Usage:  ./check.sh           # full gate (fmt + clippy + test + audit + deny)
-#           ./check.sh --fast    # quick gate (fmt + clippy only) — used by the pre-commit hook
+#   Usage:  ./check.sh                    # full gate (every lane)
+#           ./check.sh --fast             # quick gate (fmt + clippy only)
+#           ./check.sh --lane core        # core/default code, policy, and crash lanes
+#           ./check.sh --lane distributed # distributed clippy + tests
 #
 # Requires the rustfmt + clippy components (rustup) and two cargo plugins:
 #   cargo install cargo-audit cargo-deny
@@ -20,13 +22,50 @@
 
 set -uo pipefail
 
-# --fast skips the slow steps (test/audit/deny) so it can run on every commit;
-# the full gate still runs on push and in CI. Keeping both behind one script
-# means the checks are defined in exactly one place.
+# The no-argument command remains the complete local gate. CI selects the two
+# independent lanes on separate runners, then requires both results; this keeps
+# one command definition without serializing unlike feature builds.
 fast=0
-if [ "${1:-}" = "--fast" ]; then
-    fast=1
-fi
+core=1
+distributed=1
+case "${1:-}" in
+    "")
+        [ "$#" -eq 0 ] || {
+            echo "usage: ./check.sh [--fast | --lane core | --lane distributed]" >&2
+            exit 2
+        }
+        ;;
+    --fast)
+        [ "$#" -eq 1 ] || {
+            echo "usage: ./check.sh [--fast | --lane core | --lane distributed]" >&2
+            exit 2
+        }
+        fast=1
+        distributed=0
+        ;;
+    --lane)
+        [ "$#" -eq 2 ] || {
+            echo "usage: ./check.sh [--fast | --lane core | --lane distributed]" >&2
+            exit 2
+        }
+        case "$2" in
+            core)
+                distributed=0
+                ;;
+            distributed)
+                core=0
+                ;;
+            *)
+                echo "unknown check lane: $2 (expected core or distributed)" >&2
+                exit 2
+                ;;
+        esac
+        ;;
+    *)
+        echo "usage: ./check.sh [--fast | --lane core | --lane distributed]" >&2
+        exit 2
+        ;;
+esac
 
 # Operate on the crate this script lives in, regardless of the caller's CWD.
 cd "$(dirname "$0")"
@@ -65,22 +104,28 @@ size_advisory() {
     printf '\033[0;33m    advisory only — does not fail the gate\033[0m\n'
 }
 
-run "rustfmt (--check)"    cargo fmt --check
-run "clippy (-D warnings)" cargo clippy --all-targets --release -- -D warnings
-# Lean-core lane: lints the library + non-server bins with the server/observability
-# stack gated off, so a stray `use` of a server-only crate in library code fails the
-# gate. Keeps the `--no-default-features` build (the lean dependency surface) honest.
-run "clippy (lean core)"   cargo clippy --no-default-features --release -- -D warnings
-if [ "$fast" -eq 0 ]; then
+if [ "$core" -eq 1 ]; then
+    run "rustfmt (--check)"    cargo fmt --check
+    run "clippy (-D warnings)" cargo clippy --all-targets --release -- -D warnings
+    # Lean-core lane: lints the library + non-server bins with the server/observability
+    # stack gated off, so a stray `use` of a server-only crate in library code fails the
+    # gate. Keeps the `--no-default-features` build (the lean dependency surface) honest.
+    run "clippy (lean core)"   cargo clippy --no-default-features --release -- -D warnings
+fi
+if [ "$core" -eq 1 ] && [ "$fast" -eq 0 ]; then
     # The Cluster-v1 acceptance gate (tests/cluster_oracle.rs +
     # tests/cluster_durability_oracle.rs — see docs/testing.md) runs here on the default
     # feature set; the distributed-gated cluster oracles run in the `distributed` lane below.
     run "tests (--release)"    cargo test --release
+fi
+if [ "$distributed" -eq 1 ]; then
     # Distributed (gRPC ShardServer) lane: the default lanes never compile the
     # `distributed` feature, so without this the cluster gRPC code + its oracle would
     # rot. Uses the pure-Rust `protox` build-dep — no system `protoc` needed.
     run "clippy (distributed)" cargo clippy --features distributed --all-targets --release -- -D warnings
     run "tests (distributed)"  cargo test --features distributed --release
+fi
+if [ "$core" -eq 1 ] && [ "$fast" -eq 0 ]; then
     run "cargo audit"          cargo audit
     # --all-features so the license/ban policy covers the DISTRIBUTED dependency graph
     # (the tonic TLS stack, ADR-071) — not just the default-feature tree.
@@ -105,9 +150,11 @@ if [ "$fast" -eq 0 ]; then
     run "crash injection" cargo test --release --test crash_injection -- --ignored --test-threads=1
 fi
 
-# Non-failing refactor nudge. Runs in --fast and full, so it shows on commit,
-# push, and CI; printed just before the summary to stay visible.
-size_advisory
+# Non-failing refactor nudge. The core lane owns it so split CI does not print
+# the same advisory twice; full and --fast local runs remain unchanged.
+if [ "$core" -eq 1 ]; then
+    size_advisory
+fi
 
 printf '\n'
 if [ "${#failures[@]}" -eq 0 ]; then

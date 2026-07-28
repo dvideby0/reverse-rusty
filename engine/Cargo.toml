@@ -124,6 +124,12 @@ distributed = ["dep:reverse-rusty-shard-proto", "dep:tonic", "dep:http-body", "d
 [[bin]]
 name = "bench"
 path = "src/bin/bench.rs"
+test = false
+
+[[bin]]
+name = "clusterbench"
+path = "src/bin/clusterbench.rs"
+test = false
 
 [[bin]]
 name = "perfgate"
@@ -132,26 +138,37 @@ path = "src/bin/perfgate/main.rs"
 [[bin]]
 name = "rankbench"
 path = "src/bin/rankbench.rs"
+test = false
 
 [[bin]]
 name = "demo"
 path = "src/bin/demo.rs"
+test = false
 
 [[bin]]
 name = "clusterdemo"
 path = "src/bin/clusterdemo.rs"
+test = false
 
 [[bin]]
 name = "learn"
 path = "src/bin/learn.rs"
+test = false
+
+[[bin]]
+name = "norm"
+path = "src/bin/norm.rs"
+test = false
 
 [[bin]]
 name = "segbench"
 path = "src/bin/segbench.rs"
+test = false
 
 [[bin]]
 name = "snapbench"
 path = "src/bin/snapbench.rs"
+test = false
 
 # The crash-injection worker (ADR-088): a lean-core bin the parent integration test
 # (tests/crash_injection) spawns and SIGKILLs mid-write. Declared as a [[bin]] so the
@@ -172,6 +189,7 @@ required-features = ["server"]
 [[bin]]
 name = "shardserver"
 path = "src/bin/shardserver.rs"
+test = false
 # A deployable shard node: serves ShardService over gRPC. Builds only with the
 # `distributed` feature (and its tonic/proto deps).
 required-features = ["distributed"]

@@ -1,17 +1,19 @@
 # Testing, benchmarks & CI
 
 How Reverse Rusty is verified — the suites, the pressure/soak tests, the benchmarks, the local git
-hooks, and the GitHub Actions pipeline. There is **one code/correctness/security gate**,
-[`engine/check.sh`](../engine/check.sh), plus ADR-124's hardware-scoped performance blocker inside
-the same required CI job. Why they are separated → [`DECISIONS.md`](DECISIONS.md) ADR-024/124.
+hooks, and the GitHub Actions pipeline. There is **one logical code/correctness/security gate**,
+[`engine/check.sh`](../engine/check.sh). Its exact core and distributed subsets run concurrently in
+CI behind one required result (ADR-151); the no-argument local command still runs both. ADR-124's
+hardware-scoped performance blocker stays on the pinned core runner. Why these boundaries exist →
+[`DECISIONS.md`](DECISIONS.md) ADR-024/124/151.
 
 ## TL;DR
 
 - **Before you push:** run [`engine/check.sh`](../engine/check.sh) — or install the hooks once with
   [`./setup-hooks.sh`](../setup-hooks.sh) and they run it for you.
-- **CI runs the same `check.sh`** on every PR and push to `main`, then the pinned-runner
-  performance contract. Green locally predicts the code gate; only the contract runner can issue
-  the timing verdict.
+- **CI runs the same `check.sh` lanes** on every PR and push to `main`: core and distributed execute
+  on separate runners, and one aggregate required check demands both. Green locally predicts the
+  code gate; only the pinned core runner can issue the performance timing verdict.
 - Test *counts* are never hand-maintained here — run `cargo test --release` for the live number.
 
 ## The code gate: `check.sh`
@@ -20,11 +22,15 @@ the same required CI job. Why they are separated → [`DECISIONS.md`](DECISIONS.
 cd engine && export CARGO_TARGET_DIR=/tmp/reverse-rusty-target   # or just ./engine/check.sh from the root
 ./check.sh          # full gate: fmt + clippy + test + audit + deny
 ./check.sh --fast   # quick gate: fmt + clippy only (what the pre-commit hook runs)
+./check.sh --lane core         # default/lean checks + policy + crash injection
+./check.sh --lane distributed  # distributed-feature clippy + tests
 ```
 
-Every step runs even if an earlier one fails, so one invocation surfaces every problem; the script
-exits non-zero if any step failed. It needs the `rustfmt` + `clippy` components (supplied by the
-pinned toolchain) and two cargo plugins: `cargo install cargo-audit cargo-deny`.
+Every selected step runs even if an earlier one fails, so one invocation surfaces every problem;
+the script exits non-zero if any step failed. The two CI lane jobs are independent, so a failure in
+one does not cancel the other; the required summary fails unless both passed. The core/full command
+needs the `rustfmt` + `clippy` components (supplied by the pinned toolchain) and two cargo plugins:
+`cargo install cargo-audit cargo-deny`. The distributed-only lane needs only the pinned toolchain.
 
 It also prints a **non-failing file-size advisory** at the end of every run (full and `--fast`): any
 `.rs` file under `src/` or `tests/` over 600 lines is listed as a refactor candidate. It is purely
@@ -273,18 +279,27 @@ Bypass in an emergency with `git commit --no-verify` / `git push --no-verify`; C
 ## CI: GitHub Actions
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every PR, on push to `main`, and on
-manual dispatch. The required job runs on pinned `ubuntu-24.04`:
+manual dispatch. ADR-151 splits the logical gate across pinned `ubuntu-24.04` runners:
 
-1. Toolchain from [`engine/rust-toolchain.toml`](../engine/rust-toolchain.toml) (rustup auto-installs
-   the pinned rustc + `rustfmt`/`clippy`).
-2. `Swatinem/rust-cache` (the release+LTO build is slow; caching is what keeps PR runs reasonable).
-3. `cargo-audit` + `cargo-deny` installed as prebuilt binaries.
-4. **`./engine/check.sh`** — the must-pass gate (now including the committed stress suite).
-5. **`./deploy/local-smoke.sh --prebuilt`** — the deployable smoke (ADR-098): both local
+1. Both jobs install the toolchain from
+   [`engine/rust-toolchain.toml`](../engine/rust-toolchain.toml). The core lane preserves its
+   existing `Swatinem/rust-cache` namespace; the distributed lane reads the production distributed
+   cache without saving test artifacts back into it.
+2. The **core lane** installs prebuilt `cargo-audit` + `cargo-deny`, then runs
+   **`./engine/check.sh --lane core`**: format, default/lean Clippy, default release tests (including
+   the committed stress suite), dependency policy, reference independence, and crash injection.
+3. Concurrently, the **distributed lane** runs
+   **`./engine/check.sh --lane distributed`**: the same distributed-feature Clippy and release
+   tests that the complete local command runs.
+4. A final **`gate + benchmarks`** result retains the established required-check name and succeeds
+   only when both lanes succeeded.
+5. On the core runner, **`./deploy/local-smoke.sh --prebuilt`** performs the deployable smoke
+   (ADR-098): both local
    modes (single-node + in-process cluster) end-to-end over the release bin — ingest, search,
    SIGTERM-restart-reopen, restore-from-backup. A deployment gate over the built artifact, like the
    harness; `check.sh` stays the engine-gate SSOT.
-6. **`perfgate check`** — the merge-blocking ADR-124 performance/resource contract; current JSON
+6. **`perfgate check`** follows core validation on that same otherwise-idle pinned runner — the
+   merge-blocking ADR-124 performance/resource contract; current JSON
    uploaded in the `benchmark-output` artifact.
 7. Deep benchmarks — run-and-print, `continue-on-error`, diagnostic output uploaded with the gate
    report.
