@@ -19,6 +19,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::dto::ApiError;
 use crate::handlers::search::parse_named_time_value;
@@ -28,7 +29,9 @@ use crate::state::AppState;
 pub(crate) const HEALTH_ENDPOINT: &str = "health";
 pub(crate) const HEALTH_BODY_LIMIT: usize = 64 * 1024;
 pub(crate) const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_CONCURRENT_HEALTH_WORK: usize = 8;
 const DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
+static HEALTH_WORK_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_HEALTH_WORK);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum HealthStatus {
@@ -180,6 +183,8 @@ pub(crate) async fn health(
         }
     };
 
+    let mut waited = false;
+    let mut wait_permit = None;
     loop {
         let current = {
             let snapshot = state.snapshot.load();
@@ -191,13 +196,23 @@ pub(crate) async fn health(
                 stale_segments: snapshot.stale_segment_count(),
             }
         };
+        if waited && Instant::now() >= deadline {
+            return finish_health_response(&state.prom, standalone_response(current, true), head);
+        }
         if request.satisfied_by(current.status()) {
             return finish_health_response(&state.prom, standalone_response(current, false), head);
         }
         let Some(delay) = wait_delay(deadline) else {
             return finish_health_response(&state.prom, standalone_response(current, true), head);
         };
+        if wait_permit.is_none() {
+            wait_permit = match try_acquire_health_work(&state.prom, head) {
+                Ok(permit) => Some(permit),
+                Err(response) => return *response,
+            };
+        }
         tokio::time::sleep(delay).await;
+        waited = true;
     }
 }
 
@@ -279,6 +294,33 @@ pub(crate) fn wait_delay(deadline: Instant) -> Option<Duration> {
         .checked_duration_since(Instant::now())
         .filter(|remaining| !remaining.is_zero())
         .map(|remaining| remaining.min(HEALTH_POLL_INTERVAL))
+}
+
+pub(crate) fn try_acquire_health_work(
+    prom: &PrometheusMetrics,
+    head: bool,
+) -> Result<SemaphorePermit<'static>, Box<Response>> {
+    try_acquire_health_work_from(&HEALTH_WORK_PERMITS, prom, head)
+}
+
+fn try_acquire_health_work_from<'a>(
+    permits: &'a Semaphore,
+    prom: &PrometheusMetrics,
+    head: bool,
+) -> Result<SemaphorePermit<'a>, Box<Response>> {
+    permits.try_acquire().map_err(|_| {
+        let mut response = health_rejection(
+            prom,
+            StatusCode::TOO_MANY_REQUESTS,
+            "rejected_execution_exception",
+            "too many concurrent /_health probes or status waits",
+            head,
+        );
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        Box::new(response)
+    })
 }
 
 pub(crate) fn health_rejection(
@@ -384,5 +426,31 @@ mod tests {
             ..HealthParams::default()
         })
         .is_err());
+    }
+
+    #[test]
+    fn unauthenticated_health_work_admission_is_independently_bounded() {
+        let prom = PrometheusMetrics::new();
+        let admission = Semaphore::new(2);
+        let permits = (0..2)
+            .map(|_| {
+                try_acquire_health_work_from(&admission, &prom, false).expect("bounded permit")
+            })
+            .collect::<Vec<_>>();
+        let response = try_acquire_health_work_from(&admission, &prom, false)
+            .expect_err("work beyond the cap is rejected");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER).expect("retry"),
+            "1"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .expect("cache"),
+            "no-store"
+        );
+        drop(permits);
     }
 }

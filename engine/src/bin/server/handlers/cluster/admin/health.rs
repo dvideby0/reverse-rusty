@@ -20,8 +20,8 @@ use tracing::{error, instrument, warn};
 use reverse_rusty::cluster::{ClusterEngine, ShardError};
 
 use crate::handlers::admin::{
-    finish_health_response, validate_health_method, validate_health_request, wait_delay,
-    HealthParams, HealthStatus, HEALTH_ENDPOINT,
+    finish_health_response, try_acquire_health_work, validate_health_method,
+    validate_health_request, wait_delay, HealthParams, HealthStatus, HEALTH_ENDPOINT,
 };
 use crate::state::ClusterAppState;
 
@@ -69,6 +69,13 @@ pub(crate) async fn cluster_health(
         Ok(request) => request,
         Err(response) => return *response,
     };
+    // Every coordinator observation can cross the network and queue behind the
+    // shared stats permit. Cap this open endpoint before either resource is
+    // consumed; the permit remains held across any requested status wait.
+    let _health_permit = match try_acquire_health_work(&state.prom, head) {
+        Ok(permit) => permit,
+        Err(response) => return *response,
+    };
     let deadline = match request.deadline() {
         Ok(deadline) => deadline,
         Err(reason) => {
@@ -82,10 +89,17 @@ pub(crate) async fn cluster_health(
         }
     };
 
+    let mut last_observation = None;
     loop {
+        if let Some(last) = last_observation.as_ref() {
+            if Instant::now() >= deadline {
+                return finish_health_response(&state.prom, cluster_response(last, true), head);
+            }
+        }
         let current = collect_once(&state, deadline).await;
         if current.deadline_expired {
-            return finish_health_response(&state.prom, cluster_response(&current, true), head);
+            let reported = timeout_observation(&current, last_observation.as_ref());
+            return finish_health_response(&state.prom, cluster_response(reported, true), head);
         }
         if request.satisfied_by(current.status) {
             return finish_health_response(&state.prom, cluster_response(&current, false), head);
@@ -93,7 +107,19 @@ pub(crate) async fn cluster_health(
         let Some(delay) = wait_delay(deadline) else {
             return finish_health_response(&state.prom, cluster_response(&current, true), head);
         };
+        last_observation = Some(current);
         tokio::time::sleep(delay).await;
+    }
+}
+
+fn timeout_observation<'a>(
+    current: &'a ClusterHealth,
+    last: Option<&'a ClusterHealth>,
+) -> &'a ClusterHealth {
+    if current.deadline_expired {
+        last.unwrap_or(current)
+    } else {
+        current
     }
 }
 
@@ -257,5 +283,27 @@ mod tests {
         let health = collect_cluster_health(&cluster).expect("health");
         assert_eq!(health.status, HealthStatus::Green);
         assert_eq!(health.shards, 3);
+    }
+
+    #[test]
+    fn expired_probe_preserves_the_last_completed_observation() {
+        let last = ClusterHealth {
+            status: HealthStatus::Yellow,
+            deadline_expired: false,
+            shards: 3,
+            pending_repairs: 1,
+            reason: Some("repair pending"),
+        };
+        let expired = ClusterHealth {
+            status: HealthStatus::Red,
+            deadline_expired: true,
+            shards: 0,
+            pending_repairs: 0,
+            reason: Some("probe deadline elapsed"),
+        };
+        let reported = timeout_observation(&expired, Some(&last));
+        assert_eq!(reported.status, HealthStatus::Yellow);
+        assert_eq!(reported.shards, 3);
+        assert_eq!(reported.pending_repairs, 1);
     }
 }

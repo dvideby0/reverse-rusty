@@ -377,7 +377,9 @@ The route is a strict, bodyless GET/HEAD with a 64 KiB extraction ceiling. It re
 parameters and unsupported values, returns structured 400/405/413 errors, sends
 `Allow: GET, HEAD` on 405, strips the body for HEAD, and includes `Cache-Control: no-store` on every
 response. `GET` and `HEAD` remain open even with `--auth-protect-reads` so orchestrator probes do
-not need bearer credentials.
+not need bearer credentials. At most eight coordinator probes or standalone requests waiting for a
+better status may run concurrently; additional work fails immediately with 429, `Retry-After: 1`,
+and a structured `rejected_execution_exception`. Immediate standalone observations use no permit.
 
 Supported query controls:
 
@@ -389,9 +391,10 @@ Supported query controls:
 
 Green and yellow return HTTP 200. Red returns 503. If coordinator collection cannot complete by the
 deadline, or `wait_for_status` is not reached, the latest response returns 408 with
-`"timed_out":true`. A coordinator request that times out cannot forcibly stop already-running
-blocking/network work; that work retains its single shared stats permit until its own transport
-bounds complete.
+`"timed_out":true`. The response preserves the last completed observation rather than replacing it
+with a synthetic failure at the deadline, and a status first seen after the deadline remains timed
+out. A coordinator request that times out cannot forcibly stop already-running blocking/network
+work; that work retains its single shared stats permit until its own transport bounds complete.
 
 Coordinator green requires a successful committed control-state read, a count from every logical
 serving position, matching committed/ring shard counts, and exactly one in-range committed

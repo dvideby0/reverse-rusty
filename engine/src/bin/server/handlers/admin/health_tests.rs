@@ -1,6 +1,7 @@
 use super::{health, HEALTH_BODY_LIMIT};
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use axum::{
@@ -11,7 +12,7 @@ use axum::{
     Router,
 };
 use parking_lot::Mutex;
-use reverse_rusty::{config::EngineConfig, segment::Engine, Normalizer};
+use reverse_rusty::{config::EngineConfig, segment::Engine, vocab::Vocab, Normalizer};
 use tower::ServiceExt;
 
 use crate::{metrics::PrometheusMetrics, state::AppState};
@@ -144,6 +145,48 @@ async fn head_is_a_bodyless_readiness_probe() {
         "application/json"
     );
     assert!(bytes.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn status_reached_after_the_deadline_is_still_timed_out() {
+    let state = test_state();
+    {
+        let mut engine = state.engine.lock();
+        assert!(
+            engine.set_vocab(Vocab::new()).expect("vocab update") > 0,
+            "the fixture must begin yellow"
+        );
+        state.snapshot.store(Arc::new(engine.snapshot()));
+    }
+
+    let request_state = Arc::clone(&state);
+    let request = tokio::spawn(async move {
+        send(
+            &request_state,
+            HEALTH_BODY_LIMIT,
+            Method::GET,
+            "/_health?wait_for_status=green&timeout=10ms",
+            Body::empty(),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(1)).await;
+
+    // Delay the single runtime worker beyond the route deadline, then make the
+    // next snapshot green before the waiting handler can poll it. The deadline
+    // must win even though the requested status is visible on that late poll.
+    std::thread::sleep(Duration::from_millis(20));
+    {
+        let mut engine = state.engine.lock();
+        assert_eq!(engine.recompile_stale_segments(), 1);
+        state.snapshot.store(Arc::new(engine.snapshot()));
+    }
+
+    let (status, _, bytes) = request.await.expect("health task");
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON health");
+    assert_eq!(body["status"], "green");
+    assert_eq!(body["timed_out"], true);
 }
 
 #[tokio::test]

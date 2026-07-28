@@ -29,9 +29,15 @@ engine does not have.
 - Give the route a 64 KiB extraction ceiling, structured 400/405/413 errors, `Allow: GET, HEAD`,
   bodyless HEAD responses, `Cache-Control: no-store`, and the low-cardinality `health` request and
   duration metric labels. GET and HEAD remain the intentionally unauthenticated readiness surface.
+- Admit at most eight concurrent coordinator probes or standalone requests that are actually
+  waiting for a better status. Additional work fails immediately with 429 and `Retry-After: 1`,
+  independently bounding the open health surface's share of the server-wide request and stats
+  limits. Immediate standalone observations need no permit.
 - Return `mode` and `timed_out` in both payloads. Green and yellow return 200, native red returns
   503, and an expired coordinator observation or unmet `wait_for_status` returns 408 with
-  `timed_out=true`. Health colors are ordered, so waiting for yellow accepts yellow or green.
+  `timed_out=true`. Preserve the last completed observation when a later coordinator probe reaches
+  its deadline, and never accept a standalone status first reached after the deadline. Health
+  colors are ordered, so waiting for yellow accepts yellow or green.
 - Standalone red means WAL or persistence failure. Yellow means one or more skipped or stale
   segments while durability remains healthy. Green means those serving and durability indicators
   are healthy. The lock-free engine snapshot remains the observation source.
@@ -52,7 +58,8 @@ engine does not have.
 Operators get one strict readiness contract in standalone and coordinator modes, including a
 familiar way to wait during rollout without polling client-side. Red is now reliably fail-loud at
 the HTTP layer, and coordinator green attests to both serving positions and a complete committed
-topology rather than only successful count probes.
+topology rather than only successful count probes. At most eight coordinator probes or standalone
+status waiters can occupy global request slots.
 
 The endpoint remains deliberately native. ES/OpenSearch clients that require
 `/_cluster/health` allocation fields cannot treat it as a drop-in replacement. A timed-out

@@ -94,7 +94,8 @@ reverse chronological and describe outcomes, not the current architecture or fut
   ([ADR-143](decisions/adr-143-cat-shards-api-contract.md)).
 - Hardened native `GET`/`HEAD /_health` with strict bounded transport, familiar status waiting,
   fail-loud HTTP readiness, complete coordinator serving/control-plane attestation, blocking-worker
-  admission, sanitized unauthenticated failures, and no-store route telemetry
+  admission, independently bounded unauthenticated probes/waiters, sanitized failures, and no-store
+  route telemetry
   ([ADR-144](decisions/adr-144-health-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
