@@ -141,6 +141,37 @@ fn identical_alias_retry_recommits_an_uncommitted_rebuild() {
 }
 
 #[test]
+fn identical_alias_retry_does_not_overwrite_an_unreadable_manifest() {
+    let dir = unique_dir("alias_retry_corrupt_manifest");
+    let cfg = durable_cfg(3, dir.clone(), false);
+    let manifest_path = dir.join("cluster_manifest.bin");
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("durable cluster");
+    cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("initial alias import");
+
+    let mut corrupt = std::fs::read(&manifest_path).expect("read manifest bytes");
+    let last = corrupt.last_mut().expect("manifest CRC");
+    *last ^= 0xff;
+    std::fs::write(&manifest_path, &corrupt).expect("corrupt manifest CRC");
+
+    let error = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect_err("retry must fail loud on an unreadable manifest");
+    assert!(
+        matches!(error, ShardError::Log(_)),
+        "unexpected retry error: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("manifest after retry"),
+        corrupt,
+        "a no-op retry must never overwrite an incompatible commit point"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn declared_equivalence_survives_reopen() {
     // ADR-054: a DECLARED equivalence applied via set_vocab on a DURABLE cluster is persisted
     // in the manifest's serialized vocab + baked into the sealed segments (as expansion). After

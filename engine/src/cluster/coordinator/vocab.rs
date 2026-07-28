@@ -241,13 +241,7 @@ impl ClusterEngine {
             .map_err(|error| ShardError::Config(error.to_string()))?;
         let changed = vocab.aliases() != &before;
         if !changed {
-            // A failed durable `set_vocab` checkpoint leaves the coherent green
-            // rebuild live even though the old manifest remains authoritative.
-            // An identical retry must finish that commit before acknowledging a
-            // no-op, or the acknowledged alias can disappear on restart.
-            if !self.current_vocab_rebuild_is_committed()? {
-                self.checkpoint()?;
-            }
+            self.finish_pending_alias_import_commit()?;
             return Ok(crate::segment::AliasApplyReport {
                 applied: false,
                 activated,
@@ -272,15 +266,40 @@ impl ClusterEngine {
         })
     }
 
-    /// Whether the current vocabulary rebuild is the coordinator manifest's
-    /// committed generation. In-memory clusters are committed by definition.
-    ///
-    /// A missing or unreadable durable manifest is treated as uncommitted so
-    /// the retry goes through `checkpoint`, which either repairs it atomically
-    /// or returns the underlying durability failure.
-    fn current_vocab_rebuild_is_committed(&self) -> Result<bool, ShardError> {
+    /// Complete the post-swap commits a prior `set_vocab` attempt may have
+    /// failed before publishing. A fully committed import remains a read-only
+    /// no-op; incompatibility and attestation failures stay fail-loud.
+    fn finish_pending_alias_import_commit(&self) -> Result<(), ShardError> {
+        let generation = self.placement_generation();
+        let dict_fingerprint = self.dict.fingerprint();
+        let state = self.control.cluster_state()?;
+        if state.placement_generation != generation.0 || state.dict_fingerprint != dict_fingerprint
+        {
+            let prior_generation = generation.0.checked_sub(1).ok_or_else(|| {
+                ShardError::ControlPlane(
+                    "cannot repair alias-import model state at placement generation zero".into(),
+                )
+            })?;
+            if state.placement_generation != prior_generation {
+                return Err(ShardError::ControlPlane(format!(
+                    "alias-import retry found control placement generation {}, expected {} or {}",
+                    state.placement_generation, prior_generation, generation.0
+                )));
+            }
+            self.control
+                .propose(ClusterStateChange::BumpModelVersion { dict_fingerprint })?;
+            let repaired = self.control.cluster_state()?;
+            if repaired.placement_generation != generation.0
+                || repaired.dict_fingerprint != dict_fingerprint
+            {
+                return Err(ShardError::ControlPlane(
+                    "alias-import model-state repair was not committed".into(),
+                ));
+            }
+        }
+
         let Some(dir) = &self.data_dir else {
-            return Ok(true);
+            return Ok(());
         };
         let vocab_data = match &self.vocab {
             Some(vocab) => vocab
@@ -291,13 +310,19 @@ impl ClusterEngine {
                 .into_bytes(),
             None => Vec::new(),
         };
-        let Ok(manifest) = crate::storage::read_cluster_manifest(&dir.join(CLUSTER_MANIFEST_FILE))
-        else {
-            return Ok(false);
-        };
-        Ok(manifest.placement_generation == self.placement_generation()
+        let manifest = crate::storage::read_cluster_manifest(&dir.join(CLUSTER_MANIFEST_FILE))
+            .map_err(|error| {
+                ShardError::Log(format!(
+                    "reading cluster manifest before alias-import retry: {error}"
+                ))
+            })?;
+        let committed = manifest.placement_generation == generation
             && manifest.dict_fingerprint == self.dict.fingerprint()
-            && manifest.vocab_data == vocab_data)
+            && manifest.vocab_data == vocab_data;
+        if !committed {
+            self.checkpoint()?;
+        }
+        Ok(())
     }
 
     /// Learn alias candidates from the cluster's OWN stored queries (any-of

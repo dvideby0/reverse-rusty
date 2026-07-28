@@ -54,7 +54,11 @@ directional replacement, or deferred activation.
   nothing. A no-op returns `activated: 0`, `recompiled: 0`, does not publish a new snapshot, and does
   not rebuild. It also avoids a checkpoint when the current coordinator vocabulary generation is
   already committed; an identical retry after a failed durable checkpoint must retry that commit
-  before acknowledging the otherwise unchanged registry.
+  before acknowledging the otherwise unchanged registry. If an embedded single engine stopped
+  between `set_vocab` and `recompile_stale_segments`, the identical import completes that pending
+  rebuild instead of reporting a no-op. A coordinator retry likewise attests or repairs its
+  feature-model control transition before acknowledgement, while an unreadable or incompatible
+  manifest fails loud and is never overwritten.
 - Wait asynchronously for the shared one-slot administrative permit, then move the permit, engine
   or coordinator lock wait, parsing apply, rebuild, and standalone publication onto a blocking
   worker. A disconnected request cannot release admission while mutation work continues.
@@ -90,5 +94,6 @@ diagnostics, and rule/form bounds. Standalone route tests cover both JSON dialec
 matching, true no-op publication behavior, strict method/query/media/JSON/body handling, deadlines,
 telemetry, off-runtime admission and locking, closed admission, and fail-loud durable commit failure.
 Coordinator tests cover response and matching parity, no-op behavior, durable retry recommit,
-telemetry, method handling, asynchronous admission, and off-runtime write-lock contention over a
-real multi-shard cluster.
+control-transition repair, incompatible-manifest refusal, telemetry, method handling, asynchronous
+admission, and off-runtime write-lock contention over a real multi-shard cluster. Embedded lifecycle
+tests prove an identical import completes a pending split-apply rebuild.

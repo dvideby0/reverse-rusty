@@ -38,10 +38,21 @@ impl Engine {
             .map_err(|error| crate::error::NormalizerError::new(error.to_string()))?;
         let changed = vocab.aliases() != &before;
         if !changed {
+            // Embedded callers may have used the public split apply seam
+            // (`set_vocab` then `recompile_stale_segments`) and stopped between
+            // its two steps. An identical import must finish that pending
+            // rebuild before it can honestly report a no-op.
+            let pending_rebuild = self.has_stale_segments();
+            let recompiled = self.recompile_stale_segments();
+            if self.has_stale_segments() {
+                return Err(crate::error::NormalizerError::new(
+                    "alias import could not complete the pending query rebuild",
+                ));
+            }
             return Ok(AliasApplyReport {
-                applied: false,
+                applied: pending_rebuild,
                 activated,
-                recompiled: 0,
+                recompiled,
                 summary: self.alias_summary(),
             });
         }

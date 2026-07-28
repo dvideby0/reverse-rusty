@@ -129,9 +129,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   ([ADR-151](decisions/adr-151-parallel-ci-code-gate-lanes.md)).
 - Hardened native `POST /_vocab/aliases/import` with strict atomic Solr parsing, familiar
   Elasticsearch rule objects and synchronous refresh plus OpenSearch Solr/expansion controls,
-  bounded no-store transport, true no-op retries that finish any pending durable coordinator
-  commit, timed standalone/coordinator parity, shared off-runtime mutation admission, complete
-  standalone rebuild verification, and fail-loud durable acknowledgement
+  bounded no-store transport, true no-op retries that finish pending engine, control-plane, and
+  durable coordinator state without overwriting incompatible manifests, timed
+  standalone/coordinator parity, shared off-runtime mutation admission, complete standalone rebuild
+  verification, and fail-loud durable acknowledgement
   ([ADR-152](decisions/adr-152-alias-import-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
