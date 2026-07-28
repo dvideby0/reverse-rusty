@@ -143,7 +143,7 @@ services:
     # --include-broad makes broad-lane queries match by DEFAULT; broad is also a
     # per-request flag (`"include_broad": true` in the _search body), so leave it off
     # here unless every request should include broad. To accept negation-only
-    # (class-D) queries (e.g. `-reprint`), add `--accept-class-d` to THIS coordinator
+    # (class-D) queries (e.g. `-refurbished`), add `--accept-class-d` to THIS coordinator
     # command: it is the sole gate — remote shards are coordinator-gated storage and
     # accept whatever the coordinator places, no per-shard flag (cluster-deployment.md §3).
     environment:

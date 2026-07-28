@@ -33,8 +33,8 @@ fn corpus(seed: u64) -> (Vec<(u64, String)>, Vec<String>) {
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: 2_000,
-        num_sets: 1_000,
+        num_entities: 2_000,
+        num_collections: 1_000,
     });
     (data.queries, data.titles)
 }
@@ -134,7 +134,7 @@ fn live_hot_add_is_ring_placed_and_always_visible() {
     // Find a θ-hot single-token anchor by re-adding an existing single-token
     // H-class query text under a fresh id: its anchor frequency is already ≥ θ
     // in the shared frozen dict, so the add classifies H deterministically.
-    // The generator's broad shape 0 emits single-token player queries — pick a
+    // The generator's broad shape 0 emits single-token entity queries — pick a
     // text whose add lands in class H by probing the count delta.
     let mut placed_one = false;
     for (base_id, text) in queries.iter().take(4_000) {

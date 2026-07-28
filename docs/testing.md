@@ -41,7 +41,7 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 |---|---|---|
 | **Differential oracle** | `tests/oracle/` | The **correctness contract** — shared-front-end brute force vs engine, asserting zero false negatives/positives ([`design/README.md`](design/README.md) §2). The load-bearing retrieval/lowering test; never weaken it. Includes the **messy-corpus** passes (`messy.rs` — the same contract over `gen::messify_dataset`'s adversarial surfaces, per-title + batch, ADR-063) and the **degenerate-input** differential (`degenerate.rs` — grammar/feature-model edges, engine ≡ brute on both ingest paths). |
 | **Adversarial properties** | `tests/adversarial/` | **Reference-free** correctness properties that don't share code with the engine (ADR-063): the self-match diagonal (a query must match a title built from its own positive terms — clean, messy-query×clean-title, clean-query×perturbed-title), metamorphic set-identity under surface noise, the ADR-054/058/060/061 cross-form matrices (incl. the codex-R11 whitespace-run regression), and unicode-soup fuzz (no-panic, determinism, `P(T) ⊇ N(T)`, `match_features == N(T)`). These cover the front-end divergence the differential oracle is structurally blind to. |
-| **Independent semantic oracle** | `tests/independent_oracle/` | **Front-end and lowering-independent differential** (ADR-087/#123): the engine is diffed against `reverse-rusty-ref-matcher`, a std-only zero-dependency parser/normalizer plus direct grammar predicate tree. The reference contains no query frequencies, retrieval proxies, signature classes, or production exact-store lowering; code independence remains enforced by the `check.sh` `cargo tree` lane. It asserts zero final FN/FP and separately classifies every missed semantic truth as candidate-cover vs post-retrieval loss by observing the real stored posting/filter/lane traversal, with candidate generation judged for recall only. Coverage: generated default (clean + messy), populated graders/phrases, quoted adjacency, multi-word alias two-view (controlled + ~989k-match at-scale), a hand-authored gotcha table, and the env-gated `RR_ORACLE_CORPUS` real corpus. Structural and human-expectation pins cover every clause boundary, complete multi-token any-of and negated-term predicates, and required/forbidden phrase graphs. |
+| **Independent semantic oracle** | `tests/independent_oracle/` | **Front-end and lowering-independent differential** (ADR-087/#123): the engine is diffed against `reverse-rusty-ref-matcher`, a std-only zero-dependency parser/normalizer plus direct grammar predicate tree. The reference contains no query frequencies, retrieval proxies, signature classes, or production exact-store lowering; code independence remains enforced by the `check.sh` `cargo tree` lane. It asserts zero final FN/FP and separately classifies every missed semantic truth as candidate-cover vs post-retrieval loss by observing the real stored posting/filter/lane traversal, with candidate generation judged for recall only. Coverage: generated default (clean + messy), populated aliases/phrases, quoted adjacency, multi-word alias two-view (controlled + ~989k-match at-scale), a hand-authored gotcha table, and the env-gated `RR_ORACLE_CORPUS` real corpus. Structural and human-expectation pins cover every clause boundary, complete multi-token any-of and negated-term predicates, and required/forbidden phrase graphs. |
 | **Crash injection** | `tests/crash_injection/` | **Real-process SIGKILL** durability torture (ADR-088): spawns the `crashwriter` bin, delivers a real external SIGKILL mid durable-op (WAL append / flush / compaction / backup / churn / **upsert** / **watermark**), reopens in-process, and diffs the recovered engine against the ADR-087 independent oracle — zero FN on every ACKed write, no resurrection/corruption. `upsert` proves ADR-067 atomic replace (race-immune); `watermark` proves the ADR-066 `ensure_seq_after` re-pin across a second reopen; the **cluster** mid-write analogue is `deploy/harness.sh` leg 3b. The real-kill-mid-syscall check the chmod/torn-tail/CRC *simulations* cannot be. **`#[ignore]`d** (spawns + kills real processes, real fsyncs) behind a `check.sh` `crash injection` lane — see [Crash injection](#crash-injection). |
 | **Broad-lane batch** | `tests/broad_batch.rs` | Broad-lane **batch ≡ scalar** equivalence matrix — including positive and negated compound any-of members under materialize/prefilter on and off — the load-bearing batch-correctness deliverable ([`design/matching.md`](design/matching.md) §4). |
 | **Quoted phrases** | `tests/quoted_phrases.rs` | ADR-120 hand-authored truth tables for required/forbidden adjacency and order, default split vs configured fold punctuation, alternate alias paths without conjunction weakening, independent-reference agreement, and requested-columnar batch parity through the positioned fallback. |
@@ -93,7 +93,7 @@ semantic clauses. It depends on nothing in `reverse-rusty` (enforced by the `ref
 signature classes, or exact-store columns. A code-local parser/normalizer bug or a shared lowering
 mistake therefore shows up as a divergence. It runs over the same default vocab the in-tree oracle uses
 *and* populated
-grader/phrase + multi-word-alias-two-view vocabularies, plus a hand-written gotcha table whose
+alias/phrase + multi-word-alias-two-view vocabularies, plus a hand-written gotcha table whose
 expectations are the human tiebreaker. It does not replace the golden tests or the in-tree oracle — it
 is the differential complement they structurally cannot be. Final match sets are compared exactly
 (zero FN and zero FP). Candidate generation is compared **only for recall**: an engine miss is
@@ -109,8 +109,8 @@ variable is unset — so CI and the public repo never see real data (it stays en
 Each line is one JSON object, two shapes (other keys ignored):
 
 ```jsonl
-{"query": "1994 upper deck michael jordan -reprint"}   # a saved search (numbered in file order)
-{"title": "1994 Upper Deck Michael Jordan SP PSA 10"}  # a listing title
+{"query": "2024 north star wireless mouse -refurbished"} # a saved search (numbered in file order)
+{"title": "2024 North Star Wireless Mouse Pro New"}      # a listing title
 ```
 
 It runs under the default vocabulary (the front-end check that needs no domain config). Run it with
@@ -227,9 +227,18 @@ ADR-124 adds a deliberately smaller automated contract in `perfgate`:
 - exact structure: classes, dictionary, posting shape, candidate sum/p95/p99/max, match sum;
 - resources: persistent `retain_source=false` resident bytes and logical durable bytes may grow at
   most 5%; durable file count is exact;
-- timing: seven p50/p95/p99 rounds plus nine selective and columnar throughput windows. The
-  reference band is `max(30% of the six-run median, 3 × historical MAD)`; a timing-only breach
-  retries the whole timing window once. Structure/resources never retry.
+- timing: seven p50/p95/p99 rounds plus nine selective and columnar throughput windows. Absolute
+  safety limits always apply: p50 ≤ 7.5 µs, p95 ≤ 75 µs, p99 ≤ 100 µs, selective throughput ≥
+  120k titles/s, and columnar throughput ≥ 180k titles/s. Once reviewed history is populated, the
+  additional relative band is `max(30% of the reference median, 3 × historical MAD)`; a timing-only
+  breach retries the whole timing window once. Structure/resources never retry.
+
+After an intentional workload-semantic rewrite, the checked-in baseline may temporarily carry no
+timing source runs or samples. In that explicit all-empty state, `perfgate check` still blocks on
+deterministic structure, resources, and the absolute timing safety limits; only the more sensitive
+variance-band comparison is pending. Partial histories fail validation. The normal `rebaseline`
+command requires five fresh reviewed CI reports and atomically adds the relative history without
+removing the safety limits.
 
 The reviewed baseline is
 [`performance/perf-baseline.json`](performance/perf-baseline.json). Every PR uploads its

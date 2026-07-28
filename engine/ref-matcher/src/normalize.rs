@@ -3,11 +3,7 @@
 //! `match_features` / `match_features_dual`.
 //!
 //! Two phases (mirroring the engine): (1) find boundary-valid leftmost-longest phrase matches;
-//! (2) tokenize and run each non-phrase token through the grader / grade-context / number /
-//! synonym / generic pipeline. The grader/grade state machine's aging is subtle and reproduced
-//! exactly: the pending-grader window (`> 3`) and grade-context window (`> 2`) advance only on a
-//! consumed (phrase) token, a grade-context word (no clear), or a generic fallback token — NOT on
-//! markers, grader tokens, number tokens, or synonym tokens.
+//! (2) tokenize and run each non-phrase token through the number / synonym / generic pipeline.
 
 use crate::clean::clean;
 use crate::features::Feature;
@@ -80,76 +76,11 @@ fn as_year(num: &str) -> Option<String> {
     None
 }
 
-/// A number in 1.0..=10.0 can be a grade value.
-fn is_grade_value(num: &str) -> bool {
-    num.parse::<f32>().is_ok_and(|v| (1.0..=10.0).contains(&v))
-}
-
-/// Canonicalize a grader name (`beckett` -> `bgs`).
-fn canon_grader(g: &str) -> String {
-    if g == "beckett" {
-        "bgs".to_string()
-    } else {
-        g.to_string()
-    }
-}
-
-/// Split a possibly-fused grader token like `psa10` -> `("psa", Some("10"))`. The first registered
-/// grader that matches wins (so registration order is significant, as in the engine).
-fn split_grader(graders: &[String], tok: &str) -> Option<(String, Option<String>)> {
-    for g in graders {
-        if tok == g.as_str() {
-            return Some((g.clone(), None));
-        }
-        if let Some(rest) = tok.strip_prefix(g.as_str()) {
-            if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                if let Some(num) = parse_number(rest) {
-                    return Some((g.clone(), Some(num)));
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Emit `grade:<n>` + `grader_grade:<g><n>` (the engine's `emit_grade`).
-fn emit_grade(
-    out: &mut Vec<RefPositionArc>,
-    grader: &str,
-    num: &str,
-    grader_start: u32,
-    start: u32,
-    end: u32,
-) {
-    out.push(RefPositionArc {
-        feature: Feature::grade(num),
-        start,
-        end,
-    });
-    out.push(RefPositionArc {
-        feature: Feature::grader_grade(grader, num),
-        start: grader_start,
-        end,
-    });
-}
-
 fn push_feature(out: &mut Vec<RefPositionArc>, feature: Feature, start: u32, end: u32) {
     out.push(RefPositionArc {
         feature,
         start,
         end,
-    });
-}
-
-/// Age every active positive-view grader one step, dropping those past the `> 3` window
-/// (`age_active_graders`). A no-op on the empty Vec the single-view paths always hold.
-fn age_active_graders(active: &mut Vec<(String, u8, u32)>) {
-    if active.is_empty() {
-        return;
-    }
-    active.retain_mut(|(_, age, _)| {
-        *age = age.saturating_add(1);
-        *age <= 3
     });
 }
 
@@ -180,8 +111,7 @@ fn slice(lc: &str, r: (usize, usize)) -> &str {
 }
 
 /// Emit canonical features for `text` under `vocab`. With `force_additive` (the positive view
-/// `P(T)`), nothing is consumed by a phrase and every grader stays active so each number grades
-/// with all of them (the parse-union). Faithful translation of `core.rs::emit`.
+/// `P(T)`), nothing is consumed by a phrase. Faithful translation of `core.rs::emit`.
 #[must_use]
 pub fn emit(vocab: &RefVocab, text: &str, side: Side, force_additive: bool) -> Vec<Feature> {
     emit_positioned(vocab, text, side, force_additive)
@@ -255,88 +185,23 @@ pub fn emit_positioned(
 
     // Phase 2b: the token pipeline.
     let mut i = 0;
-    let mut pending_grader: Option<(String, u32)> = None;
-    let mut pending_grader_age = 0u8;
-    let mut grade_ctx = false;
-    let mut grade_ctx_age = 0u8;
-    let mut active_graders: Vec<(String, u8, u32)> = Vec::new();
 
     while i < tokens.len() {
         if token_consumed[i] {
-            // Phrase-consumed token: still age out the pending grader / grade context.
-            if pending_grader.is_some() {
-                pending_grader_age = pending_grader_age.saturating_add(1);
-                if pending_grader_age > 3 {
-                    pending_grader = None;
-                }
-            }
-            if grade_ctx {
-                grade_ctx_age = grade_ctx_age.saturating_add(1);
-                if grade_ctx_age > 2 {
-                    grade_ctx = false;
-                }
-            }
-            age_active_graders(&mut active_graders);
             i += 1;
             continue;
         }
 
         let tok = slice(&lc, tokens[i]);
 
-        // 0) structural markers from cleaning: skip (no aging).
+        // 0) structural markers from cleaning: skip.
         if tok == "#" || tok == "/" {
             i += 1;
             continue;
         }
 
-        // 1) grader keyword (possibly fused like "psa10").
-        if let Some((g, rest)) = split_grader(&vocab.graders, tok) {
-            let gcanon = canon_grader(&g);
-            push_feature(
-                &mut out,
-                Feature::grader(&gcanon),
-                position_index(i),
-                position_index(i.saturating_add(1)),
-            );
-            let fused = rest.is_some();
-            if let Some(num) = rest {
-                emit_grade(
-                    &mut out,
-                    &gcanon,
-                    &num,
-                    position_index(i),
-                    position_index(i),
-                    position_index(i.saturating_add(1)),
-                );
-            }
-            if force_additive {
-                // Positioned parse-union: retain every live same-name start.
-                // An overlapping phrase may consume a later grader while an
-                // earlier occurrence remains connected to the grade edge.
-                active_graders.push((gcanon, 0, position_index(i)));
-            } else if fused {
-                pending_grader = None;
-            } else {
-                pending_grader = Some((gcanon, position_index(i)));
-                pending_grader_age = 0;
-            }
-            i += 1;
-            continue;
-        }
-
-        // 2) grade modifier / context word.
-        if vocab.grade_words.iter().any(|w| w == tok) {
-            grade_ctx = true;
-            grade_ctx_age = 0;
-            if pending_grader.is_some() {
-                pending_grader_age = pending_grader_age.saturating_add(1);
-            }
-            age_active_graders(&mut active_graders);
-            i += 1;
-            continue;
-        }
-
-        // 3) numbers: card-numbers, serials, number-context words, grades, years.
+        // 1) Structural identifiers and declared number contexts remain generic;
+        // otherwise four-digit years are typed.
         if let Some(numstr) = parse_number(tok) {
             let prev = if i > 0 {
                 Some(slice(&lc, tokens[i - 1]))
@@ -344,7 +209,7 @@ pub fn emit_positioned(
                 None
             };
             let next = tokens.get(i + 1).map(|&r| slice(&lc, r));
-            let is_cardnum = prev == Some("#");
+            let is_marked_number = prev == Some("#");
             let is_serial = prev == Some("/") || next == Some("/");
             let is_numctx = prev.is_some_and(|p| {
                 vocab
@@ -353,7 +218,7 @@ pub fn emit_positioned(
                     .any(|w| p.eq_ignore_ascii_case(w))
             });
 
-            if is_cardnum || is_serial || is_numctx {
+            if is_marked_number || is_serial || is_numctx {
                 push_feature(
                     &mut out,
                     Feature::term(&numstr),
@@ -367,68 +232,6 @@ pub fn emit_positioned(
                     position_index(i),
                     position_index(i.saturating_add(1)),
                 );
-            } else if force_additive {
-                // Positive view: grade with EVERY active grader still in window AND grade context,
-                // all sticky (never cleared by this number).
-                let gradeable = is_grade_value(&numstr);
-                let mut graded = false;
-                if gradeable {
-                    for (g, _, grader_start) in &active_graders {
-                        emit_grade(
-                            &mut out,
-                            g,
-                            &numstr,
-                            *grader_start,
-                            position_index(i),
-                            position_index(i.saturating_add(1)),
-                        );
-                        graded = true;
-                    }
-                    if grade_ctx {
-                        push_feature(
-                            &mut out,
-                            Feature::grade(&numstr),
-                            position_index(i),
-                            position_index(i.saturating_add(1)),
-                        );
-                        graded = true;
-                    }
-                }
-                if !graded {
-                    push_feature(
-                        &mut out,
-                        Feature::term(&numstr),
-                        position_index(i),
-                        position_index(i.saturating_add(1)),
-                    );
-                }
-            } else if let Some((g, grader_start)) = pending_grader.clone() {
-                if is_grade_value(&numstr) {
-                    emit_grade(
-                        &mut out,
-                        &g,
-                        &numstr,
-                        grader_start,
-                        position_index(i),
-                        position_index(i.saturating_add(1)),
-                    );
-                    pending_grader = None;
-                } else {
-                    push_feature(
-                        &mut out,
-                        Feature::term(&numstr),
-                        position_index(i),
-                        position_index(i.saturating_add(1)),
-                    );
-                }
-            } else if grade_ctx && is_grade_value(&numstr) {
-                push_feature(
-                    &mut out,
-                    Feature::grade(&numstr),
-                    position_index(i),
-                    position_index(i.saturating_add(1)),
-                );
-                grade_ctx = false;
             } else {
                 push_feature(
                     &mut out,
@@ -441,7 +244,7 @@ pub fn emit_positioned(
             continue;
         }
 
-        // 4) closed-vocab synonym.
+        // 2) closed-vocab synonym.
         if let Some(syn) = vocab.synonyms.iter().find(|s| s.token == tok) {
             push_feature(
                 &mut out,
@@ -453,7 +256,7 @@ pub fn emit_positioned(
             continue;
         }
 
-        // 5) generic fallback term.
+        // 3) generic fallback term.
         push_feature(
             &mut out,
             Feature::term(tok),
@@ -461,21 +264,6 @@ pub fn emit_positioned(
             position_index(i.saturating_add(1)),
         );
         i += 1;
-
-        // Age out stale pending grader / grade context (only after a generic token).
-        if pending_grader.is_some() {
-            pending_grader_age = pending_grader_age.saturating_add(1);
-            if pending_grader_age > 3 {
-                pending_grader = None;
-            }
-        }
-        if grade_ctx {
-            grade_ctx_age = grade_ctx_age.saturating_add(1);
-            if grade_ctx_age > 2 {
-                grade_ctx = false;
-            }
-        }
-        age_active_graders(&mut active_graders);
     }
 
     (position_index(tokens.len()), out)
@@ -493,12 +281,6 @@ fn filled_position_arcs(
     let normalized = phrases::collapse_ws_runs(&clean(text, &vocab.punct));
     let analysis_text = normalized.as_str();
     let (positions, mut arcs) = emit_positioned(vocab, analysis_text, side, force_additive);
-    // The flat analyzer's grader window may span intervening words, but a
-    // quoted graph must not let that composite edge bypass those positions.
-    // Preserve only fused (`psa10`) and adjacent (`psa 10`) shortcuts.
-    arcs.retain(|arc| {
-        !arc.feature.as_str().starts_with("grader_grade:") || arc.end.saturating_sub(arc.start) <= 2
-    });
     arcs.sort();
     arcs.dedup();
 
@@ -519,20 +301,7 @@ fn filled_position_arcs(
 /// Query-side analyzed graph for one quoted clause.
 #[must_use]
 pub fn compile_phrase(vocab: &RefVocab, text: &str) -> RefPhraseGraph {
-    let (positions, mut arcs) = filled_position_arcs(vocab, text, Side::Query, false);
-    let composites: Vec<RefPositionArc> = arcs
-        .iter()
-        .filter(|arc| arc.feature.as_str().starts_with("grader_grade:"))
-        .cloned()
-        .collect();
-    if !composites.is_empty() {
-        arcs.retain(|arc| {
-            let composite_span = composites
-                .iter()
-                .any(|composite| (composite.start, composite.end) == (arc.start, arc.end));
-            !composite_span || composites.contains(arc)
-        });
-    }
+    let (positions, arcs) = filled_position_arcs(vocab, text, Side::Query, false);
     let mut grouped: Vec<RefPhraseArc> = Vec::new();
     for arc in arcs {
         if let Some(last) = grouped.last_mut() {

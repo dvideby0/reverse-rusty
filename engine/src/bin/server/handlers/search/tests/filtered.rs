@@ -6,7 +6,7 @@ use super::*;
 async fn mpercolate_ranks_by_priority_and_truncates_to_size() {
     let state = tagged_state();
     let req: MPercolateBody = serde_json::from_value(serde_json::json!({
-        "documents": [{"title": "2020 topps chrome update"}],
+        "documents": [{"title": "2020 acme chrome update"}],
         "rank": {"priority_key": "priority"},
         "size": 2
     }))
@@ -24,7 +24,7 @@ async fn mpercolate_ranks_by_priority_and_truncates_to_size() {
 async fn mpercolate_from_offsets_into_ranked_hits() {
     let state = tagged_state();
     let req: MPercolateBody = serde_json::from_value(serde_json::json!({
-        "documents": [{"title": "2020 topps chrome update"}],
+        "documents": [{"title": "2020 acme chrome update"}],
         "rank": {"priority_key": "priority"},
         "from": 1,
         "size": 10
@@ -41,13 +41,13 @@ async fn mpercolate_from_offsets_into_ranked_hits() {
 async fn ranking_preserves_the_matched_set_and_score_is_opt_in() {
     let state = tagged_state();
     let ranked: MPercolateBody = serde_json::from_value(serde_json::json!({
-        "documents": [{"title": "2020 topps chrome update"}],
+        "documents": [{"title": "2020 acme chrome update"}],
         "rank": {"priority_key": "priority", "boosts": [{"key": "tier", "value": "gold", "boost": 100}]},
         "size": 100
     }))
     .expect("valid body");
     let unranked: MPercolateBody = serde_json::from_value(serde_json::json!({
-        "documents": [{"title": "2020 topps chrome update"}],
+        "documents": [{"title": "2020 acme chrome update"}],
         "size": 100
     }))
     .expect("valid body");
@@ -84,7 +84,7 @@ async fn ranking_preserves_the_matched_set_and_score_is_opt_in() {
 async fn search_single_doc_ranks_additively_with_boost() {
     let state = tagged_state();
     let req: SearchBody = serde_json::from_value(serde_json::json!({
-        "document": {"title": "2020 topps chrome update"},
+        "document": {"title": "2020 acme chrome update"},
         "rank": {"priority_key": "priority", "boosts": [{"key": "tier", "value": "gold", "boost": 100}]}
     }))
     .expect("valid body");
@@ -100,7 +100,7 @@ async fn search_single_doc_ranks_additively_with_boost() {
 async fn search_multi_doc_truncates_per_slot_by_size() {
     let state = tagged_state();
     let req: SearchBody = serde_json::from_value(serde_json::json!({
-        "documents": [{"title": "2020 topps chrome update"}],
+        "documents": [{"title": "2020 acme chrome update"}],
         "size": 1,
         "rank": {"priority_key": "priority"}
     }))

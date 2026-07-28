@@ -149,7 +149,7 @@ fn build_with_vocab_persists_the_vocab_from_the_first_durable_commit() {
             &[(1, "ny".into())],
         )
         .expect("durable build_with_vocab");
-        for title in ["ny psa 10", "new york psa 10"] {
+        for title in ["ny pro", "new york pro"] {
             assert!(
                 cluster.percolate(title).unwrap().contains(&1),
                 "pre-reopen: {title:?} must match"
@@ -163,7 +163,7 @@ fn build_with_vocab_persists_the_vocab_from_the_first_durable_commit() {
         None,
     )
     .expect("reopen from the build-time manifest");
-    for title in ["ny psa 10", "new york psa 10"] {
+    for title in ["ny pro", "new york pro"] {
         assert!(
             reopened.percolate(title).unwrap().contains(&1),
             "post-reopen: {title:?} must still match (vocab persisted at the FIRST commit)"
@@ -192,7 +192,7 @@ fn multiword_alias_survives_durable_checkpoint_and_reopen() {
         cluster
             .set_vocab(vocab_with_multiword_alias())
             .expect("set_vocab activates the multi-word alias on a durable cluster");
-        for title in ["ny psa 10", "new york psa 10"] {
+        for title in ["ny pro", "new york pro"] {
             assert!(
                 cluster.percolate(title).unwrap().contains(&1),
                 "pre-reopen: {title:?} must match"
@@ -206,7 +206,7 @@ fn multiword_alias_survives_durable_checkpoint_and_reopen() {
         None,
     )
     .expect("reopen restores the persisted multi-word vocab from the manifest");
-    for title in ["ny psa 10", "new york psa 10"] {
+    for title in ["ny pro", "new york pro"] {
         assert!(
             reopened.percolate(title).unwrap().contains(&1),
             "post-reopen: {title:?} must still match (the persisted vocab drives \
@@ -260,7 +260,7 @@ fn vocab_file_activates_on_an_empty_durable_reopen() {
         cluster
             .ingest(&[(1, "ny".into())])
             .expect("ingest under the activated vocabulary");
-        for title in ["ny psa 10", "new york psa 10"] {
+        for title in ["ny pro", "new york pro"] {
             assert!(
                 cluster.percolate(title).unwrap().contains(&1),
                 "post-activation: {title:?} must match (equivalence machinery installed \
@@ -276,7 +276,7 @@ fn vocab_file_activates_on_an_empty_durable_reopen() {
         None,
     )
     .expect("reopen restores the activated vocab from the manifest");
-    for title in ["ny psa 10", "new york psa 10"] {
+    for title in ["ny pro", "new york pro"] {
         assert!(
             reopened.percolate(title).unwrap().contains(&1),
             "post-reopen: {title:?} must still match (the activation persisted the vocab)"
@@ -306,7 +306,7 @@ fn durable_cluster_rebuilds_legacy_clause_boundary_semantics_before_serving() {
         .expect("durable build_with_vocab");
         assert!(
             cluster
-                .percolate("new vintage collectible york")
+                .percolate("new vintage product york")
                 .unwrap()
                 .contains(&1),
             "current compiler respects the negated-clause boundary"
@@ -334,7 +334,7 @@ fn durable_cluster_rebuilds_legacy_clause_boundary_semantics_before_serving() {
         );
         assert!(
             reopened
-                .percolate("new vintage collectible york")
+                .percolate("new vintage product york")
                 .unwrap()
                 .contains(&1),
             "cluster migration retains the clause-boundary match"
@@ -371,7 +371,7 @@ fn durable_cluster_rebuilds_legacy_clause_boundary_semantics_before_serving() {
         "current-stamped segments must not rebuild again"
     );
     assert!(again
-        .percolate("new vintage collectible york")
+        .percolate("new vintage product york")
         .unwrap()
         .contains(&1));
     let _ = std::fs::remove_dir_all(&dir);
@@ -410,7 +410,7 @@ fn durable_cluster_rebuilds_a_legacy_tail_even_when_the_base_is_empty() {
     .expect("tail-only compiler migration");
     assert!(
         reopened
-            .percolate("new vintage collectible york")
+            .percolate("new vintage product york")
             .unwrap()
             .contains(&1),
         "the raw legacy tail must be folded then placed under current semantics"
@@ -418,7 +418,7 @@ fn durable_cluster_rebuilds_a_legacy_tail_even_when_the_base_is_empty() {
     let current = reverse_rusty::storage::read_cluster_manifest(&manifest_path)
         .expect("migrated v7 manifest");
     assert_eq!(
-        current.compiler_semantics_version, 4,
+        current.compiler_semantics_version, 5,
         "successful migration commits the current compiler marker"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -471,7 +471,7 @@ fn legacy_tail_preserves_acknowledged_tags_after_limit_tightening() {
     let filter = vec![("tier".to_string(), vec!["gold".to_string()])];
     assert!(
         reopened
-            .percolate_filtered("new vintage collectible york", &filter)
+            .percolate_filtered("new vintage product york", &filter)
             .expect("filtered percolate")
             .contains(&1),
         "an acknowledged over-current-limit tag column must survive migration intact"
@@ -535,7 +535,7 @@ fn failed_cluster_compiler_migration_preserves_old_sources_for_retry() {
     )
     .expect("migration retry from the still-authoritative v6 manifest");
     assert!(reopened
-        .percolate("new vintage collectible york")
+        .percolate("new vintage product york")
         .unwrap()
         .contains(&1));
     let current =

@@ -24,5 +24,5 @@ must_use_candidate = "allow"
 # `emit` mirrors the engine's long two-phase pipeline verbatim; splitting it would obscure the
 # correspondence the reference exists to preserve.
 too_many_lines = "allow"
-# Domain/identifier names (psa, bgs, anyof, ...) trip backtick pedantry without value.
+# Domain/identifier names (anyof, req, forb, ...) trip backtick pedantry without value.
 doc_markdown = "allow"

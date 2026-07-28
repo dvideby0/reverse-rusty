@@ -18,12 +18,10 @@ fn config(dir: &std::path::Path) -> crate::config::EngineConfig {
 fn old_snapshot_rejects_a_newer_shared_source_generation() {
     let mut engine =
         Engine::new(crate::normalize::Normalizer::default_vocab().expect("normalizer"));
-    engine
-        .try_insert_live("topps chrome", 7, 1)
-        .expect("insert");
+    engine.try_insert_live("acme chrome", 7, 1).expect("insert");
     let old = engine.snapshot();
     engine
-        .try_upsert_live("michael jordan", 7, 2)
+        .try_upsert_live("wireless mouse", 7, 2)
         .expect("replace");
     let current = engine.snapshot();
 
@@ -38,7 +36,7 @@ fn old_snapshot_rejects_a_newer_shared_source_generation() {
     );
     assert_eq!(
         current.get_query_source(7).as_deref(),
-        Some("michael jordan")
+        Some("wireless mouse")
     );
 }
 
@@ -52,7 +50,7 @@ fn post_manifest_crash_recovers_source_explain_rebuild_checkpoint_and_backup() {
     );
     CRASH_AFTER_SOURCE_MANIFEST_COMMIT.with(|armed| armed.set(true));
     let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rows = [(7, "1995 fleer".to_string())];
+        let rows = [(7, "1995 vertex".to_string())];
         let _ = engine.try_bulk_ingest(&rows);
     }));
     assert!(crash.is_err(), "the injected post-commit crash must fire");
@@ -73,15 +71,15 @@ fn post_manifest_crash_recovers_source_explain_rebuild_checkpoint_and_backup() {
             .get_query_document(7)
             .expect("GET document after recovery")
             .query(),
-        "1995 fleer"
+        "1995 vertex"
     );
     assert!(
-        snapshot.explain_hit(7, "1995 Fleer card").is_some(),
+        snapshot.explain_hit(7, "1995 Vertex item").is_some(),
         "explain must compile from the recovered canonical source"
     );
     let mut scratch = crate::segment::MatchScratch::new();
     let mut matches = Vec::new();
-    snapshot.match_title("1995 Fleer card", &mut scratch, &mut matches, false);
+    snapshot.match_title("1995 Vertex item", &mut scratch, &mut matches, false);
     assert!(
         matches.contains(&7),
         "matching remains available after recovery"
@@ -105,8 +103,11 @@ fn post_manifest_crash_recovers_source_explain_rebuild_checkpoint_and_backup() {
             config(recovered_dir),
         )
         .expect("checkpoint/backup reopen");
-        assert_eq!(recovered.get_query_source(7).as_deref(), Some("1995 fleer"));
-        assert!(recovered.explain_hit(7, "1995 Fleer card").is_some());
+        assert_eq!(
+            recovered.get_query_source(7).as_deref(),
+            Some("1995 vertex")
+        );
+        assert!(recovered.explain_hit(7, "1995 Vertex item").is_some());
     }
 
     let _ = std::fs::remove_dir_all(&dir);

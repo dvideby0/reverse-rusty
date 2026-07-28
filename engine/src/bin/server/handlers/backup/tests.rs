@@ -58,7 +58,7 @@ fn durable_state(root: &Path) -> Arc<AppState> {
         ..EngineConfig::default()
     };
     let mut engine = Engine::with_config(Normalizer::default_vocab().expect("normalizer"), config);
-    engine.build_from_queries(&[(7, "1994 topps".into())]);
+    engine.build_from_queries(&[(7, "1994 acme".into())]);
     state_with_engine(engine)
 }
 

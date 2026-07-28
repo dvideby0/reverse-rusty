@@ -10,7 +10,7 @@ use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::{Engine, MatchScratch};
 
 pub(crate) fn engine_from(queries: &[(u64, String)]) -> Engine {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(queries);
     eng
 }

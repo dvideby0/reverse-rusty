@@ -1,7 +1,8 @@
 //! Distributional alias discovery (ADR-102) — technique 1 of the corpus-feature-learning
-//! research doc (§5): two tokens are equivalence candidates if they appear in highly similar
+//! research doc (§2, “Distributional alias proposals”): two tokens are equivalence candidates if
+//! they appear in highly similar
 //! query *contexts* (same neighbor distributions). Medium precision by nature — it conflates
-//! true substitutes (`rc`/`rookie`) with co-hyponyms (`psa`/`bgs`, which fill the same slot but
+//! true substitutes (`package`/`pkg`) with co-hyponyms (`new`/`refurbished`, which fill the same slot but
 //! are NOT interchangeable) — so everything this module proposes is **review-first**: the
 //! registry files every discovered pair as a `Candidate` under the `LearnedDistributional`
 //! provenance, which `default_status_for` never auto-activates (not even variant-looking pairs).
@@ -11,8 +12,8 @@
 //!   forbidden term is not semantic context), tokenized by [`corpus::tokenize`] — the same
 //!   granularity as the NPMI learner.
 //! - **Optional phrase glue** (default on): [`corpus::learn_phrases`] + [`apply_phrases`] first,
-//!   so `upper deck` becomes the unit `upper_deck` and the canonical token-vs-multi-word case
-//!   (`ud` ≡ `upper deck`) is discoverable at all.
+//!   so `north star` becomes the unit `north_star` and the canonical token-vs-multi-word case
+//!   (`ns` ≡ `north star`) is discoverable at all.
 //! - **Context vector** = same-query co-occurrence over the eligible vocabulary (queries are
 //!   3–8-token intents; whole-query co-occurrence IS the neighbor distribution at that length).
 //! - **Similarity** = cosine over PPMI-weighted vectors, accumulated sparsely via an inverted
@@ -20,7 +21,8 @@
 //!   touched; PPMI zeroes hub contexts, which is what keeps the accumulation sparse).
 //! - **The co-hyponym defense**: a `cooccurrence_rate` penalty. True substitutes are
 //!   *paradigmatic* (they fill the same slot and rarely appear together in one query);
-//!   co-hyponyms are *syntagmatic* (`(psa,bgs)` any-ofs, `jordan pippen` duals co-occur). A pair
+//!   co-hyponyms are *syntagmatic* (`(new,refurbished)` any-ofs or two product categories
+//!   listed together). A pair
 //!   co-occurring in more than `max_cooccurrence_rate` of its rarer member's queries is dropped.
 //!   Heuristic, hence review-first — the miss cost is a reviewer's minute, never a match.
 
@@ -53,7 +55,7 @@ pub struct DistributionalConfig {
     pub npmi_min_count: usize,
     /// NPMI phrase-glue score threshold (only with `glue_phrases`).
     pub npmi_tau: f64,
-    /// Consider numeric-only tokens (`1994`, `10`) — off by default: years/grades are textbook
+    /// Consider numeric-only tokens (`1994`, `10`) — off by default: years/levels are textbook
     /// co-hyponyms with near-identical contexts.
     pub include_numeric: bool,
 }
@@ -78,7 +80,7 @@ impl Default for DistributionalConfig {
 }
 
 /// One proposed equivalence pair, with the evidence that produced it. `forms` are raw surface
-/// forms (a glued phrase is emitted space-joined, e.g. `upper deck`) — they resolve through the
+/// forms (a glued phrase is emitted space-joined, e.g. `north star`) — they resolve through the
 /// live normalizer at registry-classification time, like every other alias source.
 /// `Serialize` so the review endpoint can return proposals verbatim (serde is lean-core).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -251,10 +253,10 @@ pub fn discover_pairs(
         if rate > cfg.max_cooccurrence_rate {
             continue; // syntagmatic — a co-hyponym/companion pair, not a substitute
         }
-        // Shared-token filter: two forms sharing a literal token (`zzud ctxp0` vs
-        // `zzud ctxp5`, or `zzud ctxp0` vs `zzupperdeck ctxp0`) are members of one phrase
+        // Shared-token filter: two forms sharing a literal token (`zzns ctxp0` vs
+        // `zzns ctxp5`, or `zzns ctxp0` vs `zznorthstar ctxp0`) are members of one phrase
         // family — glue noise or a variant of the same unit, never the abbreviation-style
-        // equivalence this discoverer exists for (a real pair like `ud`/`upper deck` shares
+        // equivalence this discoverer exists for (a real pair like `ns`/`north star` shares
         // nothing). Kills whole junk families a spurious glue would otherwise spawn.
         let ta = vocab[a as usize];
         let tb = vocab[b as usize];

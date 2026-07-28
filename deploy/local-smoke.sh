@@ -112,7 +112,7 @@ wait_green() { # $1 = base URL
 # fresh engine is always selective).
 search_hits() { # $1 = base URL → sorted matching query ids for the canonical title
   req -s -X POST "$1/_search" -H 'content-type: application/json' \
-    -d '{"document":{"title":"1990 topps smokeplayer psa 10"},"include_broad":true,"size":10}' |
+    -d '{"document":{"title":"2024 acme smokeproduct pro"},"include_broad":true,"size":10}' |
     jq -c '[.hits.hits[]._id]|sort'
 }
 
@@ -126,9 +126,9 @@ assert_matches() { # $1 = base URL, $2 = label
   mp=$(req -s -X POST "$base/_mpercolate" -H 'content-type: application/json' -d '{
       "include_broad": true,
       "documents": [
-        {"title": "1990 topps smokeplayer psa 10"},
+        {"title": "2024 acme smokeproduct pro"},
         {"title": "replica vintage smokejacket size L"},
-        {"title": "smokestar gem mint 10"}
+        {"title": "smokestar premium pro"}
       ]}' | jq -c '[.responses[] | [.hits.hits[]._id] | sort]')
   [[ "$mp" == '[[1],[],[3]]' ]] || fail "[$label] /_mpercolate got $mp, want [[1],[],[3]]"
 }
@@ -147,26 +147,26 @@ run_mode() { # $1 = mode name, $2 = port, rest = extra server flags
 
   # ADR-062 posture: with a token set, a write WITHOUT the bearer is a 401.
   code=$(req -s -o /dev/null -w '%{http_code}' -X PUT "$base/_doc/1" \
-    -H 'content-type: application/json' -d '{"query":"1990 topps smokeplayer"}')
+    -H 'content-type: application/json' -d '{"query":"2024 acme smokeproduct"}')
   [[ "$code" == "401" ]] || fail "[$mode] unauthenticated write not rejected (HTTP $code, want 401)"
 
   # Ingest. Document ids are u64 logical ids in BOTH modes (the `_doc/{id}` route
   # extracts Path<u64>), so ids must be numeric.
   code=$(req -s -o /dev/null -w '%{http_code}' -X PUT "$base/_doc/1" "${auth[@]}" \
-    -H 'content-type: application/json' -d '{"query":"1990 topps smokeplayer"}')
+    -H 'content-type: application/json' -d '{"query":"2024 acme smokeproduct"}')
   [[ "$code" == "201" || "$code" == "200" ]] || fail "[$mode] ingest rejected (HTTP $code)"
   code=$(req -s -o /dev/null -w '%{http_code}' "$base/_doc/1")
   [[ "$code" == "200" ]] || fail "[$mode] stored-query read-back failed (HTTP $code)"
 
   errors=$(req -s -X POST "$base/_bulk" "${auth[@]}" -H 'content-type: application/x-ndjson' \
-    --data-binary $'{"index":{"_id":2}}\n{"query":"vintage smokejacket -replica"}\n{"index":{"_id":3}}\n{"query":"(smokeplayer,smokestar) gem"}\n' |
+    --data-binary $'{"index":{"_id":2}}\n{"query":"vintage smokejacket -replica"}\n{"index":{"_id":3}}\n{"query":"(smokeoption,smokestar) premium"}\n' |
     jq '.errors')
   [[ "$errors" == "false" ]] || fail "[$mode] bulk ingest reported errors"
 
   # Default visibility, pinned once where it is deterministic (see the note above
   # search_hits): the selective path serves without include_broad.
   hits=$(req -s -X POST "$base/_search" -H 'content-type: application/json' \
-    -d '{"document":{"title":"1990 topps smokeplayer psa 10"},"size":10}' |
+    -d '{"document":{"title":"2024 acme smokeproduct pro"},"size":10}' |
     jq -c '[.hits.hits[]._id]|sort')
   [[ "$hits" == '[1]' ]] || fail "[$mode] default-visibility /_search hits=$hits, want [1]"
 

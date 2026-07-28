@@ -12,8 +12,8 @@ fn cfg(seed: u64) -> GenConfig {
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     }
 }
 

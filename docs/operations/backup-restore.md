@@ -169,7 +169,7 @@ storage/topology change:
 
      ```sh
      # golden-titles.tsv: <raw title>\t<expected sorted id array>, e.g.
-     #   1994 fleer jordan psa 10\t[12,845]
+     #   2024 north star wireless mouse pro\t[12,845]
      while IFS=$'\t' read -r title expected; do
        body=$(jq -Rn --arg t "$title" '{query:{percolate:{document:{title:$t}}}}')
        got=$(curl -fsS -XPOST http://localhost:9201/_search \

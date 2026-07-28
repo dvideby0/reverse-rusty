@@ -10,12 +10,12 @@ fn delete_removes_all_versions_across_segments() {
     let mut engine = Engine::new(norm);
 
     // Version 1 of query 1 in first segment
-    engine.build_from_queries(&[(1, "michael jordan 1986 fleer".into())]);
+    engine.build_from_queries(&[(1, "wireless mouse 1986 vertex".into())]);
     // Version 2 via live insert (memtable)
-    engine.insert_live("michael jordan 1986 fleer rookie", 1, 2);
+    engine.insert_live("wireless mouse 1986 vertex new", 1, 2);
 
     // Query 1 should match
-    let pre = match_ids(&engine, "michael jordan 1986 fleer rookie card");
+    let pre = match_ids(&engine, "wireless mouse 1986 vertex new item");
     assert!(pre.contains(&1), "query 1 should match before delete");
 
     // Delete by logical ID — should tombstone in both segment and memtable
@@ -26,7 +26,7 @@ fn delete_removes_all_versions_across_segments() {
     );
 
     // Query 1 should no longer match
-    let post = match_ids(&engine, "michael jordan 1986 fleer rookie card");
+    let post = match_ids(&engine, "wireless mouse 1986 vertex new item");
     assert!(!post.contains(&1), "query 1 should not match after delete");
 }
 
@@ -38,8 +38,8 @@ fn delete_across_many_segments() {
     // Spread query 42 across 4 segments
     for i in 0..4 {
         engine.build_from_queries(&[
-            (42, format!("michael jordan 1986 fleer version{i}")),
-            (100 + i, "kobe bryant psa 10".into()),
+            (42, format!("wireless mouse 1986 vertex version{i}")),
+            (100 + i, "noise cancelling headphones pro".into()),
         ]);
     }
     assert_eq!(engine.metrics().base_segments, 4);
@@ -51,7 +51,7 @@ fn delete_across_many_segments() {
     );
 
     // Other queries unaffected
-    let matches = match_ids(&engine, "kobe bryant psa 10 gem mint");
+    let matches = match_ids(&engine, "noise cancelling headphones pro deluxe premium");
     assert!(!matches.is_empty(), "other queries should still match");
     assert!(!matches.contains(&42), "deleted query should not appear");
 }

@@ -145,7 +145,7 @@ fn grpc_cluster_with_dict_shipping() {
 fn grpc_connect_rejects_divergent_dict() {
     let norm = Arc::new(vocab());
     let dict_server = frozen_dict_with(&[], &norm);
-    let dict_coord = frozen_dict_with(&["1995 fleer ultra"], &norm);
+    let dict_coord = frozen_dict_with(&["1995 vertex ultra"], &norm);
     assert_ne!(
         dict_server.fingerprint(),
         dict_coord.fingerprint(),
@@ -166,7 +166,7 @@ fn grpc_connect_rejects_divergent_dict() {
         );
         // Load data so the shard is NON-EMPTY under dict_server. Shipping would happily adopt
         // onto an empty server; the divergence guard only fires once data depends on a dict.
-        server.ingest_dsl(&[(1u64, "1994 upper deck".to_string())]);
+        server.ingest_dsl(&[(1u64, "1994 north star".to_string())]);
         rt.spawn(server.serve_with_incoming(incoming));
         addr
     };
@@ -272,7 +272,7 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
             Arc::clone(&dict),
             EngineConfig::default(),
         );
-        server.ingest_dsl(&[(1u64, "1994 upper deck".to_string())]);
+        server.ingest_dsl(&[(1u64, "1994 north star".to_string())]);
         rt.spawn(server.serve_with_incoming(incoming));
         addr
     };

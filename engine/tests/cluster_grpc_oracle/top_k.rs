@@ -35,9 +35,7 @@ fn spawn_pending(
 
 #[test]
 fn grpc_top_k_and_winner_fetch_match_single_node() {
-    let queries: Vec<(u64, String)> = (1..=80)
-        .map(|id| (id, "topps chrome".to_string()))
-        .collect();
+    let queries: Vec<(u64, String)> = (1..=80).map(|id| (id, "acme chrome".to_string())).collect();
     let tags: Vec<Vec<(String, String)>> = queries
         .iter()
         .map(|(id, _)| {
@@ -101,7 +99,7 @@ fn grpc_top_k_and_winner_fetch_match_single_node() {
             };
             let want = reference
                 .try_match_title_top_k(
-                    "2020 topps chrome update",
+                    "2020 acme chrome update",
                     options,
                     &reference_program,
                     &reverse_rusty::exact::TagPredicate::empty(),
@@ -111,7 +109,7 @@ fn grpc_top_k_and_winner_fetch_match_single_node() {
                 .expect("local top k");
             let got = cluster
                 .try_percolate_filtered_top_k(
-                    "2020 topps chrome update",
+                    "2020 acme chrome update",
                     &[],
                     options,
                     &cluster_program,
@@ -154,7 +152,7 @@ fn grpc_top_k_and_winner_fetch_match_single_node() {
                 .fetch_ranked_sources(&got, None)
                 .expect("winner source stream");
             assert_eq!(sources.len(), got.hits.len());
-            assert!(sources.iter().all(|source| source == "topps chrome"));
+            assert!(sources.iter().all(|source| source == "acme chrome"));
         }
     }
 
@@ -189,7 +187,7 @@ fn grpc_top_k_and_winner_fetch_match_single_node() {
 fn grpc_caps_reject_oversize_top_k_and_fetch_items() {
     // Many bounded rows overflow a deliberately tiny unary-reply cap.
     let queries: Vec<(u64, String)> = (1..=300)
-        .map(|id| (id, "topps chrome".to_string()))
+        .map(|id| (id, "acme chrome".to_string()))
         .collect();
     let norm = Arc::new(vocab());
     let dict = frozen_dict_over(&queries, &norm);
@@ -210,7 +208,7 @@ fn grpc_caps_reject_oversize_top_k_and_fetch_items() {
     .expect("remote cluster");
     cluster.ingest(&queries).expect("ingest");
     assert!(
-        cluster.percolate("topps chrome").is_err(),
+        cluster.percolate("acme chrome").is_err(),
         "legacy all-id percolate reply must obey the same protobuf cap"
     );
     let program = cluster
@@ -221,7 +219,7 @@ fn grpc_caps_reject_oversize_top_k_and_fetch_items() {
         .expect("program");
     let error = cluster
         .try_percolate_filtered_top_k(
-            "topps chrome",
+            "acme chrome",
             &[],
             TopKOptions {
                 search_after: None,
@@ -240,7 +238,7 @@ fn grpc_caps_reject_oversize_top_k_and_fetch_items() {
     // not fit in 23 bytes; the stream fails closed rather than buffering all rows.
     let bounded = cluster
         .try_percolate_filtered_top_k(
-            "topps chrome",
+            "acme chrome",
             &[],
             TopKOptions {
                 search_after: None,

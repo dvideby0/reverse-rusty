@@ -8,12 +8,13 @@
   flushed only after walking the whole AST. Any intervening negation, phrase, or any-of clause was
   skipped while the remaining terms were concatenated. With the active alias `new york ↔ ny`, the
   query `new -used york` was therefore compiled as required `term:new_york` plus forbidden `used`.
-  A title such as `new vintage collectible york` satisfies the DSL but does not contain the
+  A title such as `new compact device york` satisfies the DSL but does not contain the
   contiguous alias entity, so its signatures cannot retrieve that query. This is a real violation of
   the lossless-cover contract, not merely an exact-matcher discrepancy. The hazard is broader than
-  aliases: the fabricated stream can carry grader or number context across a clause too. Legacy
-  `pop -used 1994`, for example, normalized the fabricated `pop 1994` stream and could type `1994`
-  differently from a satisfying title where another token separates them. Both production extraction
+  aliases: the fabricated stream can carry caller-defined number context across a clause too.
+  With `model` configured as numeric context, `model -used 1994` could incorrectly normalize the
+  fabricated `model 1994` stream differently from a satisfying title where another token separates
+  them. Both production extraction
   paths and the code-independent reference matcher had copied the same interpretation of the prose,
   so the existing differential stayed green.
 
@@ -34,7 +35,7 @@
   raw DSL produces the current stamp. Unknown future semantics fail loud.
 
 - **Decision — upgrade before serving.** Every live semantics-zero materialization is rebuilt;
-  absence of aliases is not proof of equivalence because phrase consumption, grader state, and number
+  absence of aliases is not proof of equivalence because phrase consumption, alias state, and number
   context are also stream-sensitive.
   - standalone `Engine::open[_with_vocab]` replays the WAL, verifies a complete exact↔source corpus,
     interns every feature newly exposed by splitting the legacy stream, re-resolves equivalences,

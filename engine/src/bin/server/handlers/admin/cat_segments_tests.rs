@@ -25,10 +25,10 @@ fn state_with_segments() -> Arc<AppState> {
         },
     );
     engine
-        .try_insert_live("1994 topps", 7, 1)
+        .try_insert_live("1994 acme", 7, 1)
         .expect("first base insert");
     engine
-        .try_insert_live("1986 fleer", 8, 1)
+        .try_insert_live("1986 vertex", 8, 1)
         .expect("second base insert");
     engine.flush();
     assert_eq!(
@@ -38,7 +38,7 @@ fn state_with_segments() -> Arc<AppState> {
     );
     for id in 20..30 {
         engine
-            .try_insert_live(&format!("player card {id}"), id, 1)
+            .try_insert_live(&format!("entity item {id}"), id, 1)
             .expect("memtable insert");
     }
 

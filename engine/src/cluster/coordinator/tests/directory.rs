@@ -11,8 +11,8 @@ fn cluster_load_boundaries_reject_duplicate_logical_ids() {
         ..Default::default()
     };
     let duplicates = vec![
-        (42u64, "1994 topps".to_string()),
-        (42u64, "1995 fleer".to_string()),
+        (42u64, "1994 acme".to_string()),
+        (42u64, "1995 vertex".to_string()),
     ];
     assert!(matches!(
         ClusterEngine::build(vocab(), &cfg, &duplicates),
@@ -33,32 +33,34 @@ fn incremental_add_is_insert_only_and_remove_allows_reuse() {
         num_shards: 8,
         ..Default::default()
     };
-    let seed = vec![(42u64, "1994 topps rareplayer0".to_string())];
+    let seed = vec![(42u64, "1994 acme rareentity0".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster");
 
     assert!(matches!(
-        cluster.add_query(42, "1995 fleer rareplayer1000"),
+        cluster.add_query(42, "1995 vertex rareentity1000"),
         Err(ShardError::DuplicateLogicalId(42))
     ));
     assert_eq!(
-        cluster.percolate("1994 topps rareplayer0").expect("old"),
+        cluster.percolate("1994 acme rareentity0").expect("old"),
         vec![42]
     );
     assert!(cluster
-        .percolate("1995 fleer rareplayer1000")
+        .percolate("1995 vertex rareentity1000")
         .expect("rejected new")
         .is_empty());
 
     cluster.remove_query(42).expect("remove");
     cluster
-        .add_query(42, "1995 fleer rareplayer1000")
+        .add_query(42, "1995 vertex rareentity1000")
         .expect("id can be reused after delete");
     assert!(cluster
-        .percolate("1994 topps rareplayer0")
+        .percolate("1994 acme rareentity0")
         .expect("old removed")
         .is_empty());
     assert_eq!(
-        cluster.percolate("1995 fleer rareplayer1000").expect("new"),
+        cluster
+            .percolate("1995 vertex rareentity1000")
+            .expect("new"),
         vec![42]
     );
 }
@@ -72,7 +74,7 @@ fn versioned_create_is_insert_only_and_preserves_source_metadata() {
     let cluster = ClusterEngine::build(vocab(), &cfg, &[]).expect("cluster");
     let tags = vec![("tenant".to_string(), "acme".to_string())];
     cluster
-        .create_query_with_tags(43, "1994 topps rareplayer0", 9, &tags)
+        .create_query_with_tags(43, "1994 acme rareentity0", 9, &tags)
         .expect("fresh create");
 
     let source = cluster
@@ -82,17 +84,17 @@ fn versioned_create_is_insert_only_and_preserves_source_metadata() {
     assert_eq!(source.version(), 9);
     assert_eq!(source.tags(), tags.as_slice());
     assert!(matches!(
-        cluster.create_query_with_tags(43, "1995 fleer rareplayer1000", 10, &[]),
+        cluster.create_query_with_tags(43, "1995 vertex rareentity1000", 10, &[]),
         Err(ShardError::DuplicateLogicalId(43))
     ));
     assert_eq!(
         cluster
-            .percolate("1994 topps rareplayer0")
+            .percolate("1994 acme rareentity0")
             .expect("original remains"),
         vec![43]
     );
     assert!(cluster
-        .percolate("1995 fleer rareplayer1000")
+        .percolate("1995 vertex rareentity1000")
         .expect("conflict body absent")
         .is_empty());
 }
@@ -106,13 +108,13 @@ fn concurrent_same_id_adds_admit_exactly_one_row() {
         ..Default::default()
     };
     let seed = vec![
-        (1u64, "1994 topps rareplayer0".to_string()),
-        (2u64, "1995 fleer rareplayer1000".to_string()),
+        (1u64, "1994 acme rareentity0".to_string()),
+        (2u64, "1995 vertex rareentity1000".to_string()),
     ];
     let cluster = Arc::new(ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster"));
     let barrier = Arc::new(Barrier::new(3));
     let mut workers = Vec::new();
-    for dsl in ["1994 topps rareplayer0", "1995 fleer rareplayer1000"] {
+    for dsl in ["1994 acme rareentity0", "1995 vertex rareentity1000"] {
         let cluster = Arc::clone(&cluster);
         let barrier = Arc::clone(&barrier);
         workers.push(std::thread::spawn(move || {
@@ -136,11 +138,11 @@ fn concurrent_same_id_adds_admit_exactly_one_row() {
 
     let matches = [
         cluster
-            .percolate("1994 topps rareplayer0")
+            .percolate("1994 acme rareentity0")
             .expect("first")
             .contains(&99),
         cluster
-            .percolate("1995 fleer rareplayer1000")
+            .percolate("1995 vertex rareentity1000")
             .expect("second")
             .contains(&99),
     ];
@@ -155,23 +157,23 @@ fn reopened_cluster_rebuilds_unique_id_directory() {
         data_dir: Some(dir.clone()),
         ..Default::default()
     };
-    let seed = vec![(77u64, "1994 topps rareplayer0".to_string())];
+    let seed = vec![(77u64, "1994 acme rareentity0".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
     cluster.checkpoint().expect("checkpoint");
     drop(cluster);
 
     let reopened = ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)).expect("open");
     assert!(matches!(
-        reopened.add_query(77, "1995 fleer rareplayer1000"),
+        reopened.add_query(77, "1995 vertex rareentity1000"),
         Err(ShardError::DuplicateLogicalId(77))
     ));
     reopened.remove_query(77).expect("remove");
     reopened
-        .add_query(77, "1995 fleer rareplayer1000")
+        .add_query(77, "1995 vertex rareentity1000")
         .expect("reuse after remove");
     assert_eq!(
         reopened
-            .percolate("1995 fleer rareplayer1000")
+            .percolate("1995 vertex rareentity1000")
             .expect("match"),
         vec![77]
     );
@@ -191,7 +193,7 @@ fn owned_read_paths_fail_loud_on_unrouted_position() {
         num_shards: 4,
         ..Default::default()
     };
-    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let shard = LocalShard::new(
         Arc::clone(&real.norm),
@@ -224,13 +226,13 @@ fn owned_read_paths_fail_loud_on_unrouted_position() {
         };
         unrouted(
             shard
-                .percolate_filtered_owned("1994 topps baseball", true, &pred, &context, position)
+                .percolate_filtered_owned("1994 acme appliance", true, &pred, &context, position)
                 .map(|_| ()),
         );
         unrouted(
             shard
                 .percolate_filtered_ranked_owned(
-                    "1994 topps baseball",
+                    "1994 acme appliance",
                     true,
                     &pred,
                     &spec,
@@ -242,7 +244,7 @@ fn owned_read_paths_fail_loud_on_unrouted_position() {
         unrouted(
             shard
                 .percolate_top_k_owned(
-                    "1994 topps baseball",
+                    "1994 acme appliance",
                     true,
                     &pred,
                     &program,
@@ -267,7 +269,7 @@ fn add_query_fails_closed_when_directory_is_unseeded() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(1u64, "1994 topps".to_string())];
+    let seed = vec![(1u64, "1994 acme".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
     assert!(cluster.logical_ids_authoritative());
 
@@ -278,7 +280,7 @@ fn add_query_fails_closed_when_directory_is_unseeded() {
     let mut sink = RecordingExhaustiveSink::default();
     let exhaustive = cluster
         .try_percolate_filtered_all(
-            "1994 topps",
+            "1994 acme",
             &[],
             crate::result::QueryScope::Standard,
             None,
@@ -299,7 +301,7 @@ fn add_query_fails_closed_when_directory_is_unseeded() {
         sink.chunks.is_empty(),
         "reattach refusal must precede provisional output"
     );
-    let err = cluster.add_query(2, "1994 topps").unwrap_err();
+    let err = cluster.add_query(2, "1994 acme").unwrap_err();
     assert!(
         matches!(err, ShardError::Config(ref m) if m.contains("upsert_query")),
         "expected the fail-closed Config error, got {err:?}"
@@ -307,10 +309,10 @@ fn add_query_fails_closed_when_directory_is_unseeded() {
 
     // The replacement path is directory-independent and stays available.
     cluster
-        .upsert_query(2, "1994 topps", 1)
+        .upsert_query(2, "1994 acme", 1)
         .expect("upsert works unseeded");
     assert!(cluster
-        .percolate("1994 topps")
+        .percolate("1994 acme")
         .expect("percolate")
         .contains(&2));
 }
@@ -326,7 +328,7 @@ fn resync_releases_reservation_after_repairing_a_remove() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let norm = Arc::clone(&real.norm);
     let dict = Arc::clone(&real.dict);
@@ -407,15 +409,15 @@ fn rebuild_from_live_reseeds_the_logical_id_directory() {
         ..Default::default()
     };
     let seed = vec![
-        (1u64, "1994 topps baseball".to_string()),
-        (2u64, "1995 fleer baseball".to_string()),
+        (1u64, "1994 acme appliance".to_string()),
+        (2u64, "1995 vertex appliance".to_string()),
     ];
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
 
     // Plant a stale reservation with no live row (the leak shape).
     assert!(cluster.insert_logical_id(99));
     assert!(matches!(
-        cluster.add_query(99, "1994 topps baseball"),
+        cluster.add_query(99, "1994 acme appliance"),
         Err(ShardError::DuplicateLogicalId(99))
     ));
 
@@ -424,14 +426,14 @@ fn rebuild_from_live_reseeds_the_logical_id_directory() {
     let rebuilt = cluster.resize(5).expect("resize rebuilds");
     assert_eq!(rebuilt, 2);
     assert!(matches!(
-        cluster.add_query(1, "1994 topps baseball"),
+        cluster.add_query(1, "1994 acme appliance"),
         Err(ShardError::DuplicateLogicalId(1))
     ));
     cluster
-        .add_query(99, "1994 topps baseball")
+        .add_query(99, "1994 acme appliance")
         .expect("stale reservation must be healed by the rebuild");
     assert!(cluster
-        .percolate("1994 topps baseball")
+        .percolate("1994 acme appliance")
         .expect("p")
         .contains(&99));
 }
@@ -448,7 +450,7 @@ fn resync_converges_an_upsert_queued_at_a_delete_only_shard() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let norm = Arc::clone(&real.norm);
     let dict = Arc::clone(&real.dict);

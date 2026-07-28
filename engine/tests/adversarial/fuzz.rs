@@ -24,7 +24,7 @@ const POOL: &[char] = &[
 ];
 
 /// Hand-picked nasties: token-length extremes, marker/number ambiguity, unbalanced DSL
-/// syntax, pure punctuation, half-grade lookalikes.
+/// syntax, pure punctuation, half-level lookalikes.
 fn pinned_nasties() -> Vec<String> {
     let mut v: Vec<String> = [
         "",
@@ -48,22 +48,22 @@ fn pinned_nasties() -> Vec<String> {
         "10/",
         "/10",
         "10 / 99",
-        "pop 9",
-        "psa10!!",
-        "psa psa psa 10",
-        "gem gem 9",
+        "stock 9",
+        "pro!!",
+        "alpha alpha pro",
+        "deluxe deluxe 9",
         "ñ",
         "™",
         "🔥",
         "a\u{301}b",
-        "\u{feff}psa 10",
+        "\u{feff}pro",
     ]
     .iter()
     .map(ToString::to_string)
     .collect();
     v.push("a".repeat(10_000));
     v.push("ñ".repeat(2_000));
-    v.push("psa 10 ".repeat(500));
+    v.push("pro ".repeat(500));
     v
 }
 
@@ -75,17 +75,15 @@ fn random_soup(rng: &mut Rng) -> String {
 /// An alias-active normalizer (multi-word alias registered ⇒ the dual view is real) and
 /// a plain one, plus a dict mixing dense and synthetic ids.
 ///
-/// The alias vocab also carries a GRADER (`psa`), a grade word (`gem`), and a COLLAPSE
+/// The fixture dictionary also carries an attribute (`alpha`), a variant (`pro`), and a COLLAPSE
 /// phrase (`p s`) over pool letters: without those, `force_additive` (the `P(T)` pass)
 /// is indistinguishable from the canonical pass on any fuzz input — alias-mode phrases
 /// are already additive on the title side — and a mutation that computes `N(T)` with the
-/// positive-view semantics survives the `match_features == N(T)` assertion. The grader /
-/// grade-word / collapse-phrase state machines are exactly where the two passes diverge.
+/// positive-view semantics survives the `match_features == N(T)` assertion. A collapse
+/// phrase supplies the required divergence.
 fn fuzz_fixtures() -> (Normalizer, Normalizer, Dict) {
     let plain = Normalizer::default_vocab().expect("default vocab");
     let mut v = Vocab::new();
-    v.add_grader("psa");
-    v.add_grade_word("gem");
     v.add_phrase(&["p", "s"], "term:p_s", FeatureKind::Generic);
     let status = v.aliases_mut().add_classified(
         &["ny".into(), "new york".into()],
@@ -102,7 +100,13 @@ fn fuzz_fixtures() -> (Normalizer, Normalizer, Dict) {
     );
 
     let mut dict = Dict::new();
-    for n in ["term:psa", "term:a", "term:b", "grader:psa", "grade:10"] {
+    for n in [
+        "term:alpha",
+        "term:a",
+        "term:b",
+        "attribute:alpha",
+        "variant:pro",
+    ] {
         dict.intern(n, FeatureKind::Generic);
     }
     (

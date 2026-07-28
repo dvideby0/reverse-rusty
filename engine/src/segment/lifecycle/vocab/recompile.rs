@@ -157,7 +157,7 @@ impl Engine {
 
     /// Learn alias/synonym rules from this engine's live corpus (ADR-015 any-of learning)
     /// and apply them (ADR-046 mechanism 2): a synonym appearing in at least `min_count`
-    /// any-of groups (e.g. `(rookie,rc)` ⇒ `rc → rookie`) is merged UNDER the current
+    /// any-of groups (e.g. `(new,pkg)` ⇒ `pkg → new`) is merged UNDER the current
     /// vocabulary (a previously set alias wins) and the index is recompiled so the change
     /// takes effect immediately. Returns the number of queries recompiled.
     ///
@@ -175,7 +175,7 @@ impl Engine {
 
     /// Like [`learn_and_apply`](Self::learn_and_apply) but also runs opt-in **NPMI corpus
     /// phrase induction** when `cfg.corpus_phrases` is set (ADR-053): multi-token entities
-    /// induced from the live query text (e.g. `upper deck`) are merged UNDER the current
+    /// induced from the live query text (e.g. `north star`) are merged UNDER the current
     /// vocabulary (a declared alias/phrase wins on a token collision) and the index is
     /// recompiled. With `corpus_phrases = false` this is identical to
     /// `learn_and_apply(cfg.anyof_min_count)`. Phrases only — never aliases — so the

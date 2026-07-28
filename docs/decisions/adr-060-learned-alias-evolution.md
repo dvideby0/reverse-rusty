@@ -9,8 +9,8 @@
 > current
 > [`/_vocab/aliases` API](../reference/api/vocab.md#learned-alias-registry-adr-060061102103).
 
-- **Context.** Real deployments register hundreds of equivalences (abbreviation → canonical, variant
-  spellings, expansions like `auto ≡ {autograph, autographed, signature, signed}`) and want them to
+- **Context.** Real deployments register hundreds of equivalences (abbreviation → canonical,
+  spelling variants such as `package ≡ pkg`) and want them to
   evolve live. The engine already ships the *mechanism* — equivalence **expansion** (required → any-of,
   structurally FN-safe; [ADR-054](adr-054-equivalence-expansion.md)), the any-of learner (ADR-015),
   corpus phrase induction (ADR-053), and the live `set_vocab` + `recompile_stale_segments` apply path.
@@ -40,23 +40,24 @@
     `status` ∈ {candidate, active, rejected}; `confidence` is review-prioritization metadata only.
   - **Structural classifier** (`alias/classify.rs`): `SingleTokenVariant` (all forms single-token and
     every pair shares a ≥3-char common prefix — plurals / truncations / hyphenation folds),
-    `SingleTokenDistinct` (single-token but not all-variant — graders `(psa, bgs, sgc)`), `MultiWord`
+    `SingleTokenDistinct` (single-token but not all-variant — alternatives
+    `(new, refurbished, used)`), `MultiWord`
     (any multi-token form — Phase 2), `MixedKind` (forms span >1 known `FeatureKind`). It is purely
     structural — it never judges semantics; that judgement is exactly what Phase 1 defers to a reviewer.
   - **Conservative auto-activation policy.** `SingleTokenVariant` → active from any source. A declared /
     manual `SingleTokenDistinct` → active (operator intent). A **learned** `SingleTokenDistinct` (the
-    `(psa, bgs, sgc)` case — an any-of is a *disjunction*, not an equivalence assertion), `MultiWord`,
+    `(new, refurbished, used)` case — an any-of is a *disjunction*, not an equivalence assertion), `MultiWord`,
     and `MixedKind` → **candidate, never silently active**. `Rejected` is sticky so a re-learn cannot
-    resurrect it; `activate()` refuses a multi-word / mixed-kind group so review can't enable something
-    the matcher would ignore.
+    resurrect it; `activate()` refuses `MixedKind`, while ADR-061 makes reviewed multi-word groups
+    expressible through the token-graph matcher.
   - **Sources.** *Learn* from query any-of groups at the **group level** (`learn_anyof_groups` keeps
-    `(psa,bgs,sgc)` as ONE 3-form group, so it classifies as a category alternative, not three variant
+    `(new,refurbished,used)` as one 3-form group, so it classifies as a category alternative, not three variant
     pairs). *Import* Solr/Lucene synonym files (`alias/solr.rs`: comma lists + `a,b => c,d` mappings
     unioned into one **bidirectional** group — RR equivalences are bidirectional, a recall-safe
     over-approximation; `#` comments, `\,` escapes).
   - **Active groups feed matching** via `Vocab::effective_equivalence_groups()` = directly-declared
-    `equivalences` (ADR-054) **∪** the registry's active single-token groups. `resolve_equivalences`
-    reads this union; candidates contribute nothing.
+    `equivalences` (ADR-054) **∪** the registry's active groups. Single- and multi-word forms are
+    supported; `resolve_equivalences` reads this union and candidates contribute nothing.
   - **The ID-stability fix.** `Vocab::intern_equivalence_forms` interns every effective form into the
     **mutable** single-node dict *before* resolving, forcing the same interning a future insert would
     do — so resolve-time and insert-time agree on a dense id. Applied on the **compile/recompile**
@@ -95,7 +96,7 @@
 
 - **Alternatives.** (1) *Re-land PR #37's approach* — rejected: it coupled the safe single-token work to
   the unsafe flat-feature-set multi-word model. (2) *Auto-activate every learned single-token group* —
-  rejected: a learned `(psa, bgs)` any-of is a disjunction, not an equivalence; activating it silently
+  rejected: a learned `(new, refurbished)` any-of is a disjunction, not an equivalence; activating it silently
   bridges distinct entities. (3) *Reclassify on every load* — rejected: classification needs a
   normalizer + dict; storing `kind` keeps `GET /_vocab` cheap and review stable. (4) *Mutate the cluster
   dict for symmetry* — rejected as unnecessary (the cluster is immune) and risky (it would perturb the

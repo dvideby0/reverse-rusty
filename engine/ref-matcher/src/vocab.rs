@@ -3,7 +3,7 @@
 //! This is deliberately a separate type from `reverse_rusty::vocab::Vocab`: the reference must not
 //! depend on the engine. The differential harness builds BOTH a `Vocab` (for the engine) and a
 //! `RefVocab` (for the reference) from one neutral description, so the same phrases / synonyms /
-//! graders / aliases / equivalences drive both sides while only the normalization *logic* differs.
+//! aliases / equivalences drive both sides while only the normalization *logic* differs.
 
 use crate::clean::{PunctClass, PunctTable};
 
@@ -21,14 +21,15 @@ pub enum PhraseMode {
 /// A multi-word phrase: its cleaned token sequence -> a canonical entity feature.
 #[derive(Clone, Debug)]
 pub struct RefPhrase {
-    /// The cleaned tokens the phrase matches (e.g. `["upper","deck"]`).
+    /// The cleaned tokens the phrase matches (e.g. `["north","star"]`).
     pub tokens: Vec<String>,
-    /// The canonical entity feature emitted (e.g. `term:upper_deck`), used verbatim.
+    /// The canonical entity feature emitted (e.g. `term:north_star`), used verbatim.
     pub feature: String,
     pub mode: PhraseMode,
 }
 
-/// A single-token synonym: `token` -> a canonical feature (e.g. `rc` -> `term:rookie`).
+/// A single-token synonym: `token` -> a canonical feature
+/// (e.g. `refurb` -> `term:refurbished`).
 #[derive(Clone, Debug)]
 pub struct RefSynonym {
     pub token: String,
@@ -41,10 +42,8 @@ pub struct RefSynonym {
 pub struct RefVocab {
     pub phrases: Vec<RefPhrase>,
     pub synonyms: Vec<RefSynonym>,
-    pub graders: Vec<String>,
-    pub grade_words: Vec<String>,
-    /// A number immediately after one of these tokens is demoted to a generic term (ADR-069).
-    /// Default `["pop"]`; empty = parity mode (position-insensitive number typing).
+    /// A number immediately after one of these tokens is demoted to a generic term.
+    /// Empty by default, making number typing position-insensitive.
     pub number_context: Vec<String>,
     /// Equivalence groups as **forms** (surface strings). During semantic analysis a positive
     /// feature requirement that resolves from one form is widened to alternatives over the
@@ -54,35 +53,18 @@ pub struct RefVocab {
 }
 
 impl RefVocab {
-    /// The empty default vocabulary: no phrases / synonyms / graders / grade words / equivalences,
-    /// `number_context = ["pop"]`, and the default punctuation table. This is the exact shape of
-    /// the engine's `Normalizer::default_vocab()` (an empty `NormalizerBuilder`), under which
-    /// graders never fire and `psa10` stays a single generic `term:psa10`.
+    /// The empty default vocabulary: no phrases, synonyms, number contexts, or equivalences,
+    /// plus the default punctuation table. This is the exact shape of the engine's
+    /// `Normalizer::default_vocab()` (an empty `NormalizerBuilder`).
     #[must_use]
     pub fn default_vocab() -> Self {
         RefVocab {
             phrases: Vec::new(),
             synonyms: Vec::new(),
-            graders: Vec::new(),
-            grade_words: Vec::new(),
-            number_context: vec!["pop".to_string()],
+            number_context: Vec::new(),
             equivalences: Vec::new(),
             punct: PunctTable::new(),
         }
-    }
-
-    /// Register a grader keyword (lowercased), e.g. `psa`, `bgs`, `sgc`.
-    #[must_use]
-    pub fn grader(mut self, name: &str) -> Self {
-        self.graders.push(name.to_ascii_lowercase());
-        self
-    }
-
-    /// Register a grade-context word (lowercased), e.g. `gem`, `mint`, `pristine`.
-    #[must_use]
-    pub fn grade_word(mut self, word: &str) -> Self {
-        self.grade_words.push(word.to_ascii_lowercase());
-        self
     }
 
     /// Register a single-token synonym `token` -> `canonical`.

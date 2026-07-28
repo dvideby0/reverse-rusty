@@ -19,11 +19,11 @@ fn lazy_sources_round_trip_and_reopen() {
         // _source resolves via the mmap base after the bulk commit re-map.
         assert_eq!(
             eng.get_query_source(1).as_deref(),
-            Some("michael jordan 1986 fleer")
+            Some("wireless mouse 1986 vertex")
         );
         assert_eq!(
             eng.get_query_source(10).as_deref(),
-            Some("patrick mahomes prizm rookie")
+            Some("action camera contoso new")
         );
         assert!(eng.get_query_source(999).is_none());
 
@@ -44,10 +44,7 @@ fn lazy_sources_round_trip_and_reopen() {
             e.build_from_queries(&queries);
             e
         };
-        for title in [
-            "1986 Fleer Michael Jordan PSA 10",
-            "Luka Doncic Prizm Silver",
-        ] {
+        for title in ["1986 Vertex Wireless Mouse PRO", "USB Hub Contoso Silver"] {
             assert_eq!(
                 match_ids(&eng, title),
                 match_ids(&mem, title),
@@ -60,30 +57,30 @@ fn lazy_sources_round_trip_and_reopen() {
     let mut eng = Engine::open(make_norm(), cfg()).expect("reopen");
     assert_eq!(
         eng.get_query_source(3).as_deref(),
-        Some("kobe bryant psa 10")
+        Some("noise cancelling headphones pro")
     );
     assert_eq!(
         eng.get_query_source(7).as_deref(),
-        Some("luka doncic prizm silver")
+        Some("usb hub contoso silver")
     );
 
     // A later WAL-backed flush selects and remaps a new immutable generation;
     // neither the old mmap base nor an overlay duplicate may hide the new row.
     let selected_before = committed_source_path(&dir);
-    eng.try_insert_live("wander franco prospect", 100, 1)
+    eng.try_insert_live("product omega preview", 100, 1)
         .expect("lazy live insert");
     eng.flush();
     let selected_after = committed_source_path(&dir);
     assert_ne!(selected_after, selected_before);
     assert_eq!(
         eng.get_query_source(100).as_deref(),
-        Some("wander franco prospect")
+        Some("product omega preview")
     );
     drop(eng);
     let eng = Engine::open(make_norm(), cfg()).expect("reopen remapped lazy generation");
     assert_eq!(
         eng.get_query_source(100).as_deref(),
-        Some("wander franco prospect")
+        Some("product omega preview")
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -149,10 +146,10 @@ fn legacy_source_recovers_live_version_and_dense_tags() {
         let mut engine = Engine::with_config(make_norm(), cfg());
         engine
             .try_insert_live_with_tags(
-                "topps chrome",
+                "acme chrome",
                 7,
                 42,
-                &[("category".to_string(), "cards".to_string())],
+                &[("category".to_string(), "items".to_string())],
             )
             .expect("tagged insert");
         engine.flush();
@@ -166,7 +163,7 @@ fn legacy_source_recovers_live_version_and_dense_tags() {
     // be rejected as stale.
     let norm = make_norm();
     let mut dict = reverse_rusty::dict::Dict::new();
-    let ast = reverse_rusty::dsl::parse("topps chrome").expect("legacy query");
+    let ast = reverse_rusty::dsl::parse("acme chrome").expect("legacy query");
     let mut lc = String::new();
     let ex = reverse_rusty::compile::extract(&ast, &norm, &mut dict, &mut lc);
     let mut legacy_segment = reverse_rusty::segment::Segment::new();
@@ -192,7 +189,7 @@ fn legacy_source_recovers_live_version_and_dense_tags() {
 
     // The point read inherits version/tags only because BOTH durable domains
     // explicitly carry the legacy generation zero.
-    write_v2_sources(&dir.join("sources.dat"), &[(7, "topps chrome")]);
+    write_v2_sources(&dir.join("sources.dat"), &[(7, "acme chrome")]);
     let mut manifest =
         reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("read manifest");
     manifest.source_file_name = "sources.dat".to_string();
@@ -208,7 +205,7 @@ fn legacy_source_recovers_live_version_and_dense_tags() {
     assert!(source.tags_known());
     assert_eq!(
         source.tags(),
-        [("category".to_string(), "cards".to_string())]
+        [("category".to_string(), "items".to_string())]
     );
 
     let _ = std::fs::remove_dir_all(&dir);

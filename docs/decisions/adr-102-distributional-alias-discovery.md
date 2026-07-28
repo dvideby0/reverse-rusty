@@ -10,15 +10,17 @@
   loudly where the required cross-shard evidence is unavailable.
 
 - **Context:** The Tier 2 roadmap item; technique 1 of
-  [`research/corpus-feature-learning.md`](../research/corpus-feature-learning.md) §5. The shipped
+  [`research/corpus-feature-learning.md`](../research/corpus-feature-learning.md) §2
+  (“Distributional alias proposals”). The shipped
   alias machinery is complete downstream of a *proposal*: ADR-054 applies equivalences FN-safely
   (expansion, never collapse), ADR-060 governs them (provenance/kind/status/confidence,
   `Rejected` stickiness), ADR-061 makes multi-word forms expressible. But the only automated
   proposal *sources* are query any-of co-occurrence (needs the operator to have written the
   disjunction) and Solr import (needs the operator to already know the synonym). The genuinely
-  hard aliases — non-adjacent abbreviations like `ud` ≡ `upper deck` — arrive from nowhere today.
+  hard aliases — non-adjacent abbreviations like `ns` ≡ `north star` — arrive from nowhere today.
   Distributional similarity is the cheap corpus-derived source: two tokens used in the same query
-  *contexts* are equivalence candidates. It is also structurally noisy — co-hyponyms (`psa`/`bgs`)
+  *contexts* are equivalence candidates. It is also structurally noisy — co-hyponyms
+  (`new`/`refurbished`)
   share contexts exactly like substitutes do — which the roadmap acknowledges: "review-first,
   never auto-active."
 
@@ -28,7 +30,7 @@
      body — the `POST /_vocab/learn` precedent, and the cluster dry-run path). Per query:
      positive clauses only (a forbidden term is not semantic context), atom surfaces tokenized by
      `corpus::tokenize` (the NPMI learner's granularity). Optional **NPMI phrase glue** first
-     (default on) so `upper deck` participates as the unit `upper_deck` — what makes the
+     (default on) so `north star` participates as the unit `north_star` — what makes the
      token-vs-multi-word case discoverable. Context vector = same-query co-occurrence over the
      top-`max_vocab` eligible tokens; similarity = **cosine over PPMI-weighted vectors**,
      accumulated sparsely via an inverted index over context tokens (PPMI zeroes hub contexts,
@@ -46,9 +48,9 @@
   2. **The noise model — substitutes vs co-hyponyms.** Both share neighbor distributions; the one
      cheap discriminator the counting data offers is *syntagmatic* co-occurrence: true
      substitutes are paradigmatic (they fill the same slot, so a query rarely contains both);
-     co-hyponyms co-occur (`(psa,bgs)` any-ofs, `jordan pippen` duals). A pair whose
+     co-hyponyms co-occur (`(new,refurbished)` any-ofs, `wireless_mouse keyboard` duals). A pair whose
      `cooc / min(freq_a, freq_b)` exceeds `max_cooccurrence_rate` is dropped. Numeric-only tokens
-     (years, grades) are excluded by default — textbook co-hyponyms with near-identical contexts.
+     are excluded by default because they commonly share near-identical contexts.
      Both are heuristics, hence the governance below, and the cost asymmetry that makes this
      safe: a wrong *candidate* costs a reviewer's minute; a wrong *activation* costs bounded
      false-positive candidates via ADR-054 expansion — never a false negative, in any case.
@@ -69,7 +71,7 @@
      O(corpus) for a change that, here, activates *nothing*. The seam's fast path structurally
      verifies (never trusts) BOTH: everything **outside the alias registry is byte-identical**,
      compared over the serialized vocab documents with the registries blanked — so
-     synonyms/phrases/graders/punctuation/number-context/declared equivalences AND any future
+     synonyms/phrases/punctuation/number-context/declared equivalences AND any future
      `Vocab` field automatically participate (a field-list compare would silently rot — codex
      review); and the registry's matching-relevant projections
      (`effective_equivalence_groups` + `active_alias_forms`) are equal. Only then does it swap

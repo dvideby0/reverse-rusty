@@ -41,11 +41,11 @@ fn unbind_then_rebuild_does_not_lose_the_moved_querys_tags() {
     // matched, but its filter tags were silently gone (the codex finding).
     let (mut queries, _titles) = build_corpus();
     let q = 9_500_001u64;
-    queries.push((q, "1994 fleer zzmovea".into()));
+    queries.push((q, "1994 vertex zzmovea".into()));
     let tags = tags_parallel(&queries);
     let q_tag = tags_for(q); // interned at build via build_with_tags
     let filter = vec![(q_tag[0].0.clone(), vec![q_tag[0].1.clone()])];
-    let title = "1994 fleer zzmovea psa 10";
+    let title = "1994 vertex zzmovea pro";
 
     let dir = unique_dir("tagloss_unbind");
     let mut cluster = ClusterEngine::build_with_tags(
@@ -62,7 +62,7 @@ fn unbind_then_rebuild_does_not_lose_the_moved_querys_tags() {
     // the query) and the tags survived the first rebuild.
     assert!(
         cluster
-            .percolate("1994 fleer zzcanona psa 10")
+            .percolate("1994 vertex zzcanona pro")
             .unwrap()
             .contains(&q),
         "precondition — the equivalence must widen the query onto zzcanona"
@@ -79,7 +79,7 @@ fn unbind_then_rebuild_does_not_lose_the_moved_querys_tags() {
         .expect("unbind: the query returns to its selective shard");
     assert!(
         !cluster
-            .percolate("1994 fleer zzcanona psa 10")
+            .percolate("1994 vertex zzcanona pro")
             .unwrap()
             .contains(&q),
         "precondition — the unbind is active (the canon form no longer reaches it)"
@@ -114,7 +114,7 @@ fn rebuild_does_not_resurrect_a_moved_then_deleted_query() {
     // unconditionally, order-independent: a deleted query matching again.
     let (mut queries, _titles) = build_corpus();
     let q = 9_500_002u64;
-    queries.push((q, "1994 fleer zzmovea".into()));
+    queries.push((q, "1994 vertex zzmovea".into()));
     let dir = unique_dir("resurrect_moved");
     let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(8, dir.clone(), false), &queries)
         .expect("durable build");
@@ -123,7 +123,7 @@ fn rebuild_does_not_resurrect_a_moved_then_deleted_query() {
         .expect("bind: the widened query moves off its build shard");
     assert!(
         cluster
-            .percolate("1994 fleer zzcanona psa 10")
+            .percolate("1994 vertex zzcanona pro")
             .unwrap()
             .contains(&q),
         "precondition — the equivalence must widen the query onto zzcanona"
@@ -131,7 +131,7 @@ fn rebuild_does_not_resurrect_a_moved_then_deleted_query() {
     assert!(cluster.remove_query(q).expect("delete") >= 1);
     assert!(
         !cluster
-            .percolate("1994 fleer zzmovea psa 10")
+            .percolate("1994 vertex zzmovea pro")
             .unwrap()
             .contains(&q),
         "deleted before the rebuild"
@@ -145,7 +145,7 @@ fn rebuild_does_not_resurrect_a_moved_then_deleted_query() {
         "the rebuild covers exactly the live corpus — a stale store entry on the \
          abandoned build shard must not re-place the deleted query"
     );
-    for title in ["1994 fleer zzmovea psa 10", "1994 fleer zzcanona psa 10"] {
+    for title in ["1994 vertex zzmovea pro", "1994 vertex zzcanona pro"] {
         assert!(
             !cluster.percolate(title).unwrap().contains(&q),
             "{title:?}: the vocabulary rebuild must NOT resurrect a moved-then-deleted \
@@ -188,7 +188,7 @@ fn source_generations_coexist_across_the_rebuild_commit() {
     // v7 selects the green sidecars together with the green segment registry.
     let (mut queries, _titles) = build_corpus();
     let q = 9_500_003u64;
-    queries.push((q, "1994 fleer zzmovea".into()));
+    queries.push((q, "1994 vertex zzmovea".into()));
     let dir = unique_dir("superset_sources");
     let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(8, dir.clone(), false), &queries)
         .expect("durable build");
@@ -211,7 +211,7 @@ fn source_generations_coexist_across_the_rebuild_commit() {
         .expect("bind: the widened query moves onto the replicated lane");
     assert!(
         cluster
-            .percolate("1994 fleer zzcanona psa 10")
+            .percolate("1994 vertex zzcanona pro")
             .unwrap()
             .contains(&q),
         "precondition — the equivalence must widen the query onto zzcanona"
@@ -230,7 +230,7 @@ fn source_generations_coexist_across_the_rebuild_commit() {
 
     let manifest =
         read_cluster_manifest(&dir.join("cluster_manifest.bin")).expect("read v7 manifest");
-    assert_eq!(manifest.compiler_semantics_version, 4);
+    assert_eq!(manifest.compiler_semantics_version, 5);
     assert!(
         manifest
             .source_files
@@ -259,7 +259,7 @@ fn source_generations_coexist_across_the_rebuild_commit() {
     let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen green commit");
     assert!(
         reopened
-            .percolate("1994 fleer zzcanona psa 10")
+            .percolate("1994 vertex zzcanona pro")
             .expect("percolate after reopen")
             .contains(&q),
         "the green segment/source commit must reopen as one complete generation"

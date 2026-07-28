@@ -12,20 +12,23 @@ use reverse_rusty::{
 };
 
 fn engine() -> Engine {
-    Engine::new(Normalizer::default_vocab().expect("built-in vocab"))
+    Engine::new(Normalizer::default_vocab().expect("default vocabulary"))
 }
 
 fn engine_with(config: EngineConfig) -> Engine {
-    Engine::with_config(Normalizer::default_vocab().expect("built-in vocab"), config)
+    Engine::with_config(
+        Normalizer::default_vocab().expect("default vocabulary"),
+        config,
+    )
 }
 
 #[test]
 fn build_report_splits_parse_and_class_d() {
     let mut eng = engine();
     let batch = vec![
-        (1u64, "michael jordan".to_string()), // good        -> ingested
+        (1u64, "wireless mouse".to_string()), // good        -> ingested
         (2u64, "(".to_string()),              // malformed   -> rejected_parse
-        (3u64, "-auto".to_string()),          // only a NOT  -> rejected_class_d
+        (3u64, "-manual".to_string()),        // only a NOT  -> rejected_class_d
     ];
     let report = eng.build_from_queries(&batch);
 
@@ -33,7 +36,7 @@ fn build_report_splits_parse_and_class_d() {
     assert_eq!(report.rejected_parse, 1, "the '(' should be a parse reject");
     assert_eq!(
         report.rejected_class_d, 1,
-        "'-auto' has no anchor => class D"
+        "'-manual' has no anchor => class D"
     );
 
     // engine-level counters agree with the per-batch report
@@ -57,9 +60,9 @@ fn bulk_detailed_reports_per_item_outcomes() {
     // return ES-style per-item statuses instead of marking every parsed item 201.
     let mut eng = engine();
     let batch = vec![
-        (1u64, "michael jordan".to_string()), // good        -> Ingested
+        (1u64, "wireless mouse".to_string()), // good        -> Ingested
         (2u64, "(".to_string()),              // malformed   -> RejectedParse
-        (3u64, "-auto".to_string()),          // only a NOT  -> RejectedClassD
+        (3u64, "-manual".to_string()),        // only a NOT  -> RejectedClassD
     ];
     let (report, items) = eng
         .try_bulk_ingest_detailed(&batch)
@@ -113,7 +116,7 @@ fn insert_live_now_counts_parse_failures() {
     // Regression: a parse failure in insert_live used to return None with NO
     // record at all, so rejected()/rejected_parse() under-counted.
     let mut eng = engine();
-    eng.build_from_queries(&[(1, "michael jordan".to_string())]);
+    eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
 
     let before = eng.rejected_parse();
     assert_eq!(eng.insert_live("(", 99, 2), None);
@@ -127,7 +130,7 @@ fn insert_live_now_counts_parse_failures() {
 #[test]
 fn try_insert_live_surfaces_typed_error_without_counting() {
     let mut eng = engine();
-    eng.build_from_queries(&[(1, "michael jordan".to_string())]);
+    eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
 
     // parse failure -> typed Err, and NOT counted (the caller owns it)
     let before_parse = eng.rejected_parse();
@@ -138,12 +141,12 @@ fn try_insert_live_surfaces_typed_error_without_counting() {
     assert_eq!(eng.rejected_parse(), before_parse);
 
     // class-D -> Ok(RejectedClassD), and IS counted
-    let outcome = eng.try_insert_live("-auto", 100, 2).unwrap();
+    let outcome = eng.try_insert_live("-manual", 100, 2).unwrap();
     assert_eq!(outcome, InsertOutcome::RejectedClassD);
     assert_eq!(eng.rejected_class_d(), 1);
 
     // good insert -> Ok(Inserted(_))
-    let outcome = eng.try_insert_live("scottie pippen", 101, 2).unwrap();
+    let outcome = eng.try_insert_live("mechanical keyboard", 101, 2).unwrap();
     assert!(
         matches!(outcome, InsertOutcome::Inserted(_)),
         "expected Inserted, got {outcome:?}"
@@ -284,7 +287,7 @@ fn oversize_tag_set_rejected_loudly_not_truncated() {
     // Live insert: typed reject, nothing stored.
     let before = eng.num_queries();
     match eng
-        .try_insert_live_with_tags("scottie pippen", 1, 1, &too_many)
+        .try_insert_live_with_tags("mechanical keyboard", 1, 1, &too_many)
         .unwrap_err()
     {
         WriteError::Parse(pe) => assert_eq!(pe.kind, ParseErrorKind::TooManyTags),
@@ -298,13 +301,13 @@ fn oversize_tag_set_rejected_loudly_not_truncated() {
 
     // A within-limit tagged query is accepted and matchable.
     let outcome = eng
-        .try_insert_live_with_tags("michael jordan", 2, 1, &within)
+        .try_insert_live_with_tags("wireless mouse", 2, 1, &within)
         .unwrap();
     assert!(matches!(outcome, InsertOutcome::Inserted(_)));
     let snap = eng.snapshot();
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
-    snap.match_title("michael jordan card", &mut scratch, &mut out, true);
+    snap.match_title("wireless mouse item", &mut scratch, &mut out, true);
     assert!(out.contains(&2), "within-limit tagged query must match");
 
     // Build path: the over-tagged item is reported as a parse reject, not stored.
@@ -314,7 +317,7 @@ fn oversize_tag_set_rejected_loudly_not_truncated() {
     });
     let (report, items) = eng2
         .try_bulk_ingest_detailed_with_tags(
-            &[(10, "michael jordan".to_string())],
+            &[(10, "wireless mouse".to_string())],
             std::slice::from_ref(&too_many),
         )
         .expect("in-memory ingest is durable");
@@ -452,7 +455,7 @@ mod cancellation {
             ..GenConfig::default()
         };
         let data = generate(&cfg);
-        let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+        let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
         eng.build_from_queries(&data.queries);
         (eng, data.titles)
     }

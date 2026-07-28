@@ -142,29 +142,17 @@ impl Normalizer {
         F: FnMut(&str, FeatureKind) -> FeatureId,
     {
         out.clear();
-        let mut composite_arcs = Vec::new();
         self.emit_positioned(
             text,
             lc,
             sc,
             EmitMode::positioned(side, force_additive),
             &mut |name, kind, start, end| {
-                // `grader_grade` is a windowed flat semantic feature, but in a
-                // quoted graph it may shortcut only the fused (`psa10`) or
-                // adjacent (`psa 10`) spelling. A longer edge would jump over
-                // explicit quoted positions, making `"psa foo 10"` equivalent
-                // to `"psa bar 10"` (and over-triggering MUST_NOT phrases).
-                if kind == FeatureKind::GraderGrade && end.saturating_sub(start) > 2 {
-                    return;
-                }
                 let arc = PositionArc {
                     feature: resolve(name, kind),
                     start,
                     end,
                 };
-                if side == Side::Query && kind == FeatureKind::GraderGrade {
-                    composite_arcs.push(arc);
-                }
                 out.push(arc);
             },
         );
@@ -209,22 +197,9 @@ impl Normalizer {
             });
         }
 
-        // A fused grader token emits grader + grade + grader_grade at one
-        // position. Those are conjunctive semantic projections, not three
-        // interchangeable analyzer terms. The composite is the lossless query
-        // label; title graphs retain every projection so a simpler quoted query
-        // (for example "psa") can still match `psa10`.
-        if !composite_arcs.is_empty() {
-            out.retain(|arc| {
-                let composite_span = composite_arcs
-                    .iter()
-                    .any(|composite| (composite.start, composite.end) == (arc.start, arc.end));
-                !composite_span || composite_arcs.contains(arc)
-            });
-        }
         out.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
         out.dedup();
-        (positions, !sc.position_graph_incomplete)
+        (positions, true)
     }
 }
 

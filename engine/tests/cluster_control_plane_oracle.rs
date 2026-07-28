@@ -28,7 +28,7 @@ use reverse_rusty::normalize::Normalizer;
 use std::collections::HashSet;
 
 fn vocab() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 /// Independent ground-truth matcher (same structure as `cluster_oracle.rs` / `oracle.rs` —
@@ -101,8 +101,8 @@ fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0CEA_5ADE,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
     let mut queries = data.queries;
@@ -110,7 +110,7 @@ fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
     let mut next_id = queries.iter().map(|(id, _)| *id).max().unwrap_or(0) + 1;
 
     for i in 0..150u64 {
-        queries.push((next_id, format!("(rareplayer{i},rareplayer{})", i + 1000)));
+        queries.push((next_id, format!("(rareentity{i},rareentity{})", i + 1000)));
         next_id += 1;
     }
     for i in 0..100u64 {
@@ -122,7 +122,7 @@ fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
     for i in 0..150u64 {
         let year = 1986 + (i % 39);
         let brand = BRANDS[(i % BRANDS.len() as u64) as usize];
-        queries.push((next_id, format!("{year} {brand} rareplayer{i}")));
+        queries.push((next_id, format!("{year} {brand} rareentity{i}")));
         next_id += 1;
     }
     for i in 0..200u64 {
@@ -130,7 +130,7 @@ fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
         let brand = BRANDS[(i % BRANDS.len() as u64) as usize];
         let a = i % 150;
         titles.push(format!(
-            "{year} {brand} rareplayer{a} rareplayer{} psa 10",
+            "{year} {brand} rareentity{a} rareentity{} pro",
             a + 1000
         ));
     }

@@ -24,7 +24,10 @@ fn compaction_reanchoring_preserves_correctness() {
         compaction_reanchor: true,
         ..EngineConfig::default()
     };
-    let mut eng = Engine::with_config(Normalizer::default_vocab().expect("built-in vocab"), cfg);
+    let mut eng = Engine::with_config(
+        Normalizer::default_vocab().expect("default vocabulary"),
+        cfg,
+    );
 
     // --- Build corpus (pass A bumps freq, then the mask is frozen). 70 "filler" features
     //     at build-frequency 3 occupy the top-64, so anything appearing fewer than 3 times
@@ -175,7 +178,7 @@ fn compaction_reanchoring_preserves_correctness() {
 fn reanchoring_is_a_noop_under_a_frozen_dict() {
     use reverse_rusty::segment::Segment;
 
-    let norm = Normalizer::default_vocab().expect("built-in vocab");
+    let norm = Normalizer::default_vocab().expect("default vocabulary");
     let cfg = GenConfig {
         num_queries: 6_000,
         num_titles: 1,
@@ -183,8 +186,8 @@ fn reanchoring_is_a_noop_under_a_frozen_dict() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xF02E_0056,
-        num_players: 700,
-        num_sets: 300,
+        num_entities: 700,
+        num_collections: 300,
     };
     let data = generate(&cfg);
 
@@ -249,7 +252,10 @@ fn reanchoring_never_demotes_a_main_query_into_the_broad_lane() {
         compaction_reanchor: true,
         ..EngineConfig::default()
     };
-    let mut eng = Engine::with_config(Normalizer::default_vocab().expect("built-in vocab"), cfg);
+    let mut eng = Engine::with_config(
+        Normalizer::default_vocab().expect("default vocabulary"),
+        cfg,
+    );
 
     // 1) insert_live on an EMPTY engine: the mask is not finalized yet, so this single-feature
     //    query is class A in the MAIN index (req_mask == 0).
@@ -304,8 +310,8 @@ fn compaction_reanchoring_matches_oracle_at_scale() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x5CA1_E056,
-        num_players: 2_500,
-        num_sets: 1_000,
+        num_entities: 2_500,
+        num_collections: 1_000,
     };
     let data = generate(&gcfg);
     let q = &data.queries;
@@ -318,7 +324,10 @@ fn compaction_reanchoring_matches_oracle_at_scale() {
         compaction_reanchor: true,
         ..EngineConfig::default()
     };
-    let mut eng = Engine::with_config(Normalizer::default_vocab().expect("built-in vocab"), cfg);
+    let mut eng = Engine::with_config(
+        Normalizer::default_vocab().expect("default vocabulary"),
+        cfg,
+    );
     // Each ingest bumps global frequencies (the mask is frozen after the first build), so by
     // compaction time the early segments' anchors have drifted.
     eng.build_from_queries(&q[..chunk]);

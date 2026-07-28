@@ -19,9 +19,9 @@ use reverse_rusty::normalize::Normalizer;
 /// A few queries that compile against a dict built from themselves.
 fn corpus() -> Vec<(u64, String)> {
     vec![
-        (1, "1994 upper deck ken griffey".to_string()),
-        (2, "topps chrome refractor".to_string()),
-        (3, "1990 fleer rookie".to_string()),
+        (1, "1994 north star robot vacuum".to_string()),
+        (2, "acme chrome premium".to_string()),
+        (3, "1990 vertex new".to_string()),
     ]
 }
 

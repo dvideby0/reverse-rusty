@@ -31,7 +31,7 @@ fn rank_spec() -> RankSpec {
     RankSpec {
         priority_key: Some("priority".to_string()),
         boosts: vec![
-            ("category".to_string(), "cards".to_string(), 1000),
+            ("category".to_string(), "items".to_string(), 1000),
             ("status".to_string(), "active".to_string(), 250),
         ],
     }
@@ -41,7 +41,7 @@ fn rank_program() -> RankProgramSpec {
     RankProgramSpec {
         priority_field: Some("priority".to_string()),
         boosts: vec![
-            ("category".to_string(), "cards".to_string(), 1_000),
+            ("category".to_string(), "items".to_string(), 1_000),
             ("status".to_string(), "active".to_string(), -250),
         ],
     }
@@ -129,9 +129,9 @@ fn distributed_bounded_top_k_matches_single_node() {
 fn distributed_top_k_covers_every_visibility_and_cost_class() {
     const THETA: u32 = 32;
     let (mut queries, mut titles) = build_corpus();
-    queries.push((99_999_999, "-autograph".to_string()));
-    titles.push("1994 topps chrome psa 10".to_string());
-    titles.push("1994 topps chrome autograph psa 10".to_string());
+    queries.push((99_999_999, "-adapter".to_string()));
+    titles.push("1994 acme chrome pro".to_string());
+    titles.push("1994 acme chrome adapter pro".to_string());
     let tags = ranked_tags_parallel(&queries);
     let engine_config = EngineConfig {
         accept_class_d: true,
@@ -435,7 +435,7 @@ fn synthetic_tags_boost_but_do_not_priority_score() {
         ..ClusterConfig::default()
     };
     // Untagged build ⇒ empty frozen tag dict ⇒ every live tag below is synthetic.
-    let seed = vec![(1u64, "1994 topps".to_string())];
+    let seed = vec![(1u64, "1994 acme".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
     cluster
         .add_query_with_tags(
@@ -479,7 +479,7 @@ fn fanned_out_copies_merge_with_one_exact_score() {
     let mut tags = ranked_tags_parallel(&queries);
     // Deterministic interned tags for the fanned query: boost(1000-eligible) + priority.
     *tags.last_mut().expect("tags for q_fan") = vec![
-        ("category".to_string(), "cards".to_string()),
+        ("category".to_string(), "items".to_string()),
         ("priority".to_string(), "33".to_string()),
     ];
 
@@ -494,7 +494,7 @@ fn fanned_out_copies_merge_with_one_exact_score() {
 
         // Both members in the title ⇒ both holding shards probed ⇒ two copies merge.
         let (scored, _) = cluster
-            .percolate_filtered_ranked("zzfanleft zzfanright psa", &[], true, &rank_spec())
+            .percolate_filtered_ranked("zzfanleft zzfanright alpha", &[], true, &rank_spec())
             .expect("ranked percolate");
         let rows: Vec<&(u64, i64)> = scored.iter().filter(|&&(id, _)| id == q_fan).collect();
         assert_eq!(
@@ -505,7 +505,7 @@ fn fanned_out_copies_merge_with_one_exact_score() {
         assert_eq!(
             rows[0].1,
             1000 + 33,
-            "K={k}: the merged score is the exact tag-derived value (cards boost + priority), \
+            "K={k}: the merged score is the exact tag-derived value (items boost + priority), \
              whichever copy survived the dedup"
         );
     }
@@ -526,7 +526,7 @@ fn ranking_composes_with_filter() {
     let cluster = ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags)
         .expect("tagged cluster build");
 
-    let filter = vec![("category".to_string(), vec!["cards".to_string()])];
+    let filter = vec![("category".to_string(), vec!["items".to_string()])];
     let mut nonempty = 0usize;
     for title in titles.iter().take(60) {
         let (scored, _) = cluster

@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn cluster_search_explicit_zero_timeout_cancels_and_408s() {
-    let state = test_state(&[(1, "michael jordan".to_string())]);
+    let state = test_state(&[(1, "wireless mouse".to_string())]);
 
     // An explicit timeout_ms arms the per-title cooperative check in
     // percolate_blocking; 0ms is expired before the first title evaluates, so the
@@ -16,7 +16,7 @@ async fn cluster_search_explicit_zero_timeout_cancels_and_408s() {
             "POST",
             "/_search",
             &serde_json::json!({
-                "documents": [{"title": "michael jordan rookie"}, {"title": "some other"}],
+                "documents": [{"title": "wireless mouse new"}, {"title": "some other"}],
                 "include_source": false,
                 "timeout_ms": 0,
             }),
@@ -55,7 +55,7 @@ async fn cluster_search_explicit_zero_timeout_cancels_and_408s() {
             "POST",
             "/_search",
             &serde_json::json!({
-                "document": {"title": "michael jordan rookie"},
+                "document": {"title": "wireless mouse new"},
                 "include_source": false,
             }),
         ),
@@ -71,7 +71,7 @@ async fn cluster_search_explicit_zero_timeout_cancels_and_408s() {
 /// deliberate read-surface 409 — and an explicit DELETE releases the registry.
 #[tokio::test]
 async fn cluster_v2_pit_pages_concatenate_and_stale_after_resize() {
-    let queries: Vec<(u64, String)> = (1..=20).map(|i| (i, "topps chrome".to_string())).collect();
+    let queries: Vec<(u64, String)> = (1..=20).map(|i| (i, "acme chrome".to_string())).collect();
     let tags: Vec<Vec<(String, String)>> = queries
         .iter()
         .map(|(id, _)| vec![("priority".to_string(), ((id % 6) * 10).to_string())])
@@ -110,7 +110,7 @@ async fn cluster_v2_pit_pages_concatenate_and_stale_after_resize() {
 
     let body = |extra: serde_json::Value| {
         let mut base = serde_json::json!({
-            "document": {"title": "2020 topps chrome update"},
+            "document": {"title": "2020 acme chrome update"},
             "include_source": false,
             "rank": {"priority_field": "priority"},
         });
@@ -209,7 +209,7 @@ async fn cluster_v2_pit_pages_concatenate_and_stale_after_resize() {
 
 #[tokio::test]
 async fn cluster_close_pit_supports_batches_and_counts_logical_contexts() {
-    let state = test_state(&[(1, "michael jordan".to_string())]);
+    let state = test_state(&[(1, "wireless mouse".to_string())]);
     let mut opened = Vec::new();
     for _ in 0..2 {
         let (status, body) = send(&state, req("POST", "/v2/_pit", &serde_json::json!({}))).await;

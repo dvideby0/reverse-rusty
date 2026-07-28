@@ -30,16 +30,16 @@ pub(crate) fn make_norm() -> Normalizer {
 
 pub(crate) fn sample_queries() -> Vec<(u64, String)> {
     vec![
-        (1, "michael jordan 1986 fleer".into()),
-        (2, "lebron james rookie".into()),
-        (3, "kobe bryant psa 10".into()),
-        (4, "mike trout 2011 topps update".into()),
-        (5, "derek jeter bowman chrome refractor".into()),
-        (6, "shohei ohtani rookie".into()),
-        (7, "luka doncic prizm silver".into()),
-        (8, "stephen curry select".into()),
-        (9, "aaron judge topps chrome".into()),
-        (10, "patrick mahomes prizm rookie".into()),
+        (1, "wireless mouse 1986 vertex".into()),
+        (2, "mechanical keyboard new".into()),
+        (3, "noise cancelling headphones pro".into()),
+        (4, "air purifier 2011 acme update".into()),
+        (5, "product kappa summit chrome premium".into()),
+        (6, "portable scanner product alpha new".into()),
+        (7, "usb hub contoso silver".into()),
+        (8, "smart speaker premium".into()),
+        (9, "desk lamp acme chrome".into()),
+        (10, "action camera contoso new".into()),
     ]
 }
 

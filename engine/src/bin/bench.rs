@@ -36,8 +36,8 @@ fn main() {
         // scale the entity space with the query population so selectivity stays
         // realistic (real marketplaces add entities as listings/queries grow);
         // a fixed tiny space would artificially saturate at high query counts.
-        num_players: (num_queries / 40).max(2_000),
-        num_sets: (num_queries / 100).max(1_000),
+        num_entities: (num_queries / 40).max(2_000),
+        num_collections: (num_queries / 100).max(1_000),
     };
 
     eprintln!(
@@ -48,7 +48,7 @@ fn main() {
     eprintln!("[gen] done in {:.2}s", t0.elapsed().as_secs_f64());
 
     // ---- build ----
-    let norm = Normalizer::default_vocab().expect("built-in vocab");
+    let norm = Normalizer::default_vocab().expect("default vocabulary");
     let mut eng = Engine::with_config(
         norm,
         EngineConfig {
@@ -364,7 +364,7 @@ fn main() {
         // update = insert new version of an existing logical id + tombstone old
         let logical = (i as u64) % (eng.num_queries() as u64).max(1);
         if let Some(old) = eng.insert_live(
-            "1994 upper deck michael jordan sp psa 10 -auto",
+            "1994 north star wireless mouse limited pro -damaged",
             logical,
             ver,
         ) {
@@ -438,7 +438,7 @@ fn report_persistent_memory(queries: &[(u64, String)], retain: bool, label: &str
     // manifest + sources.dat to disk (ADR-017). Dropped before reopen so the
     // reopened engine pages segment data from disk rather than holding it in RAM.
     {
-        let norm = Normalizer::default_vocab().expect("built-in vocab");
+        let norm = Normalizer::default_vocab().expect("default vocabulary");
         let cfg = EngineConfig {
             data_dir: Some(dir.clone()),
             retain_source: retain,
@@ -447,7 +447,7 @@ fn report_persistent_memory(queries: &[(u64, String)], retain: bool, label: &str
         let mut eng = Engine::with_config(norm, cfg);
         eng.build_from_queries(queries);
     }
-    let norm = Normalizer::default_vocab().expect("built-in vocab");
+    let norm = Normalizer::default_vocab().expect("default vocabulary");
     let cfg = EngineConfig {
         data_dir: Some(dir.clone()),
         retain_source: retain,

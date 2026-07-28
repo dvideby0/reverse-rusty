@@ -14,33 +14,33 @@ use std::collections::HashSet;
 /// the engine and the brute must make the SAME call on every one.
 fn degenerate_queries() -> Vec<(u64, String)> {
     let strs: Vec<String> = vec![
-        "!!!".into(),                      // positive term that cleans to nothing
-        "...".into(),                      // Keep-class dots survive as a token
-        "(a)".into(),                      // singleton any-of → plain required
-        "(aa,aa)".into(),                  // duplicate members → singleton
-        "(!!,??)".into(),                  // every member cleans to nothing → group vanishes
-        "(!!,rookie)".into(),              // one member survives → singleton required
-        "-(rookie)".into(),                // negated group only → class D
-        "-auto -lot".into(),               // pure negative → class D
-        "psa -psa".into(),                 // require + forbid the same feature
-        "(rc,rookie) -(rc,rookie)".into(), // require + forbid the same group
-        "#".into(),                        // lone marker
-        "/".into(),                        // lone marker
-        "# 1985".into(),                   // marker + number: card-number, not year
-        "pop 3".into(),                    // pop-context number
-        "10".into(),                       // bare number
-        "9.5.5".into(),                    // not a number, survives as a dotted token
-        "a".into(),                        // single letter
-        "™".into(),                        // cleans to nothing
-        "ñ".into(),                        // folds to a letter
-        "\"\"".into(),                     // empty phrase
-        "\" \"".into(),                    // whitespace phrase
-        "-\"gem mt\"".into(),              // pure negative phrase → class D
-        "()".into(),                       // parse error: empty group
-        "(,)".into(),                      // parse error: no members
-        "rookie -".into(),                 // parse error: trailing dash
-        "\"unclosed".into(),               // parse error: unclosed quote
-        "card (rc,rookie".into(),          // parse error: unclosed group
+        "!!!".into(),                  // positive term that cleans to nothing
+        "...".into(),                  // Keep-class dots survive as a token
+        "(a)".into(),                  // singleton any-of → plain required
+        "(aa,aa)".into(),              // duplicate members → singleton
+        "(!!,??)".into(),              // every member cleans to nothing → group vanishes
+        "(!!,new)".into(),             // one member survives → singleton required
+        "-(new)".into(),               // negated group only → class D
+        "-manual -lot".into(),         // pure negative → class D
+        "alpha -alpha".into(),         // require + forbid the same feature
+        "(pkg,new) -(pkg,new)".into(), // require + forbid the same group
+        "#".into(),                    // lone marker
+        "/".into(),                    // lone marker
+        "# 1985".into(),               // marker + number: item-number, not year
+        "stock 3".into(),              // number-context number
+        "10".into(),                   // bare number
+        "9.5.5".into(),                // not a number, survives as a dotted token
+        "a".into(),                    // single letter
+        "™".into(),                    // cleans to nothing
+        "ñ".into(),                    // folds to a letter
+        "\"\"".into(),                 // empty phrase
+        "\" \"".into(),                // whitespace phrase
+        "-\"deluxe\"".into(),          // pure negative phrase → class D
+        "()".into(),                   // parse error: empty group
+        "(,)".into(),                  // parse error: no members
+        "new -".into(),                // parse error: trailing dash
+        "\"unclosed".into(),           // parse error: unclosed quote
+        "item (pkg,new".into(),        // parse error: unclosed group
     ];
     let mut qs: Vec<(u64, String)> = strs
         .into_iter()
@@ -48,9 +48,9 @@ fn degenerate_queries() -> Vec<(u64, String)> {
         .map(|(i, q)| (i as u64 + 1, q))
         .collect();
     // A few normal queries so the corpus has real matches to protect.
-    qs.push((1001, "1994 fleer rookie".into()));
-    qs.push((1002, "psa rookie -auto".into()));
-    qs.push((1003, "(rc,rookie) card".into()));
+    qs.push((1001, "1994 vertex new".into()));
+    qs.push((1002, "alpha new -manual".into()));
+    qs.push((1003, "(pkg,new) item".into()));
     qs
 }
 
@@ -63,20 +63,20 @@ fn degenerate_titles() -> Vec<String> {
         "...".into(),
         "™🔥カード".into(),
         "#".into(),
-        "# 1985 / 99 pop 3".into(),
+        "# 1985 / 99 stock 3".into(),
         "a".into(),
         "ñ".into(),
         "10".into(),
         "9.5.5".into(),
-        "rookie".into(),
-        "rookie card".into(),
-        "rc card".into(),
-        "psa rookie".into(),
-        "psa rookie auto".into(),
-        "1994 fleer rookie psa 10".into(),
-        "psa".into(),
-        "gem mt".into(),
-        "  rookie   card  ".into(),
+        "new".into(),
+        "new item".into(),
+        "pkg item".into(),
+        "alpha new".into(),
+        "alpha new manual".into(),
+        "1994 vertex new pro".into(),
+        "alpha".into(),
+        "deluxe".into(),
+        "  new   item  ".into(),
         "a".repeat(5_000),
     ]
 }

@@ -6,8 +6,9 @@
 //! * one fixed generated corpus and runner shape;
 //! * exact structural invariants;
 //! * bounded resident-memory and durable-footprint growth;
+//! * absolute latency and throughput safety limits;
 //! * repeated p50/p95/p99 latency and throughput samples compared with a
-//!   historical median/MAD band;
+//!   historical median/MAD band once reviewed history is available;
 //! * one retry for timing-only failures (never for structure or resources).
 //!
 //! CLI usage:
@@ -30,7 +31,7 @@ mod measure;
 use gate::{check, rebaseline};
 use measure::measure_report;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const RUNNER_CONTRACT_ID: &str = "github-hosted-ubuntu-24.04-x64-public-standard";
 const NUM_QUERIES: usize = 1_000_000;
 const NUM_TITLES: usize = 20_000;
@@ -136,11 +137,21 @@ struct TimingHistory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TimingSafetyLimits {
+    latency_p50_max_ns: u64,
+    latency_p95_max_ns: u64,
+    latency_p99_max_ns: u64,
+    selective_titles_per_sec_min: u64,
+    columnar_titles_per_sec_min: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct GatePolicy {
     timing_material_regression_basis_points: u32,
     timing_mad_multiplier: u32,
     resource_material_regression_basis_points: u32,
     retry_timing_failures_once: bool,
+    timing_safety_limits: TimingSafetyLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,5 +359,16 @@ mod tests {
         assert_eq!(nearest_rank(&values, 50), 50);
         assert_eq!(nearest_rank(&values, 95), 95);
         assert_eq!(nearest_rank(&values, 99), 99);
+    }
+
+    #[test]
+    fn checked_in_baseline_matches_the_binary_schema() {
+        let baseline: Baseline = serde_json::from_str(include_str!(
+            "../../../../docs/performance/perf-baseline.json"
+        ))
+        .expect("checked-in baseline parses");
+        assert_eq!(baseline.schema_version, SCHEMA_VERSION);
+        assert_eq!(baseline.runner.id, RUNNER_CONTRACT_ID);
+        assert_eq!(baseline.workload, workload_contract());
     }
 }

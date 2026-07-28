@@ -378,7 +378,7 @@ mod tests {
         let mut engine =
             crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
         engine
-            .try_upsert_live_with_tags("1994 topps", 7, 1, &[("status".into(), "old".into())])
+            .try_upsert_live_with_tags("1994 acme", 7, 1, &[("status".into(), "old".into())])
             .expect("initial upsert");
         let old_snapshot = engine.snapshot();
 
@@ -386,7 +386,7 @@ mod tests {
         // publishing a replacement snapshot to reproduce the write/source ordering
         // window: old exact row, new source document.
         engine
-            .try_upsert_live_with_tags("1995 fleer", 7, 1, &[("status".into(), "new".into())])
+            .try_upsert_live_with_tags("1995 vertex", 7, 1, &[("status".into(), "new".into())])
             .expect("replacement upsert");
 
         assert!(
@@ -403,7 +403,7 @@ mod tests {
             .get_query_document(7)
             .expect("fresh generation is coherent");
         assert_eq!(fresh.version(), 1);
-        assert_eq!(fresh.query(), "1995 fleer");
+        assert_eq!(fresh.query(), "1995 vertex");
         assert_eq!(fresh.tags(), [("status".into(), "new".into())]);
     }
 
@@ -412,15 +412,15 @@ mod tests {
         let mut engine =
             crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
         engine
-            .try_insert_live("1994 topps", 7, 1)
+            .try_insert_live("1994 acme", 7, 1)
             .expect("live insert");
-        let report = engine.bulk_ingest(&[(7, "1995 fleer".to_string())]);
+        let report = engine.bulk_ingest(&[(7, "1995 vertex".to_string())]);
         assert_eq!(report.ingested, 1);
 
         let source = engine
             .snapshot()
             .get_query_document(7)
             .expect("bulk generation has a matching live exact row");
-        assert_eq!(source.query(), "1995 fleer");
+        assert_eq!(source.query(), "1995 vertex");
     }
 }

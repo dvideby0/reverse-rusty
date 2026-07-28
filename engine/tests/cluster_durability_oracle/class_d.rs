@@ -251,7 +251,7 @@ fn clog_class_d_replay_is_configuration_independent() {
         let cluster = ClusterEngine::build(
             vocab(),
             &lane_on_cfg(3, dir.clone()),
-            &[(1, "1996 skybox".to_string())],
+            &[(1, "1996 vertex".to_string())],
         )
         .expect("durable cluster builds");
         assert_eq!(
@@ -284,7 +284,7 @@ fn clog_class_d_replay_is_configuration_independent() {
         let cluster = ClusterEngine::build(
             vocab(),
             &durable_cfg(3, dir2.clone(), false),
-            &[(1, "1996 skybox".to_string())],
+            &[(1, "1996 vertex".to_string())],
         )
         .expect("durable cluster builds");
         assert_eq!(

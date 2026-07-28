@@ -21,8 +21,8 @@ fn matched(eng: &mut Engine, s: &mut MatchScratch, title: &str) -> HashSet<u64> 
     out.iter().copied().collect()
 }
 
-/// A generated corpus salted with a planted substitute family (`zzud` / `zzupperdeck` filling
-/// the same slot, never co-occurring) and a planted co-listed alternative (`zzpsa`,`zzbgs`
+/// A generated corpus salted with a planted substitute family (`zzns` / `zznorthstar` filling
+/// the same slot, never co-occurring) and a planted co-listed alternative (`zzleft`,`zzright`
 /// appearing together in any-ofs) — the two shapes the discoverer must separate.
 fn salted_corpus() -> (Vec<(u64, String)>, Vec<String>) {
     let cfg = GenConfig {
@@ -32,18 +32,18 @@ fn salted_corpus() -> (Vec<(u64, String)>, Vec<String>) {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xA1_1A5,
-        num_players: 900,
-        num_sets: 400,
+        num_entities: 900,
+        num_collections: 400,
     };
     let data = generate(&cfg);
     let mut queries = data.queries;
     let mut id = queries.iter().map(|(i, _)| *i).max().unwrap_or(0) + 1;
     for i in 0..40u64 {
-        queries.push((id, format!("zzud ctxp{} ctxb{}", i % 7, i % 5)));
+        queries.push((id, format!("zzns ctxp{} ctxb{}", i % 7, i % 5)));
         id += 1;
-        queries.push((id, format!("zzupperdeck ctxp{} ctxb{}", i % 7, i % 5)));
+        queries.push((id, format!("zznorthstar ctxp{} ctxb{}", i % 7, i % 5)));
         id += 1;
-        queries.push((id, format!("(zzpsa,zzbgs) ctxg{}", i % 7)));
+        queries.push((id, format!("(zzleft,zzright) ctxg{}", i % 7)));
         id += 1;
     }
     (queries, data.titles)
@@ -89,14 +89,14 @@ fn discover_and_record_changes_no_match_results() {
 }
 
 /// (2) Operator activation of a discovered pair is FN-safe: the cross-form match appears
-/// (a query saying `zzud` matches a `zzupperdeck` title) and no pre-activation match is lost
+/// (a query saying `zzns` matches a `zznorthstar` title) and no pre-activation match is lost
 /// anywhere (expansion widens only — ADR-054).
 #[test]
 fn operator_activation_of_discovered_pair_is_fn_safe() {
     let (mut queries, titles) = salted_corpus();
     let probe_q = 9_900_001u64;
-    queries.push((probe_q, "zzud ctxp0".into()));
-    let cross_title = "zzupperdeck ctxp0 psa 10";
+    queries.push((probe_q, "zzns ctxp0".into()));
+    let cross_title = "zznorthstar ctxp0 pro";
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
@@ -105,7 +105,7 @@ fn operator_activation_of_discovered_pair_is_fn_safe() {
     eng.discover_aliases_and_record(&DistributionalConfig::default())
         .expect("discover + record");
     let forms = {
-        let mut f = vec!["zzud".to_string(), "zzupperdeck".to_string()];
+        let mut f = vec!["zzns".to_string(), "zznorthstar".to_string()];
         f.sort();
         f
     };
@@ -139,7 +139,7 @@ fn operator_activation_of_discovered_pair_is_fn_safe() {
     // The cross-form match appears…
     assert!(
         matched(&mut eng, &mut s, cross_title).contains(&probe_q),
-        "after activation, the zzud query must match the zzupperdeck title"
+        "after activation, the zzns query must match the zznorthstar title"
     );
     // …and nothing was lost anywhere (widening-only).
     for (t, before) in titles.iter().zip(&before_all) {
@@ -163,11 +163,11 @@ fn discovery_quality_on_salted_corpus() {
             .any(|p| p.forms.contains(&a.to_string()) && p.forms.contains(&b.to_string()))
     };
     assert!(
-        has("zzud", "zzupperdeck"),
+        has("zzns", "zznorthstar"),
         "the planted substitute must be proposed; got {pairs:?}"
     );
     assert!(
-        !has("zzpsa", "zzbgs"),
+        !has("zzleft", "zzright"),
         "the co-listed any-of alternative must be suppressed; got {pairs:?}"
     );
 }

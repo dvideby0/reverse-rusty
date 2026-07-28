@@ -1,6 +1,6 @@
 //! Corpus-driven feature learning: NPMI collocation mining over query text.
 //!
-//! Induces multi-token ENTITIES (e.g. `upper deck` -> `upper_deck`) from the
+//! Induces multi-token ENTITIES (e.g. `north star` -> `north_star`) from the
 //! query corpus alone — no hand-coded vocabulary — via normalized pointwise
 //! mutual information (the word2vec/Mikolov phrase trick), iterating
 //! bigram -> trigram. This is the library core behind the `learn` binary and,
@@ -24,7 +24,7 @@ use crate::vocab::Vocab;
 /// A discovered multi-token entity and its co-occurrence statistics.
 #[derive(Clone, Debug)]
 pub struct Phrase {
-    /// The entity, parts joined with `_` (e.g. `"upper_deck"`).
+    /// The entity, parts joined with `_` (e.g. `"north_star"`).
     pub token: String,
     /// Adjacent co-occurrence count across the corpus.
     pub count: usize,
@@ -209,9 +209,9 @@ mod tests {
 
     #[test]
     fn tokenize_strips_dsl_punctuation() {
-        assert_eq!(tokenize("Upper Deck"), vec!["upper", "deck"]);
+        assert_eq!(tokenize("North Star"), vec!["north", "star"]);
         assert_eq!(tokenize("-(a,b)"), vec!["a", "b"]);
-        assert_eq!(tokenize("psa 10 -reprint"), vec!["psa", "10", "reprint"]);
+        assert_eq!(tokenize("pro -replica"), vec!["pro", "replica"]);
     }
 
     #[test]
@@ -219,7 +219,7 @@ mod tests {
         // All three probabilities share one base (total tokens), so NPMI must
         // land in its defining range [-1, 1]. A pair that only ever appears
         // adjacent and never apart is maximally bound and must score ≈ +1.
-        let corpus: Vec<Vec<String>> = planted_pair("upper", "deck", 40)
+        let corpus: Vec<Vec<String>> = planted_pair("north", "star", 40)
             .iter()
             .map(|(_, q)| tokenize(q))
             .collect();
@@ -235,7 +235,7 @@ mod tests {
         }
         let bound = phrases
             .iter()
-            .find(|p| p.token == "upper_deck")
+            .find(|p| p.token == "north_star")
             .expect("the maximally-bound pair must be present");
         assert!(
             (bound.npmi - 1.0).abs() < 1e-9,
@@ -246,20 +246,20 @@ mod tests {
 
     #[test]
     fn discovers_planted_collocation() {
-        let corpus = planted_pair("upper", "deck", 40);
+        let corpus = planted_pair("north", "star", 40);
         let vocab = learn_phrases_from_text(&corpus, 5, 0.30, 2);
         let phrases = vocab.phrases();
         let entry = phrases
             .iter()
-            .find(|p| p.tokens == vec!["upper".to_string(), "deck".to_string()])
-            .expect("the planted upper/deck pair must be induced");
-        assert_eq!(entry.canonical, "term:upper_deck");
+            .find(|p| p.tokens == vec!["north".to_string(), "star".to_string()])
+            .expect("the planted north/star pair must be induced");
+        assert_eq!(entry.canonical, "term:north_star");
         assert_eq!(entry.kind, crate::vocab::FeatureKindSer::Generic);
     }
 
     #[test]
     fn respects_min_count() {
-        let corpus = planted_pair("upper", "deck", 40);
+        let corpus = planted_pair("north", "star", 40);
         // min_count above the planted count -> the pair is filtered out.
         let vocab = learn_phrases_from_text(&corpus, 41, 0.30, 2);
         assert!(vocab.phrases().is_empty());
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn tau_gate_filters_when_too_high() {
-        let corpus = planted_pair("upper", "deck", 40);
+        let corpus = planted_pair("north", "star", 40);
         // An unreachably high tau filters every candidate, even a strong one.
         let vocab = learn_phrases_from_text(&corpus, 5, 100.0, 2);
         assert!(vocab.phrases().is_empty());
@@ -277,15 +277,15 @@ mod tests {
     fn dedup_and_determinism() {
         // Planting the same pair twice as much must still yield exactly one entry,
         // and two runs over identical input must be byte-identical.
-        let corpus = planted_pair("upper", "deck", 60);
+        let corpus = planted_pair("north", "star", 60);
         let a = learn_phrases_from_text(&corpus, 5, 0.30, 2);
         let b = learn_phrases_from_text(&corpus, 5, 0.30, 2);
-        let upper_deck: Vec<_> = a
+        let north_star: Vec<_> = a
             .phrases()
             .iter()
-            .filter(|p| p.tokens == vec!["upper".to_string(), "deck".to_string()])
+            .filter(|p| p.tokens == vec!["north".to_string(), "star".to_string()])
             .collect();
-        assert_eq!(upper_deck.len(), 1, "phrase must be de-duplicated");
+        assert_eq!(north_star.len(), 1, "phrase must be de-duplicated");
         assert_eq!(
             a.to_json().expect("vocab a serializes"),
             b.to_json().expect("vocab b serializes"),

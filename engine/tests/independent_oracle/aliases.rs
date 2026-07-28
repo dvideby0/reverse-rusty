@@ -1,9 +1,9 @@
-//! Populated-vocab differentials: graders + grade context (ADR-069) and multi-word phrases /
+//! Populated-vocab differentials: generic attributes and multi-word phrases /
 //! synonyms — the parts of the front end the default-vocab pass does not exercise. The engine
 //! `Normalizer` and the reference `RefVocab` are built from the SAME generator constants
-//! (`reverse_rusty::gen::{PLAYERS,BRANDS,BRAND_ALT,CARD_TERMS,GRADERS}`), so they encode one
+//! (`reverse_rusty::gen::{ENTITIES,BRANDS,BRAND_ALT,ATTRIBUTES}`), so they encode one
 //! vocabulary in each side's own type. (Alias-mode two-view + equivalence expansion get their own
-//! pass once this grader/phrase pass is green.)
+//! pass once this populated-vocabulary pass is green.)
 
 use crate::harness::RefOracle;
 use reverse_rusty::dict::FeatureKind;
@@ -13,15 +13,15 @@ use reverse_rusty_ref_matcher::vocab::PhraseMode;
 use reverse_rusty_ref_matcher::RefVocab;
 
 /// The engine-side populated normalizer — identical in spirit to the in-tree oracle's `gen_vocab`
-/// (multiword player/brand phrases, single-token brand + brand-alt + card-term synonyms, graders,
-/// grade words).
+/// (multiword entity/brand phrases plus single-token brand, alternate-brand, and attribute
+/// synonyms).
 fn gen_engine_norm() -> Normalizer {
-    use reverse_rusty::gen::{BRANDS, BRAND_ALT, CARD_TERMS, GRADERS, PLAYERS};
+    use reverse_rusty::gen::{ATTRIBUTES, BRANDS, BRAND_ALT, ENTITIES};
     let mut b = NormalizerBuilder::new();
-    for p in PLAYERS {
-        let canon = format!("player:{}", p.replace(' ', "_"));
+    for p in ENTITIES {
+        let canon = format!("entity:{}", p.replace(' ', "_"));
         let toks: Vec<&str> = p.split(' ').collect();
-        b.add_phrase(&toks, &canon, FeatureKind::Player);
+        b.add_phrase(&toks, &canon, FeatureKind::Entity);
     }
     for brand in BRANDS {
         let canon = format!("brand:{}", brand.replace(' ', "_"));
@@ -36,25 +36,20 @@ fn gen_engine_norm() -> Normalizer {
         let canon = format!("brand:{}", brand.replace(' ', "_"));
         b.add_synonym(alt, &canon, FeatureKind::Brand);
     }
-    for ct in CARD_TERMS {
-        b.add_synonym(ct, &format!("card_term:{ct}"), FeatureKind::Category);
+    for ct in ATTRIBUTES {
+        b.add_synonym(ct, &format!("attribute:{ct}"), FeatureKind::Category);
     }
-    for g in GRADERS {
-        b.add_grader(g);
-    }
-    b.add_grade_word("gem");
-    b.add_grade_word("mint");
     b.build().expect("gen vocab automaton")
 }
 
 /// The reference-side vocabulary built from the SAME generator constants — one source of truth,
-/// expressed in `RefVocab`'s own type. Multiword brand/player phrases are `Collapse` (the engine's
+/// expressed in `RefVocab`'s own type. Multiword brand/entity phrases are `Collapse` (the engine's
 /// `add_phrase` default).
 fn gen_ref_vocab() -> RefVocab {
-    use reverse_rusty::gen::{BRANDS, BRAND_ALT, CARD_TERMS, GRADERS, PLAYERS};
+    use reverse_rusty::gen::{ATTRIBUTES, BRANDS, BRAND_ALT, ENTITIES};
     let mut v = RefVocab::default_vocab();
-    for p in PLAYERS {
-        let canon = format!("player:{}", p.replace(' ', "_"));
+    for p in ENTITIES {
+        let canon = format!("entity:{}", p.replace(' ', "_"));
         v = v.phrase(p, &canon, PhraseMode::Collapse);
     }
     for brand in BRANDS {
@@ -69,13 +64,10 @@ fn gen_ref_vocab() -> RefVocab {
         let canon = format!("brand:{}", brand.replace(' ', "_"));
         v = v.synonym(alt, &canon);
     }
-    for ct in CARD_TERMS {
-        v = v.synonym(ct, &format!("card_term:{ct}"));
+    for ct in ATTRIBUTES {
+        v = v.synonym(ct, &format!("attribute:{ct}"));
     }
-    for g in GRADERS {
-        v = v.grader(g);
-    }
-    v.grade_word("gem").grade_word("mint")
+    v
 }
 
 fn cfg(seed: u64) -> GenConfig {
@@ -86,8 +78,8 @@ fn cfg(seed: u64) -> GenConfig {
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     }
 }
 
@@ -97,8 +89,8 @@ fn probe_alias_features() {
     use reverse_rusty::normalize::{NormScratch, Side};
     use reverse_rusty::segment::Engine;
     let queries = vec![
-        (1u64, "ny mets".to_string()),
-        (2u64, "new york yankees".to_string()),
+        (1u64, "ny catalog".to_string()),
+        (2u64, "new york inventory".to_string()),
     ];
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
@@ -125,8 +117,8 @@ fn probe_alias_features() {
         "new york city",
         "nyc",
         "york",
-        "new york city yankees",
-        "ny mets",
+        "new york city inventory",
+        "ny catalog",
     ] {
         let q = emit_names(&norm, &mut lc, &mut sc, probe, Side::Query, false);
         let tn = emit_names(&norm, &mut lc, &mut sc, probe, Side::Title, false);
@@ -136,11 +128,11 @@ fn probe_alias_features() {
 }
 
 #[test]
-fn populated_vocab_graders_and_phrases() {
+fn populated_vocab_attributes_and_phrases() {
     let data = generate(&cfg(0x1234_5678));
     let oracle =
         RefOracle::build_with_normalizer(&data.queries, gen_engine_norm(), gen_ref_vocab());
-    oracle.assert_matches(&data.titles, "populated/graders+phrases");
+    oracle.assert_matches(&data.titles, "populated/attributes+phrases");
 }
 
 /// The reference vocabulary mirroring `import_alias_synonyms("ny => new york\nnyc => new york
@@ -162,30 +154,30 @@ fn ny_ref_vocab() -> RefVocab {
 #[test]
 fn multiword_alias_two_view_differential() {
     let queries: Vec<(u64, String)> = vec![
-        (1, "ny mets".into()),
-        (2, "new york yankees".into()),
-        (3, "new york -mets".into()),
+        (1, "ny catalog".into()),
+        (2, "new york inventory".into()),
+        (3, "new york -catalog".into()),
         (4, "foo -\"new york\"".into()), // THE WALL: forbidden multi-word vs canonical N(T)
         (5, "york".into()),              // component-token query (title side additive)
         (6, "new york city subway".into()),
-        (7, "(ny,boston) finals".into()), // any-of with an alias form
+        (7, "(ny,chicago) closing".into()), // any-of with an alias form
         (8, "brooklyn".into()),
-        (9, "\"new york\" knicks".into()), // quoted alias path keeps adjacency
+        (9, "\"new york\" office".into()), // quoted alias path keeps adjacency
     ];
     let titles: Vec<String> = [
-        "new york mets opening day",
-        "ny yankees world series",
+        "new york catalog opening day",
+        "ny inventory annual sale",
         "new york city subway map",
         "foo new york city skyline", // q4 MATCHES: canonical reads `new york city`, not `new york`
         "foo new york state",        // q4 rejected: literal `new york` present
-        "boston finals run",
+        "chicago closing run",
         "brooklyn bridge",
         "york peppermint pattie",
-        "ny mets vs boston",
+        "ny catalog near chicago",
         "new york city",
-        "new  york mets", // whitespace run: P(T) overlap scan still matches the alias
-        "ny knicks",
-        "new vintage york knicks",
+        "new  york catalog", // whitespace run: P(T) overlap scan still matches the alias
+        "ny office",
+        "new vintage york office",
     ]
     .iter()
     .map(ToString::to_string)
@@ -219,7 +211,14 @@ fn alias_scale_corpus(
         "city",
     ];
     let fillers = [
-        "mets", "yankees", "subway", "finals", "series", "bridge", "boston", "rookie",
+        "catalog",
+        "inventory",
+        "subway",
+        "closing",
+        "series",
+        "bridge",
+        "chicago",
+        "new",
     ];
     let mut rng = Rng::new(seed);
     let pick = |rng: &mut Rng, xs: &[&str]| xs[rng.below(xs.len())].to_string();
@@ -286,18 +285,19 @@ fn multiword_alias_scale_differential() {
 /// OVERLAPPING equivalence declarations must merge into one transitive class (ADR-054 / codex
 /// review): `ny ≡ new york` and `big apple ≡ new york` share `new york`, so the engine's
 /// `resolve_equivalences` merges them to `{ny, new york, big apple}` — and the reference must too.
-/// The load-bearing case is `ny mets` reaching a `big apple mets` title, which is possible ONLY
+/// The load-bearing case is `ny catalog` reaching a `big apple catalog` title, which is possible ONLY
 /// transitively (ny ≡ new york ≡ big apple). A reference that widened only the shared member would
 /// reject it — a spurious divergence that the disjoint-group alias tests above cannot catch.
 #[test]
 fn transitive_equivalence_differential() {
-    let queries: Vec<(u64, String)> = vec![(1, "ny mets".into()), (2, "big apple yankees".into())];
+    let queries: Vec<(u64, String)> =
+        vec![(1, "ny catalog".into()), (2, "big apple inventory".into())];
     let titles: Vec<String> = [
-        "new york mets",  // q1 via ny ≡ new york
-        "big apple mets", // q1 via ny ≡ big apple — TRANSITIVE through new york
-        "ny yankees",     // q2 via big apple ≡ ny — transitive
-        "new york yankees",
-        "boston mets", // no match
+        "new york catalog",  // q1 via ny ≡ new york
+        "big apple catalog", // q1 via ny ≡ big apple — TRANSITIVE through new york
+        "ny inventory",      // q2 via big apple ≡ ny — transitive
+        "new york inventory",
+        "chicago catalog", // no match
     ]
     .iter()
     .map(ToString::to_string)

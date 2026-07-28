@@ -142,8 +142,8 @@ fn workload(
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: (num_queries / 40).max(2_000),
-        num_sets: (num_queries / 100).max(1_000),
+        num_entities: (num_queries / 40).max(2_000),
+        num_collections: (num_queries / 100).max(1_000),
     });
 
     // The low-volume ordinary corpus must not become a degenerate all-zero

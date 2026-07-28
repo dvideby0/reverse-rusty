@@ -22,7 +22,7 @@ A representative stored-query record:
 | **matching expression** | the query DSL, compiled into the percolator |
 | **`category` tag** | a coarse type/class used to *partition* the query set — the dominant filter |
 | **`status` tag** | a lifecycle/visibility enum used both to filter and to prioritize |
-| **secondary key(s)** | optional finer filters (a sub-type, a region, a grade band, …) |
+| **secondary key(s)** | optional finer filters (a sub-type, a region, a quality band, …) |
 | **display text** | the human-readable source expression, returned alongside hits |
 
 The matching expression is the familiar boolean shape — **include terms (AND), exclude terms (NOT), and
@@ -108,13 +108,12 @@ grammar into the RR DSL and verified the recall contract empirically — ground 
 pairs. Result: **zero false negatives on every precision-stage-accepting pair** (38/38, plus the
 exclude-only side-list case below), with every false positive predicted in advance. The contract:
 
-**The parity configuration.** Run RR with an **empty vocabulary** (no graders, grade words, phrases,
+**The parity configuration.** Run RR with an **empty vocabulary** (no aliases, phrases,
 synonyms, or equivalences — the reference deployment canonicalizes titles client-side before percolating,
 so RR's vocab machinery is a *later recall upgrade*, not a migration requirement) plus punctuation
-overrides **`.` `#` `/` → `split`** (defaults already split the rest) plus an **empty number-context
-word list** (`Vocab::set_number_context_words(&[])`, [ADR-069](../DECISIONS.md)) — disabling the `pop`
-year-demotion so number typing is position-insensitive end to end. `.`→split is load-bearing: the
-reference matcher tolerates trailing `.`/`,` on a token, so keeping `.` would turn `card.`-style title
+overrides **`.` `#` `/` → `split`** (defaults already split the rest). The number-context list is
+empty by default, so year typing is position-insensitive end to end. `.`→split is load-bearing: the
+reference matcher tolerates trailing `.`/`,` on a token, so keeping `.` would turn `item.`-style title
 tokens into distinct features — a real FN; splitting makes decimals like `9.5` ≈ `{9, 5}` instead, an
 FP-only loosening the precision stage re-filters. Run with the **broad lane enabled** (`--include-broad`
 or per-request `include_broad`) when class-C and accepted class-D rows belong in the requested scope.
@@ -162,9 +161,8 @@ the precision stage re-filters):
 unquoted phrase-as-bag translation, dropped negations, decimal splits under `.`→split, occurrence counts unenforced at
 stage one (deduped at compile; preserved in the text per rule 6), and the class-D always-candidates
 (rule 8).
-**Known residual FN classes: none.** The last one — the `pop` number-context position-sensitivity
-(ADR-064 item 3) — is closed by the [ADR-069](../DECISIONS.md) number-context knob, now part of the
-parity configuration above.
+**Known residual FN classes: none** in the pinned translation set. Caller-defined number context
+([ADR-069](../DECISIONS.md)) remains available for catalogs that use year-shaped model identifiers.
 
 > **Validation still owed.** The PoC above verifies the *translation contract* on adversarial pinned
 > pairs; it is not the full-corpus audit. Running RR against this workload's **real corpus at scale** (a

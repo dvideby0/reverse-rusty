@@ -1,6 +1,6 @@
 //! `impl ClusterEngine` — runtime vocabulary change (ADR-046 mechanism 2).
 //!
-//! A vocabulary change (e.g. a declared alias `ud ≡ upperdeck`) swaps the ONE
+//! A vocabulary change (e.g. a declared alias `ns ≡ northstar`) swaps the ONE
 //! shared normalizer and rebuilds the cluster from its live source set: every
 //! query is re-extracted under the new normalizer, **re-placed** (an alias can
 //! change a query's anchor → hence its shard), and re-ingested. This is a
@@ -81,8 +81,8 @@ impl ClusterEngine {
                 .to_normalizer()
                 .map_err(|e| ShardError::Config(format!("building normalizer from vocab: {e}")))?,
         );
-        // 2b. Self-heal stale-active aliases FIRST (codex R13/R14): a punctuation/grader change
-        //     in this vocab can make an Active alias form unexpressible (e.g. a fused grader);
+        // 2b. Self-heal stale-active aliases FIRST (codex R13/R14): a punctuation change in
+        //     this vocab can make an Active alias form unexpressible;
         //     demote those to review candidates rather than install an alias that reports
         //     active and silently never matches. Demotion can only shrink the registered phrase
         //     set, so rebuild the normalizer when it fires, so every later consumer (the
@@ -137,7 +137,7 @@ impl ClusterEngine {
 
     /// Learn alias/synonym rules from the cluster's OWN live corpus (ADR-015 any-of
     /// learning) and apply them (ADR-046 mechanism 2). A synonym appearing in at least
-    /// `min_count` any-of groups (e.g. `(rookie,rc)` ⇒ `rc → rookie`) is merged UNDER
+    /// `min_count` any-of groups (e.g. `(new,pkg)` ⇒ `pkg → new`) is merged UNDER
     /// the current vocabulary — a previously *declared* alias wins over a learned one —
     /// and the cluster is rebuilt via [`Self::set_vocab`]. Returns the number of queries
     /// rebuilt. Refuses a non-local cluster (the gather can't enumerate a remote shard).

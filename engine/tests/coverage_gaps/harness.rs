@@ -18,7 +18,7 @@ pub(crate) struct Brute {
 
 impl Brute {
     pub(crate) fn build(queries: &[(u64, String)]) -> Self {
-        let norm = Normalizer::default_vocab().expect("built-in vocab");
+        let norm = Normalizer::default_vocab().expect("default vocabulary");
         let mut dict = Dict::new();
         let mut lc = String::new();
         let mut qs = Vec::new();

@@ -35,8 +35,8 @@ fn main() {
         seed,
         // Scale the entity space with the corpus so selectivity stays realistic (mirrors
         // `bench`): a fixed tiny space would artificially saturate fan-out at high K.
-        num_players: (num_queries / 40).max(2_000),
-        num_sets: (num_queries / 100).max(1_000),
+        num_entities: (num_queries / 40).max(2_000),
+        num_collections: (num_queries / 100).max(1_000),
     };
 
     eprintln!(
@@ -195,7 +195,7 @@ fn main() {
 }
 
 fn vocab() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 fn pct(v: &mut [u32], q: f64) -> u32 {

@@ -2,7 +2,8 @@
 
 All numbers below are **measured**, not modeled, on Reverse Rusty in `engine/`, but they come from
 several dated captures. Early prototype tables are retained as historical algorithm evidence and are
-labelled as such; the current persisted-memory profile and 20M scale proof have their own sections.
+labelled as such; the current generic 1M persisted-memory profile and historical 20M scale proof have
+their own sections.
 The benchmark runbook,
 the machine-independent **invariants** to verify on any box, and the dated **capture log** are in
 [`benchmark-results.txt`](benchmark-results.txt). Where the report extrapolates to the 100M-query
@@ -93,26 +94,44 @@ broad fraction is consistently **~99.5% class A (selective), ~0.2% class B, ~0.2
 
 ## 4. Candidate generation — the core metric
 
-The whole engine exists to make this number small. On the selective path:
+The whole engine exists to make this number small. The historical 1M–5M selective capture measured:
 
 ```
-avg unique candidates/title : 54.3   (p95 = 96, p99 = 112, max ≈ 130)   — FLAT across 1M..5M queries
+historical avg unique candidates/title : 54.3   (p95 = 96, p99 = 112, max ≈ 130)
+                                             — FLAT across 1M..5M queries
 avg exact verifications     : ≈ candidates (each candidate gets one integer-only verify)
 ```
 
-For perspective: a generic percolator that gated on **raw terms** would, for a title containing
-`psa` / `10` / `rookie` / a popular brand, pull candidate sets in the **thousands-to-tens-of-
-thousands** range (those terms appear in a large fraction of stored queries). Percolator's own docs
-describe term extraction as the mechanism that "significantly reduce[s]" candidates — but for short
-product titles the *terms themselves* are not selective. Gating on **semantic signatures**
-(`set#### + player` rather than `10` or `psa`) keeps the candidate set ~**54** and, crucially, flat
-as the query population grows. The ~54 includes the deliberately conservative arity-2 hot-pair
-generation; the exact matcher then rejects candidates that don't survive verification.
+The retired fixture supplied those 1M–5M measurements. The current seeded generic generator has a
+separately pinned 1M-query/20k-title structural baseline: 1,077,983 unique candidates in total,
+**53.90/title**, p95 95, p99 111, and max 136. Generic 3M/5M captures and a reviewed timing history
+have not yet been recorded, so the historical series—not the current 1M pin—is the evidence for
+scale-flatness and throughput at those sizes.
+
+The generic fixture's selective query families combine a year, brand, `collection####`,
+`product#####` or named entity, and optional attribute/variant; its broad families use a skewed
+popular entity, `wireless pro`, or `bundle`. Its ~**54** candidate count is evidence for signatures
+over that exact workload, not a measured OpenSearch comparison. The count includes deliberately
+conservative arity-2 hot-pair generation; the exact matcher then rejects candidates that do not
+survive verification.
+
+The generic pin records 5,234,864 confirmed row matches versus 6,610,573 in the retired fixture
+(20.8% fewer). That is not a recall or coverage score. A small difference in the title-hit
+probability of one repeated broad-query family is multiplied across thousands of identical stored
+rows, while the candidate sum changes by only 0.4% and candidate p95/p99 remain exactly 95/111.
+The new workload therefore retains retrieval and rejection pressure but asks exact verification to
+reject more broad candidates. At this pool size, independently sampled
+entity+year+brand+collection families contribute effectively no confirmed rows; `match_sum` is
+therefore a broad-lane output-volume metric, while the selective timing lane primarily measures
+candidate rejection. Correctness and successful selective matching remain owned by the
+differential/self-match oracles, not by making this benchmark's `match_sum` resemble the retired
+fixture.
 
 The **common-mask gate** in the exact matcher (two `u64` ops over the 64 hottest features) is what
 makes each of those 54 verifications cheap: most are rejected before any memory traffic beyond the
-candidate's two mask words. p99 latency of ~2–3 µs for the full normalize → generate → verify cycle
-reflects this.
+candidate's two mask words. The historical p99 latency of ~2–3 µs for the full normalize → generate
+→ verify cycle reflects this. The generic fixture now has permanent absolute timing safety limits;
+its more sensitive variance history is pending the reviewed CI rebaseline.
 
 ---
 
@@ -125,10 +144,10 @@ Current pinned captures:
 
 | Workload/profile | Engine-accounted resident | Durable bytes | Interpretation |
 |---|---:|---:|---|
-| 1M persisted, `retain_source=false` | 5,926,332 B (5.93 B/query) | 237,808,740 B (237.81 B/query) | the CI regression baseline in `perf-baseline.json`; four committed files |
-| 20M selective, `retain_source=false` | ~5.2 B/query | — | compiled structures + dictionary, source excluded from resident accounting |
-| 20M selective, `retain_source=true` | ~109.0 B/query | — | resident source dominates |
-| 1M component capture, resident source | source ~113.5 B/query; dict ~4.9 B/query | — | illustrates why source policy is the first sizing choice |
+| Current generic 1M persisted, `retain_source=false` | 6,005,244 B (6.01 B/query) | 244,585,986 B (244.59 B/query) | the CI regression baseline in `perf-baseline.json`; four committed files |
+| Historical 20M selective, `retain_source=false` | ~5.2 B/query | — | compiled structures + dictionary, source excluded from resident accounting |
+| Historical 20M selective, `retain_source=true` | ~109.0 B/query | — | resident source dominates |
+| Historical 1M component capture, resident source | source ~113.5 B/query; dict ~4.9 B/query | — | illustrates why source policy is the first sizing choice |
 
 These are engine-reported/accounted bytes for the named workloads, not a promise about process RSS.
 Allocator overhead, mmap residency, filesystem page cache, source/explain access, tags, predicates,
@@ -198,8 +217,8 @@ so it does not quantify the current filter benefit (see
 ## 8. Behaviour under skew and adversarial inputs
 
 - **Hot-entity skew (zipf, skew=3.5):** the selective path holds at **288k titles/sec/core** with
-  flat candidate counts — popular players don't poison the selective lane because class-A queries
-  anchor on the *rarer* required feature (the set), not the hot player.
+  flat candidate counts — popular entities don't poison the selective lane because class-A queries
+  anchor on the *rarer* required feature (the model), not the hot entity.
 - **Broad queries:** isolated by classification. Inline they cost ~9× throughput; the engine now
   batches them columnar (once per title-batch, ADR-026) so the broad work amortizes ~1/batch_size.
   The engine measures and reports the broad contribution separately every run (`of which broad lane`,
@@ -249,7 +268,7 @@ so it does not quantify the current filter benefit (see
 ## 10. Verdict against the spec's objective
 
 > *Produce a design and prototype … that can plausibly outperform Lucene/OpenSearch-style generic
-> percolation by one or more orders of magnitude on eBay-style product listing titles.*
+> percolation by one or more orders of magnitude on marketplace-style product listing titles.*
 
 In the historical selective capture Reverse Rusty sustained **158–255× the throughput target on a
 single core** with **flat ~54 candidates/title** and zero false negatives; the 20M current capture

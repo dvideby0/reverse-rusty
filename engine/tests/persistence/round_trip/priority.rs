@@ -37,7 +37,7 @@ fn typed_priority_v6_mmap_and_wal_tail_round_trip() {
         let mut engine = Engine::with_config(make_norm(), cfg());
         engine
             .try_insert_live_ranked(
-                "topps chrome",
+                "acme chrome",
                 1,
                 1,
                 &[("priority".into(), "50".into())],
@@ -47,19 +47,19 @@ fn typed_priority_v6_mmap_and_wal_tail_round_trip() {
         engine.flush();
         engine
             .try_insert_live_ranked(
-                "topps chrome",
+                "acme chrome",
                 2,
                 1,
                 &[("priority".into(), "-7".into())],
                 Some(reverse_rusty::RankValues { priority: -7 }),
             )
             .expect("typed WAL-tail insert");
-        assert_eq!(ranked_score(&engine, "topps chrome", 1), 50);
-        assert_eq!(ranked_score(&engine, "topps chrome", 2), -7);
+        assert_eq!(ranked_score(&engine, "acme chrome", 1), 50);
+        assert_eq!(ranked_score(&engine, "acme chrome", 2), -7);
     }
     let engine = Engine::open(make_norm(), cfg()).expect("reopen v6 + WAL tail");
-    assert_eq!(ranked_score(&engine, "topps chrome", 1), 50);
-    assert_eq!(ranked_score(&engine, "topps chrome", 2), -7);
+    assert_eq!(ranked_score(&engine, "acme chrome", 1), 50);
+    assert_eq!(ranked_score(&engine, "acme chrome", 2), -7);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -74,7 +74,7 @@ fn legacy_priority_segment_fallback_migrates_through_compaction() {
         let mut engine = Engine::with_config(make_norm(), cfg());
         engine
             .try_build_from_queries_with_tags(
-                &[(1, "topps chrome".to_string())],
+                &[(1, "acme chrome".to_string())],
                 &[vec![("priority".into(), "42".into())]],
             )
             .expect("legacy tagged build");
@@ -95,11 +95,11 @@ fn legacy_priority_segment_fallback_migrates_through_compaction() {
         std::fs::write(path, bytes).expect("downgraded segment");
     }
     let mut engine = Engine::open(make_norm(), cfg()).expect("legacy reopen");
-    assert_eq!(ranked_score(&engine, "topps chrome", 1), 42);
+    assert_eq!(ranked_score(&engine, "acme chrome", 1), 42);
     engine.compact_all();
     drop(engine);
     let engine = Engine::open(make_norm(), cfg()).expect("reopen after migration");
-    assert_eq!(ranked_score(&engine, "topps chrome", 1), 42);
+    assert_eq!(ranked_score(&engine, "acme chrome", 1), 42);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -122,7 +122,7 @@ fn typed_priority_survives_compaction_vocab_upsert_delete_and_backup() {
         for (id, priority) in [(1, 50), (2, -5)] {
             engine
                 .try_insert_live_ranked(
-                    "topps chrome",
+                    "acme chrome",
                     id,
                     1,
                     &[("priority".into(), priority.to_string())],
@@ -132,18 +132,18 @@ fn typed_priority_survives_compaction_vocab_upsert_delete_and_backup() {
             engine.flush();
         }
         engine.compact_all().expect("two-segment compaction");
-        assert_eq!(ranked_score(&engine, "topps chrome", 1), 50);
-        assert_eq!(ranked_score(&engine, "topps chrome", 2), -5);
+        assert_eq!(ranked_score(&engine, "acme chrome", 1), 50);
+        assert_eq!(ranked_score(&engine, "acme chrome", 2), -5);
 
         let vocab = Vocab::new();
         let reopen_norm = vocab.to_normalizer().expect("vocab normalizer");
         engine.set_vocab(vocab).expect("set vocab");
         assert!(engine.recompile_stale_segments() > 0);
-        assert_eq!(ranked_score(&engine, "topps chrome", 1), 50);
+        assert_eq!(ranked_score(&engine, "acme chrome", 1), 50);
 
         engine
             .try_upsert_live_ranked(
-                "topps chrome",
+                "acme chrome",
                 1,
                 2,
                 &[("priority".into(), "77".into())],
@@ -152,13 +152,13 @@ fn typed_priority_survives_compaction_vocab_upsert_delete_and_backup() {
             .expect("typed upsert");
         engine.delete_by_logical_id(2).expect("delete second rank");
         engine.flush();
-        assert_eq!(ranked_score(&engine, "topps chrome", 1), 77);
-        assert!(!match_ids(&engine, "topps chrome").contains(&2));
+        assert_eq!(ranked_score(&engine, "acme chrome", 1), 77);
+        assert!(!match_ids(&engine, "acme chrome").contains(&2));
 
         engine.backup_to(&backup).expect("ranked backup");
         let restored = Engine::open(reopen_norm, config_for(&backup)).expect("restore backup");
-        assert_eq!(ranked_score(&restored, "topps chrome", 1), 77);
-        assert!(!match_ids(&restored, "topps chrome").contains(&2));
+        assert_eq!(ranked_score(&restored, "acme chrome", 1), 77);
+        assert!(!match_ids(&restored, "acme chrome").contains(&2));
         let _ = std::fs::remove_dir_all(root);
     }
 }

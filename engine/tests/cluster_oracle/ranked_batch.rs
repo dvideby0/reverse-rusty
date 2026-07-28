@@ -30,7 +30,7 @@ fn rank_program() -> RankProgramSpec {
     RankProgramSpec {
         priority_field: Some("priority".to_string()),
         boosts: vec![
-            ("category".to_string(), "cards".to_string(), 1_000),
+            ("category".to_string(), "items".to_string(), 1_000),
             ("status".to_string(), "active".to_string(), -250),
         ],
     }
@@ -161,7 +161,7 @@ fn distributed_batch_top_k_matches_per_title_and_single_node() {
 #[test]
 fn batch_fetch_dedups_cross_title_winners_and_charges_delivered_bytes() {
     let queries = vec![
-        (1u64, "topps chrome".to_string()),
+        (1u64, "acme chrome".to_string()),
         (2u64, "zzunrelated zzterm".to_string()),
     ];
     let cfg = ClusterConfig {
@@ -174,9 +174,9 @@ fn batch_fetch_dedups_cross_title_winners_and_charges_delivered_bytes() {
         .compile_rank_program(&RankProgramSpec::default())
         .expect("program");
     let titles = vec![
-        "2020 topps chrome update".to_string(),
-        "1998 topps chrome refractor".to_string(),
-        "topps chrome box".to_string(),
+        "2020 acme chrome update".to_string(),
+        "1998 acme chrome premium".to_string(),
+        "acme chrome box".to_string(),
     ];
     let options = TopKOptions {
         search_after: None,
@@ -199,13 +199,13 @@ fn batch_fetch_dedups_cross_title_winners_and_charges_delivered_bytes() {
         );
     }
 
-    let source_len = "topps chrome".len();
+    let source_len = "acme chrome".len();
     let sources = cluster
         .fetch_ranked_sources_batch_bounded(&batch, 3 * source_len, None)
         .expect("exact-fit batch fetch");
     assert_eq!(sources.len(), titles.len());
     for title_sources in &sources {
-        assert_eq!(title_sources.as_slice(), ["topps chrome".to_string()]);
+        assert_eq!(title_sources.as_slice(), ["acme chrome".to_string()]);
     }
 
     // One occurrence fits; three deliveries do not — delivered-occurrence
@@ -219,7 +219,7 @@ fn batch_fetch_dedups_cross_title_winners_and_charges_delivered_bytes() {
 /// Cluster-level batch admission is checked before any routing or shard work.
 #[test]
 fn batch_admission_rejects_before_fanning() {
-    let queries = vec![(1u64, "topps chrome".to_string())];
+    let queries = vec![(1u64, "acme chrome".to_string())];
     let cfg = ClusterConfig {
         num_shards: 2,
         ..ClusterConfig::default()
@@ -264,7 +264,7 @@ fn batch_admission_rejects_before_fanning() {
     // Two-anchor titles route to ~2 shards each, so 60 titles × fanout ≈ 120
     // routed pairs × K=10_000 exceeds the 2^20 budget even though the naive
     // titles × K charge (600k rows) admits.
-    let two_anchor: Vec<String> = (0..60).map(|_| "topps chrome".to_string()).collect();
+    let two_anchor: Vec<String> = (0..60).map(|_| "acme chrome".to_string()).collect();
     match cluster.try_percolate_filtered_top_k_batch(
         &two_anchor,
         &[],
@@ -302,15 +302,15 @@ fn consistent_read_view_fences_batch_match_and_union_source_fetch() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(5u64, "1994 topps".to_string())];
+    let seed = vec![(5u64, "1994 acme".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster");
     let program = cluster
         .compile_rank_program(&RankProgramSpec::default())
         .expect("rank program");
     let view = cluster.consistent_read_view();
     let titles = vec![
-        "1994 topps card".to_string(),
-        "another 1994 topps listing".to_string(),
+        "1994 acme item".to_string(),
+        "another 1994 acme listing".to_string(),
     ];
     let ranked = view
         .try_percolate_filtered_top_k_batch(&titles, &[], TopKOptions::default(), &program, None)
@@ -326,7 +326,7 @@ fn consistent_read_view_fences_batch_match_and_union_source_fetch() {
     std::thread::scope(|scope| {
         let write = scope.spawn(|| {
             write_started_tx.send(()).expect("signal writer");
-            let result = cluster.upsert_query(5, "1995 fleer", 2);
+            let result = cluster.upsert_query(5, "1995 vertex", 2);
             write_done_tx.send(()).expect("signal completion");
             result
         });
@@ -340,10 +340,7 @@ fn consistent_read_view_fences_batch_match_and_union_source_fetch() {
         assert_eq!(
             view.fetch_ranked_sources_batch_bounded(&ranked, 1_024, None)
                 .expect("old-view batch winner sources"),
-            vec![
-                vec!["1994 topps".to_string()],
-                vec!["1994 topps".to_string()]
-            ]
+            vec![vec!["1994 acme".to_string()], vec!["1994 acme".to_string()]]
         );
         drop(view);
         write.join().expect("writer thread").expect("upsert");
@@ -351,10 +348,10 @@ fn consistent_read_view_fences_batch_match_and_union_source_fetch() {
 
     assert_eq!(
         cluster.get_source(5).expect("new source").as_deref(),
-        Some("1995 fleer")
+        Some("1995 vertex")
     );
     assert!(!cluster
-        .percolate("1994 topps card")
+        .percolate("1994 acme item")
         .expect("new-view match")
         .contains(&5));
 }

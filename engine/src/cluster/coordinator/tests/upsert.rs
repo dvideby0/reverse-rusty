@@ -10,19 +10,19 @@ fn upsert_creates_then_replaces_by_logical_id() {
         ..Default::default()
     };
     let seed = vec![
-        (1u64, "1994 topps".to_string()),
-        (2u64, "1995 fleer".to_string()),
+        (1u64, "1994 acme".to_string()),
+        (2u64, "1995 vertex".to_string()),
     ];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster builds");
 
     // Create: a fresh id reports zero prior copies removed.
-    let (removed, outcome) = cluster.upsert_query(3, "1996 skybox", 1).expect("upsert");
+    let (removed, outcome) = cluster.upsert_query(3, "1996 vertex", 1).expect("upsert");
     assert_eq!(removed, 0, "fresh id ⇒ created");
     assert!(matches!(
         outcome,
         AddOutcome::Placed { .. } | AddOutcome::Replicated
     ));
-    assert!(cluster.percolate("1996 skybox").expect("p").contains(&3));
+    assert!(cluster.percolate("1996 vertex").expect("p").contains(&3));
 
     // Replace: the new version matches, the old does not — old-stops-matching IS the
     // no-additive-duplicate proof (the pre-ADR-067 hazard was both versions live at
@@ -32,7 +32,7 @@ fn upsert_creates_then_replaces_by_logical_id() {
         .expect("upsert");
     assert!(removed > 0, "prior copy tombstoned ⇒ updated");
     assert!(
-        !cluster.percolate("1996 skybox").expect("p").contains(&3),
+        !cluster.percolate("1996 vertex").expect("p").contains(&3),
         "old version must stop matching after replace"
     );
     assert!(
@@ -44,9 +44,9 @@ fn upsert_creates_then_replaces_by_logical_id() {
     );
 
     // Replace back: repeated upserts keep converging (no stale copy resurfaces).
-    let (removed, _) = cluster.upsert_query(3, "1996 skybox", 1).expect("upsert");
+    let (removed, _) = cluster.upsert_query(3, "1996 vertex", 1).expect("upsert");
     assert!(removed > 0);
-    assert!(cluster.percolate("1996 skybox").expect("p").contains(&3));
+    assert!(cluster.percolate("1996 vertex").expect("p").contains(&3));
     assert!(
         !cluster
             .percolate("1997 metal universe")
@@ -65,16 +65,16 @@ fn upsert_rejection_keeps_prior_version_live() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(1u64, "1994 topps".to_string())];
+    let seed = vec![(1u64, "1994 acme".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster builds");
-    assert!(cluster.percolate("1994 topps").expect("p").contains(&1));
+    assert!(cluster.percolate("1994 acme").expect("p").contains(&1));
 
     // Class D: negation-only — rejected at placement, stored nowhere, deletes nothing.
     let (removed, outcome) = cluster.upsert_query(1, "-junk", 1).expect("upsert");
     assert_eq!(removed, 0, "a failed replace never deletes");
     assert!(matches!(outcome, AddOutcome::RejectedClassD));
     assert!(
-        cluster.percolate("1994 topps").expect("p").contains(&1),
+        cluster.percolate("1994 acme").expect("p").contains(&1),
         "prior version stays matchable after a class-D upsert"
     );
 
@@ -83,7 +83,7 @@ fn upsert_rejection_keeps_prior_version_live() {
     assert_eq!(removed, 0);
     assert!(matches!(outcome, AddOutcome::RejectedParse(_)));
     assert!(
-        cluster.percolate("1994 topps").expect("p").contains(&1),
+        cluster.percolate("1994 acme").expect("p").contains(&1),
         "prior version stays matchable after a parse-error upsert"
     );
 }
@@ -99,21 +99,21 @@ fn upsert_is_fail_closed_when_log_append_fails() {
         data_dir: Some(dir.clone()),
         ..Default::default()
     };
-    let seed = vec![(7u64, "1994 topps".to_string())];
+    let seed = vec![(7u64, "1994 acme".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("durable cluster builds");
 
     cluster.log.break_writes_for_test();
-    let res = cluster.upsert_query(7, "1995 fleer", 1);
+    let res = cluster.upsert_query(7, "1995 vertex", 1);
     assert!(
         matches!(res, Err(ShardError::Log(_))),
         "expected Log error, got {res:?}"
     );
     assert!(
-        cluster.percolate("1994 topps").expect("p").contains(&7),
+        cluster.percolate("1994 acme").expect("p").contains(&7),
         "prior version must remain matchable after a rejected upsert"
     );
     assert!(
-        !cluster.percolate("1995 fleer").expect("p").contains(&7),
+        !cluster.percolate("1995 vertex").expect("p").contains(&7),
         "the rejected new version must not be matchable"
     );
 
@@ -133,12 +133,12 @@ fn upsert_threads_request_version_into_the_log_frame() {
         data_dir: Some(dir.clone()),
         ..Default::default()
     };
-    let seed = vec![(1u64, "1994 topps".to_string())];
+    let seed = vec![(1u64, "1994 acme".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("durable cluster builds");
 
     // Upsert id 5 at a non-default version.
     let (_removed, outcome) = cluster
-        .upsert_query(5, "1995 fleer", 42)
+        .upsert_query(5, "1995 vertex", 42)
         .expect("versioned upsert");
     assert!(
         matches!(outcome, AddOutcome::Placed { .. } | AddOutcome::Replicated),
@@ -163,7 +163,7 @@ fn upsert_threads_request_version_into_the_log_frame() {
 
     // And the default still logs version 1 (the byte-identical RF=1 path) for a fresh id.
     cluster
-        .upsert_query(6, "1994 topps", 1)
+        .upsert_query(6, "1994 acme", 1)
         .expect("default-version upsert");
     let replay = cluster.log.replay(LogPos(0)).expect("replay clog");
     let default_version = replay.entries.iter().find_map(|(_, m)| match m {
@@ -193,12 +193,12 @@ fn rebuild_preserves_stored_query_version() {
         data_dir: Some(dir.clone()),
         ..Default::default()
     };
-    let seed = vec![(1u64, "1994 topps".to_string())];
+    let seed = vec![(1u64, "1994 acme".to_string())];
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("durable cluster builds");
 
     // Upsert id 5 at a non-default version, then confirm the gather sees version 42.
     cluster
-        .upsert_query(5, "1995 fleer", 42)
+        .upsert_query(5, "1995 vertex", 42)
         .expect("versioned upsert");
     let before = cluster.live_corpus_tagged().expect("gather");
     let pre = before
@@ -213,7 +213,7 @@ fn rebuild_preserves_stored_query_version() {
 
     // A vocabulary change forces a blue/green rebuild of every shard.
     let mut new_vocab = crate::vocab::Vocab::new();
-    new_vocab.add_synonym("rc", "term:rookie", crate::dict::FeatureKind::Category);
+    new_vocab.add_synonym("pkg", "term:new", crate::dict::FeatureKind::Category);
     cluster.set_vocab(new_vocab).expect("set_vocab rebuild");
 
     // After the rebuild id 5 must STILL carry version 42 (not reset to 1) and still match.
@@ -229,7 +229,7 @@ fn rebuild_preserves_stored_query_version() {
     );
     assert!(
         cluster
-            .percolate("1995 fleer")
+            .percolate("1995 vertex")
             .expect("percolate")
             .contains(&5),
         "the re-placed query must still match after the rebuild"
@@ -317,7 +317,7 @@ fn legacy_tail_is_folded_before_current_placement_validation() {
     let reopened = ClusterEngine::open(&dir, vocab(), Some(&cfg))
         .expect("legacy tail is folded before re-placement");
     assert!(reopened
-        .percolate("new vintage collectible york")
+        .percolate("new vintage product york")
         .expect("match")
         .contains(&1));
     let _ = std::fs::remove_dir_all(&dir);
@@ -339,8 +339,8 @@ fn self_handoff_is_skipped_without_fencing() {
         ..Default::default()
     };
     let seed = vec![
-        (1u64, "1994 topps".to_string()),
-        (2u64, "1995 fleer".to_string()),
+        (1u64, "1994 acme".to_string()),
+        (2u64, "1995 vertex".to_string()),
     ];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster builds");
 
@@ -353,7 +353,7 @@ fn self_handoff_is_skipped_without_fencing() {
         }));
     }
 
-    let before = cluster.percolate("1994 topps").expect("percolate");
+    let before = cluster.percolate("1994 acme").expect("percolate");
 
     // A snapshot where node 7 owns position 0 — and a Handoff that moves it from node 7 to
     // node 7 (the same node, same endpoint). The guard must short-circuit this.
@@ -383,7 +383,7 @@ fn self_handoff_is_skipped_without_fencing() {
         events.lock().unwrap()
     );
     assert_eq!(
-        cluster.percolate("1994 topps").expect("percolate"),
+        cluster.percolate("1994 acme").expect("percolate"),
         before,
         "matching must be byte-identical across a skipped self-handoff"
     );
@@ -408,16 +408,16 @@ fn rebuild_preserves_stored_tags_under_tightened_max_tags() {
         ..Default::default()
     };
     // Seed so the dict knows the tokens, then add a query carrying 4 tags (≤ 5).
-    let seed = vec![(1u64, "1994 topps baseball".to_string())];
+    let seed = vec![(1u64, "1994 acme appliance".to_string())];
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster builds");
     let four_tags: Vec<(String, String)> = (0..4).map(|i| ("k".into(), format!("v{i}"))).collect();
     cluster
-        .add_query_with_tags(2, "1995 fleer baseball", &four_tags)
+        .add_query_with_tags(2, "1995 vertex appliance", &four_tags)
         .expect("tagged add");
     // The tagged query is matchable and filterable by one of its tags before the rebuild.
     let filter = vec![("k".to_string(), vec!["v3".to_string()])];
     assert!(cluster
-        .percolate_filtered("1995 fleer baseball", &filter)
+        .percolate_filtered("1995 vertex appliance", &filter)
         .expect("filtered")
         .contains(&2));
 
@@ -430,14 +430,14 @@ fn rebuild_preserves_stored_tags_under_tightened_max_tags() {
     // The 4-tag query SURVIVES the rebuild: still matchable AND still filterable by its tag.
     assert!(
         cluster
-            .percolate("1995 fleer baseball")
+            .percolate("1995 vertex appliance")
             .expect("p")
             .contains(&2),
         "stored over-limit-tagged query must survive the rebuild (no silent drop)"
     );
     assert!(
         cluster
-            .percolate_filtered("1995 fleer baseball", &filter)
+            .percolate_filtered("1995 vertex appliance", &filter)
             .expect("filtered")
             .contains(&2),
         "the stored tags must survive carry-through — filter still matches"
@@ -446,7 +446,7 @@ fn rebuild_preserves_stored_tags_under_tightened_max_tags() {
     // A FRESH add still respects the now-tightened cap: 3 raw tags > max_tags(2) is rejected.
     let three_tags: Vec<(String, String)> = (0..3).map(|i| ("k".into(), format!("w{i}"))).collect();
     let outcome = cluster
-        .add_query_with_tags(9, "1996 skybox baseball", &three_tags)
+        .add_query_with_tags(9, "1996 vertex appliance", &three_tags)
         .expect("add returns");
     assert!(
         matches!(outcome, AddOutcome::RejectedParse(ref e) if e.kind == crate::error::ParseErrorKind::TooManyTags),

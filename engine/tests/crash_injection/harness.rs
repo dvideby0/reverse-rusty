@@ -58,7 +58,7 @@ pub struct Corpus {
 }
 
 impl Corpus {
-    /// Generate a dense corpus (small player/set pools) so even a few-thousand-query
+    /// Generate a dense corpus (small entity/set pools) so even a few-thousand-query
     /// acked PREFIX — all the writer inserts before the kill — still produces matches,
     /// keeping the diff non-degenerate.
     pub fn generate(name: &str, seed: u64, num_queries: usize, num_titles: usize) -> Self {
@@ -86,8 +86,8 @@ impl Corpus {
             hot_skew: 2.0,
             family_size: 8,
             seed,
-            num_players: 1_500,
-            num_sets: 600,
+            num_entities: 1_500,
+            num_collections: 600,
         };
         let data = generate(&cfg);
         let mut queries: Vec<(u64, String)> = Vec::with_capacity(n_canaries + data.queries.len());

@@ -64,7 +64,7 @@ fn empty_tag_keys_fail_loud() {
 #[test]
 fn typed_priority_is_strict_mirrored_and_conflict_checked() {
     let object = serde_json::json!({
-        "query": "topps chrome",
+        "query": "acme chrome",
         "rank_fields": {"priority": "-50"},
         "tags": {"tenant": "acme"}
     });
@@ -74,14 +74,14 @@ fn typed_priority_is_strict_mirrored_and_conflict_checked() {
     assert!(tags.contains(&("priority".to_string(), "-50".to_string())));
 
     let matching = serde_json::json!({
-        "query": "topps chrome",
+        "query": "acme chrome",
         "rank_fields": {"priority": 50},
         "tags": {"priority": "50"}
     });
     assert!(super::super::extract_ranked_ingest(matching.as_object().expect("object")).is_ok());
 
     let conflict = serde_json::json!({
-        "query": "topps chrome",
+        "query": "acme chrome",
         "rank_fields": {"priority": 50},
         "tags": {"priority": "49"}
     });
@@ -101,7 +101,7 @@ fn typed_priority_rejects_non_integer_json_and_overflow() {
         serde_json::json!("9223372036854775808"),
     ] {
         let object = serde_json::json!({
-            "query": "topps chrome",
+            "query": "acme chrome",
             "rank_fields": {"priority": value}
         });
         let (kind, _) = super::super::extract_ranked_ingest(object.as_object().expect("object"))

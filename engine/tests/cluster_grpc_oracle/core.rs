@@ -162,13 +162,13 @@ fn grpc_cluster_matches_single_node_and_oracle() {
     // Exercise the live-write RPCs end-to-end: add a class-A query, find it, remove it.
     let qid = 7_777_001u64;
     let placed = cluster
-        .add_query(qid, "1994 upper deck rareplayer0")
+        .add_query(qid, "1994 north star rareentity0")
         .expect("add_query over gRPC");
     assert!(
         matches!(placed, reverse_rusty::cluster::AddOutcome::Placed { .. }),
         "expected class-A Placed, got {placed:?}"
     );
-    let live_title = "1994 upper deck rareplayer0 psa 10";
+    let live_title = "1994 north star rareentity0 pro";
     assert!(
         cluster
             .percolate(live_title)

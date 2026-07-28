@@ -22,11 +22,11 @@ fn segment_round_trip() {
 
     // 3) Verify both produce the same matches
     let titles = [
-        "1986 Fleer Michael Jordan Rookie Card #57 PSA 10",
-        "LeBron James 2003 Topps Chrome Rookie RC",
-        "Kobe Bryant 1996 Topps Chrome Refractor PSA 10",
-        "Mike Trout 2011 Topps Update RC US175",
-        "Random card that matches nothing specific",
+        "1986 Vertex Wireless Mouse New Item #57 PRO",
+        "Mechanical Keyboard 2003 Acme Chrome New PKG",
+        "Noise Cancelling Headphones 1996 Acme Chrome Premium PRO",
+        "Air Purifier 2011 Acme Update PKG US175",
+        "Random item that matches nothing specific",
     ];
 
     for title in &titles {
@@ -58,7 +58,7 @@ fn persist_and_reopen() {
     engine.build_from_queries(&queries);
 
     // Record expected matches
-    let title = "1986 Fleer Michael Jordan Rookie Card #57 PSA 10";
+    let title = "1986 Vertex Wireless Mouse New Item #57 PRO";
     let expected = match_ids(&engine, title);
     drop(engine); // "close" the engine
 
@@ -161,7 +161,7 @@ fn quoted_phrase_predicates_round_trip_through_v10_mmap() {
     );
     assert_eq!(
         u32::from_le_bytes(bytes[12..16].try_into().expect("semantics")),
-        4
+        5
     );
     drop(engine);
 
@@ -247,58 +247,8 @@ fn semantics_two_materialization_is_source_rebuilt_for_quoted_adjacency() {
         reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
             .expect("migrated segment")
             .compiler_semantics_version()
-            == 4
+            == 5
     }));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn semantics_three_materialization_is_source_rebuilt_for_complete_forbidden_terms() {
-    let dir = test_dir("semantics_three_forbidden_term_migration");
-    let config = EngineConfig {
-        data_dir: Some(dir.clone()),
-        ..EngineConfig::default()
-    };
-    let make_grader_norm = || {
-        let mut builder = reverse_rusty::normalize::NormalizerBuilder::new();
-        builder.add_grader("psa");
-        builder.build().expect("grader normalizer")
-    };
-    {
-        let mut engine = Engine::with_config(make_grader_norm(), config.clone());
-        engine.build_from_queries(&[(1, "card -psa10".to_string())]);
-    }
-    let before =
-        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
-    for name in &before.segment_files {
-        stamp_compiler_semantics(&dir.join("segments").join(name), 3);
-    }
-
-    let reopened = Engine::open(make_grader_norm(), config.clone()).expect("semantics-3 migration");
-    assert_eq!(
-        match_ids(&reopened, "card psa"),
-        vec![1],
-        "a partial multi-feature forbidden term must not reject after source rebuild"
-    );
-    assert!(
-        match_ids(&reopened, "card psa10").is_empty(),
-        "the complete forbidden term must still reject after source rebuild"
-    );
-    let after = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
-    assert_ne!(before.segment_files, after.segment_files);
-    assert!(after.segment_files.iter().all(|name| {
-        reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
-            .expect("migrated segment")
-            .compiler_semantics_version()
-            == 4
-    }));
-    drop(reopened);
-    let reopened = Engine::open(make_grader_norm(), config).expect("mmap reopen");
-    let mut scratch = reverse_rusty::segment::MatchScratch::new();
-    assert!(
-        reopened.diagnostic_candidate_hit(1, "card psa10", &mut scratch, true),
-        "the mmap posting must be observable before the forbidden predicate rejects"
-    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -350,7 +300,7 @@ fn semantics_one_anyof_materialization_rebuilds_before_serving() {
         reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
             .expect("open migrated segment")
             .compiler_semantics_version()
-            == 4
+            == 5
     }));
 
     drop(reopened);
@@ -372,11 +322,11 @@ fn tagged_queries_survive_reopen_and_filter_on_mmap() {
         ..EngineConfig::default()
     };
     let queries = vec![
-        (1u64, "topps chrome".to_string()),
-        (2u64, "topps chrome".to_string()),
+        (1u64, "acme chrome".to_string()),
+        (2u64, "acme chrome".to_string()),
     ];
     let tags = vec![
-        vec![("category".to_string(), "cards".to_string())],
+        vec![("category".to_string(), "items".to_string())],
         vec![("category".to_string(), "coins".to_string())],
     ];
     let mut engine = Engine::with_config(make_norm(), config.clone());
@@ -388,14 +338,14 @@ fn tagged_queries_survive_reopen_and_filter_on_mmap() {
     // Reopen — the base segment is now mmap'd, so the tag column is read from the v3 .seg.
     let engine2 = Engine::open(make_norm(), config).unwrap();
     let snap = engine2.snapshot();
-    let title = "2020 topps chrome update";
+    let title = "2020 acme chrome update";
     let source = snap.get_query_document(1).expect("stored source metadata");
-    assert_eq!(source.query(), "topps chrome");
+    assert_eq!(source.query(), "acme chrome");
     assert_eq!(source.version(), 1);
     assert!(source.tags_known());
     assert_eq!(
         source.tags(),
-        [("category".to_string(), "cards".to_string())]
+        [("category".to_string(), "items".to_string())]
     );
 
     let mut s = reverse_rusty::segment::MatchScratch::new();
@@ -409,13 +359,13 @@ fn tagged_queries_survive_reopen_and_filter_on_mmap() {
         "both queries match the title unfiltered after reopen"
     );
 
-    let cards = snap.compile_tag_predicate(&[("category".to_string(), vec!["cards".to_string()])]);
-    snap.match_title_filtered(title, &mut s, &mut out, true, &cards);
+    let items = snap.compile_tag_predicate(&[("category".to_string(), vec!["items".to_string()])]);
+    snap.match_title_filtered(title, &mut s, &mut out, true, &items);
     out.sort_unstable();
     assert_eq!(
         out,
         vec![1],
-        "category=cards narrows to query 1 on the reopened mmap segment"
+        "category=items narrows to query 1 on the reopened mmap segment"
     );
 
     let coins = snap.compile_tag_predicate(&[("category".to_string(), vec!["coins".to_string()])]);

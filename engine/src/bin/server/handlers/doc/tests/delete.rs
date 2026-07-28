@@ -21,7 +21,7 @@ async fn delete_doc_is_es_shaped_immediately_visible_and_idempotent() {
         let (status, _) = route_put_json(
             &state,
             &format!("/_doc/{id}"),
-            &serde_json::json!({"query":format!("topps chrome {id}"), "version": 7}),
+            &serde_json::json!({"query":format!("acme chrome {id}"), "version": 7}),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -36,7 +36,7 @@ async fn delete_doc_is_es_shaped_immediately_visible_and_idempotent() {
         assert!(body.get("_version").is_none());
         assert!(body.get("_shards").is_none());
         assert!(
-            !matches_in_snapshot(&state, &format!("topps chrome {id}")).contains(&id),
+            !matches_in_snapshot(&state, &format!("acme chrome {id}")).contains(&id),
             "every accepted refresh policy must publish the delete before response"
         );
         let get = Request::builder()
@@ -67,7 +67,7 @@ async fn delete_doc_rejects_unsupported_parameters_before_mutation() {
         (22, "version=7"),
         (23, "refresh=true&refresh=false"),
     ] {
-        let query = format!("wayne gretzky {id}");
+        let query = format!("espresso machine {id}");
         assert_eq!(do_put(&state, id, &query).await.0, StatusCode::CREATED);
 
         let (status, body) = route_delete_json(&state, &format!("/_doc/{id}?{suffix}")).await;

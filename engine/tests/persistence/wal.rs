@@ -21,12 +21,12 @@ fn writes_before_first_manifest_survive_crash() {
     {
         let mut engine = Engine::with_config(make_norm(), config.clone());
         // NO build/bulk/flush — every mutation lives only in the WAL.
-        engine.insert_live("michael jordan", 1, 1);
-        engine.insert_live("lebron james", 2, 1);
+        engine.insert_live("wireless mouse", 1, 1);
+        engine.insert_live("mechanical keyboard", 2, 1);
         engine
-            .try_upsert_live("kobe bryant", 2, 2)
+            .try_upsert_live("noise cancelling headphones", 2, 2)
             .expect("upsert (replaces q2)");
-        engine.insert_live("wander franco", 3, 1);
+        engine.insert_live("product omega", 3, 1);
         assert!(engine.delete_by_logical_id(3).expect("delete") >= 1);
         assert!(
             !dir.join("manifest.bin").exists(),
@@ -36,19 +36,19 @@ fn writes_before_first_manifest_survive_crash() {
     }
     let engine = Engine::open(make_norm(), config).expect("reopen");
     assert!(
-        match_ids(&engine, "1986 fleer michael jordan rookie").contains(&1),
+        match_ids(&engine, "1986 vertex wireless mouse new").contains(&1),
         "an acknowledged insert must survive a pre-first-manifest crash"
     );
     assert!(
-        match_ids(&engine, "2008 topps kobe bryant").contains(&2),
+        match_ids(&engine, "2008 acme noise cancelling headphones").contains(&2),
         "the upsert's insert half must survive"
     );
     assert!(
-        !match_ids(&engine, "2003 topps lebron james rookie").contains(&2),
+        !match_ids(&engine, "2003 acme mechanical keyboard new").contains(&2),
         "the upsert's tombstone half must survive"
     );
     assert!(
-        !match_ids(&engine, "2021 topps wander franco").contains(&3),
+        !match_ids(&engine, "2021 acme product omega").contains(&3),
         "an acknowledged delete must survive"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -100,13 +100,13 @@ fn tagged_inserts_survive_wal_recovery() {
         // query is unrelated to the title/filters below.
         engine.build_from_queries(&[(99, "zzz placeholder seed".to_string())]);
         engine.insert_live_with_tags(
-            "topps chrome",
+            "acme chrome",
             1,
             1,
-            &[("category".to_string(), "cards".to_string())],
+            &[("category".to_string(), "items".to_string())],
         );
         engine.insert_live_with_tags(
-            "topps chrome",
+            "acme chrome",
             2,
             1,
             &[("category".to_string(), "coins".to_string())],
@@ -117,18 +117,18 @@ fn tagged_inserts_survive_wal_recovery() {
     }
     let engine2 = Engine::open(make_norm(), config).unwrap();
     let snap = engine2.snapshot();
-    let title = "2020 topps chrome update";
+    let title = "2020 acme chrome update";
 
     let mut s = reverse_rusty::segment::MatchScratch::new();
     let mut out = Vec::new();
 
-    let cards = snap.compile_tag_predicate(&[("category".to_string(), vec!["cards".to_string()])]);
-    snap.match_title_filtered(title, &mut s, &mut out, true, &cards);
+    let items = snap.compile_tag_predicate(&[("category".to_string(), vec!["items".to_string()])]);
+    snap.match_title_filtered(title, &mut s, &mut out, true, &items);
     out.sort_unstable();
     assert_eq!(
         out,
         vec![1],
-        "WAL-replayed tags narrow category=cards to query 1"
+        "WAL-replayed tags narrow category=items to query 1"
     );
 
     let coins = snap.compile_tag_predicate(&[("category".to_string(), vec!["coins".to_string()])]);
@@ -161,28 +161,28 @@ fn wal_recovery_inserts() {
     engine.build_from_queries(&queries);
 
     // These go to the memtable + WAL but are NOT flushed to segments
-    engine.insert_live("wander franco prospect", 100, 1);
-    engine.insert_live("fernando tatis jr rookie", 101, 1);
+    engine.insert_live("product omega preview", 100, 1);
+    engine.insert_live("portable monitor new", 101, 1);
 
-    let title_wander = "Wander Franco 2019 Bowman Chrome Prospect";
-    let title_tatis = "Fernando Tatis Jr 2019 Topps Chrome Rookie";
-    let expected_wander = match_ids(&engine, title_wander);
-    let expected_tatis = match_ids(&engine, title_tatis);
+    let title_omega = "Product Omega 2019 Summit Chrome Preview";
+    let title_monitor = "Portable Monitor 2019 Acme Chrome New";
+    let expected_omega = match_ids(&engine, title_omega);
+    let expected_monitor = match_ids(&engine, title_monitor);
 
     drop(engine); // simulate crash
 
     // 2) Recover
     let engine2 = Engine::open(make_norm(), config).unwrap();
-    let actual_wander = match_ids(&engine2, title_wander);
-    let actual_tatis = match_ids(&engine2, title_tatis);
+    let actual_omega = match_ids(&engine2, title_omega);
+    let actual_monitor = match_ids(&engine2, title_monitor);
 
     assert_eq!(
-        expected_wander, actual_wander,
-        "WAL recovery lost wander insert"
+        expected_omega, actual_omega,
+        "WAL recovery lost omega insert"
     );
     assert_eq!(
-        expected_tatis, actual_tatis,
-        "WAL recovery lost tatis insert"
+        expected_monitor, actual_monitor,
+        "WAL recovery lost monitor insert"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -253,8 +253,9 @@ fn wal_recovery_reports_corrupt_tail() {
     // Write a valid WAL with two inserts
     {
         let mut wal = Wal::open(&wal_path, false).unwrap();
-        wal.append_insert(1, 1, "michael jordan card", &[]).unwrap();
-        wal.append_insert(2, 1, "lebron james rookie", &[]).unwrap();
+        wal.append_insert(1, 1, "wireless mouse item", &[]).unwrap();
+        wal.append_insert(2, 1, "mechanical keyboard new", &[])
+            .unwrap();
     }
 
     // Append garbage to simulate a torn write

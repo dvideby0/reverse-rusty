@@ -4,10 +4,10 @@
 //! Invariant: Deterministic (SplitMix64 PRNG) — same seed = same data every time
 //! Hot path: no — used by benchmarks and oracle tests only
 //!
-//! Generates trading-card product queries and listing titles. Models the
-//! adversarial cases from the spec: hot-entity skew, configurable broad-query
-//! fraction, near-duplicate query families, alternate title forms (PSA10 vs
-//! PSA 10, UD vs Upper Deck), and forbidden-term noise.
+//! Generates generic product queries and listing titles. Models the adversarial
+//! cases from the spec: hot-entity skew, configurable broad-query fraction,
+//! near-duplicate query families, alternate brand forms, and forbidden-term
+//! noise.
 
 /// Tiny deterministic PRNG (SplitMix64). No external crates.
 pub struct Rng(u64);
@@ -63,44 +63,62 @@ impl Rng {
     }
 }
 
-pub const PLAYERS: &[&str] = &[
-    "michael jordan",
-    "lebron james",
-    "kobe bryant",
-    "tom brady",
-    "ken griffey",
-    "wayne gretzky",
-    "patrick mahomes",
-    "mike trout",
+pub const ENTITIES: &[&str] = &[
+    "headphones",
+    "keyboard",
+    "mouse",
+    "desk",
+    "vacuum",
+    "espresso",
+    "camera",
+    "purifier",
 ];
 // alternate forms the title may use for the same entity
 pub const BRANDS: &[&str] = &[
-    "upper deck",
-    "topps",
-    "panini",
-    "fleer",
-    "donruss",
-    "bowman",
-    "score",
-    "prizm",
+    "north star",
+    "blue peak",
+    "acme",
+    "orbit",
+    "vertex",
+    "harbor",
+    "summit",
+    "contoso",
 ];
 pub const BRAND_ALT: &[&str] = &[
-    "ud", "topps", "panini", "fleer", "donruss", "bowman", "score", "prizm",
+    "northstar",
+    "bluepeak",
+    "acme",
+    "orbit",
+    "vertex",
+    "harbor",
+    "summit",
+    "contoso",
 ];
-pub const CARD_TERMS: &[&str] = &[
-    "sp",
-    "rc",
-    "rookie",
-    "refractor",
-    "insert",
-    "base",
-    "preview",
+pub const ATTRIBUTES: &[&str] = &[
+    "wireless",
+    "refurbished",
+    "bundle",
+    "compact",
+    "limited",
+    "portable",
+    "deluxe",
 ];
-pub const GRADERS: &[&str] = &["psa", "bgs", "sgc"];
-pub const GRADES: &[&str] = &["8", "9", "9.5", "10"];
-pub const NEGATIVES: &[&str] = &["auto", "signed", "reprint", "lot", "checklist", "minor"];
+pub const VARIANTS: &[&str] = &[
+    "standard", "plus", "pro", "max", "mini", "ultra", "core", "air", "flex", "edge", "prime",
+    "select",
+];
+pub const NEGATIVES: &[&str] = &["damaged", "parts", "replica", "manual", "sample", "empty"];
 pub const NOISE: &[&str] = &[
-    "card", "nm", "sharp", "centered", "hof", "vintage", "graded", "slab", "pop", "rare",
+    "new",
+    "sealed",
+    "tested",
+    "boxed",
+    "genuine",
+    "original",
+    "complete",
+    "available",
+    "clean",
+    "sale",
 ];
 
 #[derive(Clone)]
@@ -108,14 +126,14 @@ pub struct GenConfig {
     pub num_queries: usize,
     pub num_titles: usize,
     pub broad_query_frac: f64,
-    pub hot_skew: f64,      // >1 = more skew toward popular players/graders
+    pub hot_skew: f64,      // >1 = more skew toward popular entities/variants
     pub family_size: usize, // near-duplicate variants per family base
     pub seed: u64,
     /// Size of the synthetic entity space. Real marketplaces have millions of
-    /// distinct players/sets; a large pool here makes selectivity realistic
+    /// distinct entities/collections; a large pool here makes selectivity realistic
     /// instead of an artifact of a tiny vocabulary.
-    pub num_players: usize,
-    pub num_sets: usize,
+    pub num_entities: usize,
+    pub num_collections: usize,
 }
 
 impl Default for GenConfig {
@@ -127,8 +145,8 @@ impl Default for GenConfig {
             hot_skew: 2.0,
             family_size: 8,
             seed: 0x00C0_FFEE,
-            num_players: 20_000,
-            num_sets: 8_000,
+            num_entities: 20_000,
+            num_collections: 8_000,
         }
     }
 }
@@ -140,23 +158,26 @@ pub struct Dataset {
 
 /// Build the entity pools (real anchors + large synthetic space).
 struct Pools {
-    players: Vec<String>,
-    sets: Vec<String>,
+    entities: Vec<String>,
+    collections: Vec<String>,
 }
 fn build_pools(cfg: &GenConfig) -> Pools {
-    let mut players: Vec<String> = PLAYERS
+    let mut entities: Vec<String> = ENTITIES
         .iter()
         .map(std::string::ToString::to_string)
         .collect();
-    for i in 0..cfg.num_players {
-        // single-token synthetic player; normalizes to a distinct generic feature
-        players.push(format!("athlete{i:05}"));
+    for i in 0..cfg.num_entities {
+        // Single-token synthetic entity; normalizes to a distinct generic feature.
+        entities.push(format!("product{i:05}"));
     }
-    let mut sets = Vec::with_capacity(cfg.num_sets);
-    for i in 0..cfg.num_sets {
-        sets.push(format!("series{i:04}"));
+    let mut collections = Vec::with_capacity(cfg.num_collections);
+    for i in 0..cfg.num_collections {
+        collections.push(format!("collection{i:04}"));
     }
-    Pools { players, sets }
+    Pools {
+        entities,
+        collections,
+    }
 }
 
 pub fn generate(cfg: &GenConfig) -> Dataset {
@@ -172,51 +193,53 @@ fn gen_queries(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<(u64, Strin
     let mut id: u64 = 0;
     while out.len() < cfg.num_queries {
         if rng.frac() < cfg.broad_query_frac {
-            // broad query: just a (hot) player, or a grade, or a card term
+            // Broad query: a hot entity, common variant, or common attribute.
             let q = match rng.below(3) {
-                // Empty player pool -> fall back to a grade so we never index an
+                // Empty entity pool -> fall back to a variant so we never index an
                 // empty vec (degenerate config only; default pool is non-empty).
-                0 => rng.pick_skewed(&pools.players, cfg.hot_skew).map_or_else(
-                    || format!("{} {}", GRADERS[0], GRADES[GRADES.len() - 1]),
+                0 => rng.pick_skewed(&pools.entities, cfg.hot_skew).map_or_else(
+                    || format!("{} {}", ATTRIBUTES[0], VARIANTS[2]),
                     Clone::clone,
                 ),
-                1 => format!("{} {}", GRADERS[0], GRADES[GRADES.len() - 1]), // "psa 10"
-                _ => "rookie".to_string(),
+                // Keep a stable two-hot-feature shape so the pinned workload
+                // exercises the multi-anchor class without domain knowledge.
+                1 => format!("{} {}", ATTRIBUTES[0], VARIANTS[2]),
+                _ => ATTRIBUTES[2].to_string(),
             };
             out.push((id, q));
             id += 1;
             continue;
         }
-        // a near-duplicate family sharing player+year+brand+set. `pools.players`
-        // always carries the built-in PLAYERS; `pools.sets` is empty iff
-        // `num_sets == 0`, so skip the set token rather than index an empty pool.
-        let Some(player) = rng.pick_skewed(&pools.players, cfg.hot_skew) else {
-            // No players to anchor a family on (degenerate config): skip.
+        // A near-duplicate family sharing entity+year+brand+collection.
+        // `pools.entities` always carries the built-in ENTITIES;
+        // `pools.collections` is empty iff `num_collections == 0`, so skip the
+        // collection token rather than index an empty pool.
+        let Some(entity) = rng.pick_skewed(&pools.entities, cfg.hot_skew) else {
+            // No entities to anchor a family on (degenerate config): skip.
             id += 1;
             continue;
         };
         let year = 1986 + rng.below(39); // 1986..2024
         let brand = BRANDS[rng.below(BRANDS.len())];
-        let set = rng.pick(&pools.sets).map(String::as_str);
+        let collection = rng.pick(&pools.collections).map(String::as_str);
         let fam = cfg.family_size.max(1);
         for _ in 0..fam {
             if out.len() >= cfg.num_queries {
                 break;
             }
-            let mut q = match set {
-                Some(set) => format!("{year} {brand} {set} {player}"),
-                None => format!("{year} {brand} {player}"),
+            let mut q = match collection {
+                Some(collection) => format!("{year} {brand} {collection} {entity}"),
+                None => format!("{year} {brand} {entity}"),
             };
-            // card term
+            // Optional product attribute.
             if rng.frac() < 0.7 {
                 q.push(' ');
-                q.push_str(CARD_TERMS[rng.below(CARD_TERMS.len())]);
+                q.push_str(ATTRIBUTES[rng.below(ATTRIBUTES.len())]);
             }
-            // grader + grade
+            // Optional product variant.
             if rng.frac() < 0.6 {
-                let g = GRADERS[rng.skewed(GRADERS.len(), cfg.hot_skew)];
-                let gr = GRADES[rng.skewed(GRADES.len(), cfg.hot_skew)];
-                q.push_str(&format!(" {g} {gr}"));
+                let variant = VARIANTS[rng.skewed(VARIANTS.len(), cfg.hot_skew)];
+                q.push_str(&format!(" {variant}"));
             }
             // negatives (0..3)
             let nn = rng.below(4);
@@ -232,7 +255,7 @@ fn gen_queries(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<(u64, Strin
 }
 
 /// Generate `n` negation-only (cost class D) query texts — 1–3 forbidden terms,
-/// no positives: the "base/raw card defined entirely by exclusions" shape the
+/// no positives: the "item defined entirely by exclusions" shape the
 /// ADR-068 always-candidate lane exists for. Seeded + deterministic.
 ///
 /// A SEPARATE function rather than a `GenConfig` field, the same opt-in-by-
@@ -285,7 +308,7 @@ const DIACRITICS: &[(char, char)] = &[
 /// Unicode junk tokens a real marketplace title can carry: trademark signs, emoji, CJK,
 /// soup that should normalize to nothing (or to a synthetic out-of-dict feature) without
 /// panicking or perturbing unrelated matches.
-const UNICODE_JUNK: &[&str] = &["™", "®", "🔥🔥", "カード", "новый", "★★★", "½"];
+const UNICODE_JUNK: &[&str] = &["™", "®", "🔥🔥", "商品", "новый", "★★★", "½"];
 
 /// Apply random capitalization: the cleaner lowercases everything, so case is pure noise.
 fn mess_case(rng: &mut Rng, s: &str) -> String {
@@ -469,26 +492,27 @@ pub fn messify_dataset(rng: &mut Rng, data: &mut Dataset, title_frac: f64, query
 fn gen_titles(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<String> {
     let mut out = Vec::with_capacity(cfg.num_titles);
     for _ in 0..cfg.num_titles {
-        // `pools.players` always carries the built-in PLAYERS; an empty pool here
-        // would mean PLAYERS itself is empty (it never is), but guard anyway so a
+        // `pools.entities` always carries the built-in ENTITIES; an empty pool here
+        // would mean ENTITIES itself is empty (it never is), but guard anyway so a
         // degenerate pool skips the title rather than indexing an empty vec.
-        let Some(player) = rng.pick_skewed(&pools.players, cfg.hot_skew) else {
+        let Some(entity) = rng.pick_skewed(&pools.entities, cfg.hot_skew) else {
             continue;
         };
         let year = 1986 + rng.below(39);
         let bi = rng.below(BRANDS.len());
-        // alternate brand form sometimes (UD vs Upper Deck)
+        // Use an alternate brand form sometimes.
         let brand = if rng.frac() < 0.3 {
             BRAND_ALT[bi]
         } else {
             BRANDS[bi]
         };
-        // `pools.sets` is empty iff `num_sets == 0`: drop the set token instead.
-        let set = rng.pick(&pools.sets).map(String::as_str);
+        // `pools.collections` is empty iff `num_collections == 0`: drop the
+        // collection token instead.
+        let collection = rng.pick(&pools.collections).map(String::as_str);
 
-        let mut t = match set {
-            Some(set) => format!("{year} {brand} {set} {player}"),
-            None => format!("{year} {brand} {player}"),
+        let mut t = match collection {
+            Some(collection) => format!("{year} {brand} {collection} {entity}"),
+            None => format!("{year} {brand} {entity}"),
         };
         // leading/trailing noise
         if rng.frac() < 0.5 {
@@ -496,19 +520,13 @@ fn gen_titles(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<String> {
         }
         if rng.frac() < 0.8 {
             t.push(' ');
-            t.push_str(CARD_TERMS[rng.below(CARD_TERMS.len())]);
+            t.push_str(ATTRIBUTES[rng.below(ATTRIBUTES.len())]);
         }
         if rng.frac() < 0.7 {
-            let g = GRADERS[rng.skewed(GRADERS.len(), cfg.hot_skew)];
-            let gr = GRADES[rng.skewed(GRADES.len(), cfg.hot_skew)];
-            // alternate grade form: "psa 10" vs "psa10" vs "psa gem mt 10"
-            match rng.below(3) {
-                0 => t.push_str(&format!(" {g} {gr}")),
-                1 => t.push_str(&format!(" {g}{gr}")),
-                _ => t.push_str(&format!(" {g} gem mt {gr}")),
-            }
+            let variant = VARIANTS[rng.skewed(VARIANTS.len(), cfg.hot_skew)];
+            t.push_str(&format!(" {variant}"));
         }
-        // sometimes inject a term that some queries forbid (auto/lot/...)
+        // Sometimes inject a term that some queries forbid (manual/parts/...).
         if rng.frac() < 0.25 {
             t.push(' ');
             t.push_str(NEGATIVES[rng.below(NEGATIVES.len())]);
@@ -526,39 +544,39 @@ fn gen_titles(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// Degenerate pools (`num_sets == 0`, `num_players == 0`) must not panic:
+    /// Degenerate pools (`num_collections == 0`, `num_entities == 0`) must not panic:
     /// `below(0)` divides by zero and `skewed(0, _)` underflows `n - 1`. The
-    /// guards skip the missing token instead. (The default `num_players` path
-    /// still has the built-in PLAYERS, so titles/queries are still produced.)
+    /// guards skip the missing token instead. (The default `num_entities` path
+    /// still has the built-in ENTITIES, so titles/queries are still produced.)
     #[test]
     fn empty_pools_do_not_panic() {
         let cfg = GenConfig {
             num_queries: 64,
             num_titles: 64,
-            num_sets: 0,
-            num_players: 0,
+            num_collections: 0,
+            num_entities: 0,
             ..GenConfig::default()
         };
         let data = generate(&cfg);
-        // PLAYERS is non-empty, so generation still yields content with no sets.
+        // ENTITIES is non-empty, so generation still yields content with no collections.
         assert!(
             !data.queries.is_empty(),
-            "queries still produced without sets"
+            "queries still produced without collections"
         );
         assert!(
             !data.titles.is_empty(),
-            "titles still produced without sets"
+            "titles still produced without collections"
         );
     }
 
-    /// Only the sets pool is empty: the common degenerate case the guards target.
+    /// Only the collections pool is empty: the common degenerate case the guards target.
     #[test]
-    fn empty_set_pool_does_not_panic() {
+    fn empty_collection_pool_does_not_panic() {
         let cfg = GenConfig {
             num_queries: 64,
             num_titles: 64,
-            num_sets: 0,
-            num_players: 50,
+            num_collections: 0,
+            num_entities: 50,
             ..GenConfig::default()
         };
         let data = generate(&cfg);

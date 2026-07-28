@@ -19,12 +19,12 @@ fn parallel_matches_equal_sequential() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xDA_2A11E1,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     };
     let data = generate(&cfg);
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&data.queries);
 
     // Sequential results
@@ -83,12 +83,12 @@ fn parallel_matches_equal_sequential_no_broad() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xA0_B20AD,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&data.queries);
 
     let mut scratch = MatchScratch::new();
@@ -124,12 +124,12 @@ fn parallel_stats_aggregate_correctly() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x57A75,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&data.queries);
 
     let par_results = eng.match_titles_par(&data.titles, true);

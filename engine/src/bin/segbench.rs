@@ -32,8 +32,8 @@ fn main() {
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: (num_queries / 40).max(2_000),
-        num_sets: (num_queries / 100).max(1_000),
+        num_entities: (num_queries / 40).max(2_000),
+        num_collections: (num_queries / 100).max(1_000),
     };
 
     eprintln!("[gen] queries={num_queries} titles={num_titles} broad_frac={broad_frac}");
@@ -69,7 +69,7 @@ fn main() {
 
 /// Build the corpus as exactly K immutable base segments via bulk_ingest.
 fn build_k_segments(queries: &[(u64, String)], k: usize) -> Engine {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     let total = queries.len();
     let per = total.div_ceil(k);
 

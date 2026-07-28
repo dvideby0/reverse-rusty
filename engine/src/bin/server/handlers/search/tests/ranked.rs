@@ -36,7 +36,7 @@ async fn v2_defaults_rank_by_priority_and_enrich_winners_only() {
     let response = v2_search(
         State(Arc::clone(&state)),
         Json(v2_body(serde_json::json!({
-            "document": {"title": "2020 topps chrome update"}
+            "document": {"title": "2020 acme chrome update"}
         }))),
     )
     .await
@@ -66,7 +66,7 @@ async fn v2_route_supports_es_controls_and_rejects_ambiguous_or_unknown_input() 
     let (status, json) = routed_v2_search(
         &state,
         "/v2/_search?size=1&_source=false&explain=true&timeout=1s&track_total_hits=1",
-        serde_json::json!({"document": {"title": "topps chrome"}}),
+        serde_json::json!({"document": {"title": "acme chrome"}}),
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{json}");
@@ -85,18 +85,18 @@ async fn v2_route_supports_es_controls_and_rejects_ambiguous_or_unknown_input() 
         (
             "unknown query parameter",
             "/v2/_search?preference=local",
-            serde_json::json!({"document": {"title": "topps chrome"}}),
+            serde_json::json!({"document": {"title": "acme chrome"}}),
         ),
         (
             "duplicate size",
             "/v2/_search?size=1",
-            serde_json::json!({"document": {"title": "topps chrome"}, "size": 2}),
+            serde_json::json!({"document": {"title": "acme chrome"}, "size": 2}),
         ),
         (
             "duplicate source alias",
             "/v2/_search",
             serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "include_source": true,
                 "_source": false
             }),
@@ -105,7 +105,7 @@ async fn v2_route_supports_es_controls_and_rejects_ambiguous_or_unknown_input() 
             "duplicate timeout alias",
             "/v2/_search",
             serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "timeout_ms": 1,
                 "timeout": "1s"
             }),
@@ -114,7 +114,7 @@ async fn v2_route_supports_es_controls_and_rejects_ambiguous_or_unknown_input() 
             "boolean total alias",
             "/v2/_search",
             serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "track_total_hits": true
             }),
         ),
@@ -122,7 +122,7 @@ async fn v2_route_supports_es_controls_and_rejects_ambiguous_or_unknown_input() 
             "unknown top-level field",
             "/v2/_search",
             serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "preference": "local"
             }),
         ),
@@ -130,14 +130,14 @@ async fn v2_route_supports_es_controls_and_rejects_ambiguous_or_unknown_input() 
             "unknown document field",
             "/v2/_search",
             serde_json::json!({
-                "document": {"title": "topps chrome", "sku": "ABC-1"}
+                "document": {"title": "acme chrome", "sku": "ABC-1"}
             }),
         ),
         (
             "unknown rank field",
             "/v2/_search",
             serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "rank": {"priority_field": "priority", "mode": "sum"}
             }),
         ),
@@ -145,7 +145,7 @@ async fn v2_route_supports_es_controls_and_rejects_ambiguous_or_unknown_input() 
             "unknown boost field",
             "/v2/_search",
             serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "rank": {
                     "boosts": [{
                         "key": "tenant",
@@ -160,7 +160,7 @@ async fn v2_route_supports_es_controls_and_rejects_ambiguous_or_unknown_input() 
             "unknown pit field",
             "/v2/_search",
             serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "pit": {"id": "opaque", "keep_alive": "1m"}
             }),
         ),
@@ -186,7 +186,7 @@ async fn v2_route_preserves_content_type_and_body_limit_statuses() {
     use tower::ServiceExt;
 
     let state = state_with(ranked_engine(), false);
-    let body = serde_json::json!({"document": {"title": "topps chrome"}});
+    let body = serde_json::json!({"document": {"title": "acme chrome"}});
     let app = Router::new()
         .route("/v2/_search", post(super::super::v2::v2_search_route))
         .with_state(Arc::clone(&state));
@@ -251,7 +251,7 @@ async fn v2_threshold_size_zero_and_unsupported_modes_are_explicit() {
     let response = v2_search(
         State(Arc::clone(&state)),
         Json(v2_body(serde_json::json!({
-            "document": {"title": "topps chrome"},
+            "document": {"title": "acme chrome"},
             "size": 0,
             "track_total_hits_up_to": 1,
             "include_source": false
@@ -269,7 +269,7 @@ async fn v2_threshold_size_zero_and_unsupported_modes_are_explicit() {
     let error = v2_search(
         State(Arc::clone(&state)),
         Json(v2_body(serde_json::json!({
-            "document": {"title": "topps chrome"},
+            "document": {"title": "acme chrome"},
             "result_mode": "all"
         }))),
     )
@@ -284,19 +284,19 @@ async fn v2_enforces_rank_bounds_and_unknown_fields() {
     let state = state_with(ranked_engine(), false);
     for body in [
         serde_json::json!({
-            "document": {"title": "topps chrome"},
+            "document": {"title": "acme chrome"},
             "size": 10001
         }),
         serde_json::json!({
-            "document": {"title": "topps chrome"},
+            "document": {"title": "acme chrome"},
             "track_total_hits_up_to": 10001
         }),
         serde_json::json!({
-            "document": {"title": "topps chrome"},
+            "document": {"title": "acme chrome"},
             "rank": {"priority_field": "price"}
         }),
         serde_json::json!({
-            "document": {"title": "topps chrome"},
+            "document": {"title": "acme chrome"},
             "from": 1
         }),
     ] {
@@ -329,7 +329,7 @@ async fn v2_source_enrichment_is_fail_closed_and_can_be_disabled() {
             Engine::with_config(Normalizer::default_vocab().expect("vocab"), config.clone());
         engine
             .try_insert_live_ranked(
-                "topps chrome",
+                "acme chrome",
                 1,
                 1,
                 &[("priority".into(), "9".into())],
@@ -349,7 +349,7 @@ async fn v2_source_enrichment_is_fail_closed_and_can_be_disabled() {
     let error = v2_search(
         State(Arc::clone(&state)),
         Json(v2_body(serde_json::json!({
-            "document": {"title": "topps chrome"}
+            "document": {"title": "acme chrome"}
         }))),
     )
     .await
@@ -362,7 +362,7 @@ async fn v2_source_enrichment_is_fail_closed_and_can_be_disabled() {
     let response = v2_search(
         State(Arc::clone(&state)),
         Json(v2_body(serde_json::json!({
-            "document": {"title": "topps chrome"},
+            "document": {"title": "acme chrome"},
             "include_source": false
         }))),
     )
@@ -377,7 +377,7 @@ async fn v2_source_enrichment_is_fail_closed_and_can_be_disabled() {
     let explanation_error = v2_search(
         State(Arc::clone(&state)),
         Json(v2_body(serde_json::json!({
-            "document": {"title": "topps chrome"},
+            "document": {"title": "acme chrome"},
             "include_source": false,
             "explain": true
         }))),
@@ -399,7 +399,7 @@ async fn v2_deadline_includes_ranked_permit_queue() {
     let error = v2_search(
         State(Arc::clone(&state)),
         Json(v2_body(serde_json::json!({
-            "document": {"title": "topps chrome"},
+            "document": {"title": "acme chrome"},
             "timeout_ms": 1
         }))),
     )
@@ -419,7 +419,7 @@ async fn v2_enrichment_cap_is_shared_and_fail_closed() {
     let error = v2_search(
         State(Arc::clone(&state)),
         Json(v2_body(serde_json::json!({
-            "document": {"title": "topps chrome"}
+            "document": {"title": "acme chrome"}
         }))),
     )
     .await

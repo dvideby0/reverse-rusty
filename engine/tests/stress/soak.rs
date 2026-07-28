@@ -24,8 +24,8 @@ fn ten_million_queries_mixed_ops() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x10_000_000,
-        num_players: 20_000,
-        num_sets: 8_000,
+        num_entities: 20_000,
+        num_collections: 8_000,
     };
     let data = generate(&cfg);
     eprintln!(
@@ -122,7 +122,7 @@ fn ten_million_queries_mixed_ops() {
     for i in 0..insert_count {
         let id = 50_000_000 + i;
         let text = format!(
-            "live{} player{} {} fleer basketball card",
+            "live{} entity{} {} vertex appliance item",
             i,
             i % 20_000,
             1980 + (i % 40)

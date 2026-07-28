@@ -119,17 +119,10 @@ impl Normalizer {
                 // P(T) = N(T) ∪ force-additive parse-union ∪ raw token features ∪ overlapping
                 // entities. `pos` already holds N(T); only ever ADD (never replace), so P(T) is a
                 // strict superset of every parse and activating an alias can never drop a feature.
-                // The force-additive re-emit recovers components of a displaced additive phrase; it
-                // can, however, change a *stateful* token read (a grader un-consumed from a phrase
-                // turns a trailing `10` from `term:10` into `grade:10`), so we also add every cleaned
-                // token's RAW `term:<token>` reading below — the generic feature a stateful re-parse
-                // would otherwise drop (codex R7/R8/R9). The force-additive pass also tracks ALL
-                // active graders (see `emit`'s `active_graders`): each number grades with every
-                // grader still in window, so a number consumed by a phrase in some parse cannot hide
-                // a later grade from P(T) and a second grader does not overwrite the first (the
-                // "Goldilocks parse" — `psa 9 lives 8` reads `psa 8` once `9 lives` collapses;
-                // `psa a bgs 8` reads `psa 8` once `a bgs` collapses). The second `emit` re-cleans
-                // into `lc`, leaving it holding the text the overlap pass + token scan use.
+                // The force-additive re-emit recovers components of a displaced additive
+                // phrase. The raw-token pass below also retains the lexical reading of every
+                // cleaned component, and the second `emit` leaves `lc` holding the text used
+                // by the overlap pass and token scan.
                 self.emit(text, lc, sc, Side::Title, true, &mut |name, _kind| {
                     pos.push(dict.get_or_synthetic(name));
                 });

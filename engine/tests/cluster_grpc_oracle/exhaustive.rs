@@ -46,9 +46,7 @@ fn spawn_pending(
 
 #[test]
 fn grpc_exhaustive_chunks_equal_the_exact_cluster_set() {
-    let queries: Vec<(u64, String)> = (1..=80)
-        .map(|id| (id, "topps chrome".to_string()))
-        .collect();
+    let queries: Vec<(u64, String)> = (1..=80).map(|id| (id, "acme chrome".to_string())).collect();
     let tags: Vec<Vec<(String, String)>> = queries
         .iter()
         .map(|(id, _)| {
@@ -92,13 +90,13 @@ fn grpc_exhaustive_chunks_equal_the_exact_cluster_set() {
         .expect("wire ingest");
     let program = cluster.compile_rank_program(&raw).expect("rank program");
     let expected = cluster
-        .percolate_with_broad("2020 topps chrome update", true)
+        .percolate_with_broad("2020 acme chrome update", true)
         .expect("compatibility result");
 
     let mut sink = RecordingSink::default();
     let result = cluster
         .try_percolate_filtered_all(
-            "2020 topps chrome update",
+            "2020 acme chrome update",
             &[],
             QueryScope::WithBroad,
             Some(&program),
@@ -143,9 +141,7 @@ fn grpc_exhaustive_chunks_equal_the_exact_cluster_set() {
 
 #[test]
 fn grpc_exhaustive_frame_cap_fails_loud_without_completion() {
-    let queries: Vec<(u64, String)> = (1..=40)
-        .map(|id| (id, "topps chrome".to_string()))
-        .collect();
+    let queries: Vec<(u64, String)> = (1..=40).map(|id| (id, "acme chrome".to_string())).collect();
     let norm = Arc::new(vocab());
     let dict = frozen_dict_over(&queries, &norm);
     let rt = tokio::runtime::Runtime::new().expect("runtime");
@@ -169,7 +165,7 @@ fn grpc_exhaustive_frame_cap_fails_loud_without_completion() {
     assert!(
         cluster
             .try_percolate_filtered_all(
-                "topps chrome",
+                "acme chrome",
                 &[],
                 QueryScope::Standard,
                 None,
@@ -185,7 +181,7 @@ fn grpc_exhaustive_frame_cap_fails_loud_without_completion() {
 
 #[test]
 fn grpc_compatibility_coordinator_cannot_attest_exhaustive_completion() {
-    let queries = vec![(1, "topps chrome".to_string())];
+    let queries = vec![(1, "acme chrome".to_string())];
     let norm = Arc::new(vocab());
     let dict = frozen_dict_over(&queries, &norm);
     let rt = tokio::runtime::Runtime::new().expect("runtime");
@@ -212,7 +208,7 @@ fn grpc_compatibility_coordinator_cannot_attest_exhaustive_completion() {
     let mut sink = RecordingSink::default();
     let error = cluster
         .try_percolate_filtered_all(
-            "topps chrome",
+            "acme chrome",
             &[],
             QueryScope::Standard,
             None,
@@ -230,9 +226,7 @@ fn grpc_compatibility_coordinator_cannot_attest_exhaustive_completion() {
 
 #[test]
 fn grpc_shard_set_rejects_a_second_coordinator_even_while_empty() {
-    let queries: Vec<(u64, String)> = (1..=24)
-        .map(|id| (id, "topps chrome".to_string()))
-        .collect();
+    let queries: Vec<(u64, String)> = (1..=24).map(|id| (id, "acme chrome".to_string())).collect();
     let norm = Arc::new(vocab());
     let dict = frozen_dict_over(&queries, &norm);
     let tag_dict = empty_tag_dict();
@@ -287,8 +281,8 @@ fn grpc_shard_set_rejects_a_second_coordinator_even_while_empty() {
 #[test]
 fn grpc_existing_exclusive_client_reclaims_a_restarted_durable_shard() {
     let queries = vec![
-        (1, "topps chrome".to_string()),
-        (2, "topps chrome update".to_string()),
+        (1, "acme chrome".to_string()),
+        (2, "acme chrome update".to_string()),
     ];
     let norm = Arc::new(vocab());
     let dict = frozen_dict_over(&queries, &norm);
@@ -347,7 +341,7 @@ fn grpc_existing_exclusive_client_reclaims_a_restarted_durable_shard() {
     let mut sink = RecordingSink::default();
     let delivered = cluster
         .try_percolate_filtered_all(
-            "topps chrome update",
+            "acme chrome update",
             &[],
             QueryScope::Standard,
             None,
@@ -372,7 +366,7 @@ fn grpc_existing_exclusive_client_reclaims_a_restarted_durable_shard() {
     }
     wait_until_listening(addr);
     let mut matches = cluster
-        .percolate("topps chrome update")
+        .percolate("acme chrome update")
         .expect("unary percolate after second shard restart");
     matches.sort_unstable();
     assert_eq!(matches, vec![1, 2]);

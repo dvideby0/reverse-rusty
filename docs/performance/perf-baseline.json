@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "runner": {
     "id": "github-hosted-ubuntu-24.04-x64-public-standard",
     "os": "linux",
@@ -25,82 +25,47 @@
     "timing_material_regression_basis_points": 3000,
     "timing_mad_multiplier": 3,
     "resource_material_regression_basis_points": 500,
-    "retry_timing_failures_once": true
+    "retry_timing_failures_once": true,
+    "timing_safety_limits": {
+      "latency_p50_max_ns": 7500,
+      "latency_p95_max_ns": 75000,
+      "latency_p99_max_ns": 100000,
+      "selective_titles_per_sec_min": 120000,
+      "columnar_titles_per_sec_min": 180000
+    }
   },
   "reference": {
-    "source_run_ids": [
-      "30177502753",
-      "30178825241",
-      "30180903052",
-      "30183304894",
-      "30183912729",
-      "30186149569"
-    ],
+    "source_run_ids": [],
     "structure": {
       "stored_queries": 1000000,
       "class_counts": [
-        995660,
-        2116,
+        995578,
+        2198,
         2224,
         0,
         0
       ],
-      "dict_features": 34309,
+      "dict_features": 34274,
       "main_max_posting": 88,
       "main_postings_over_1024": 0,
-      "unique_candidate_sum": 1073407,
+      "unique_candidate_sum": 1077983,
       "unique_candidate_p95": 95,
       "unique_candidate_p99": 111,
-      "unique_candidate_max": 143,
-      "match_sum": 6610573
+      "unique_candidate_max": 136,
+      "match_sum": 5234864
     },
     "resources": {
-      "resident_bytes": 5926332,
-      "durable_bytes": 237808740,
+      "resident_bytes": 6005244,
+      "durable_bytes": 244585986,
       "durable_files": 4
     },
     "timing": {
-      "latency_p50_ns": [
-        4919,
-        4970,
-        4518,
-        4839,
-        4548,
-        3474
-      ],
-      "latency_p95_ns": [
-        47038,
-        47429,
-        44484,
-        46066,
-        41698,
-        38324
-      ],
-      "latency_p99_ns": [
-        62888,
-        63559,
-        60733,
-        62407,
-        57839,
-        51185
-      ],
-      "selective_titles_per_sec": [
-        180495,
-        174998,
-        212196,
-        191573,
-        200573,
-        290143
-      ],
-      "columnar_titles_per_sec": [
-        294291,
-        301732,
-        317093,
-        296662,
-        303376,
-        401084
-      ]
+      "latency_p50_ns": [],
+      "latency_p95_ns": [],
+      "latency_p99_ns": [],
+      "selective_titles_per_sec": [],
+      "columnar_titles_per_sec": []
     }
   },
-  "rebaseline_reason": "Bootstrap ADR-124 from six successful post-semantic-fix GitHub Actions runs; timing samples are their reviewed benchmark artifacts, while seed-fixed structure/resource values come from the same pinned workload and current on-disk format."
+  "rebaseline_reason": "Domain-neutral fixture migration: deterministic structure and resource values were recalculated from the pinned workload. Absolute timing safety limits remain merge-blocking while five fresh reviewed CI reports are collected; rebaseline will add the more sensitive variance band without removing those limits."
 }

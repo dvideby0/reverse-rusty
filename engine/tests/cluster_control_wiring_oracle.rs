@@ -27,15 +27,15 @@ const VNODES: u32 = 128;
 const GENESIS_FP: u64 = 0xC0DE_F00D;
 
 fn vocab() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 fn small_corpus() -> Vec<(u64, String)> {
     vec![
-        (1, "1990 topps chrome".to_string()),
-        (2, "1986 fleer".to_string()),
-        (3, "psa 10".to_string()),
-        (4, "1994 upper deck rookie".to_string()),
+        (1, "1990 acme chrome".to_string()),
+        (2, "1986 vertex".to_string()),
+        (3, "pro".to_string()),
+        (4, "1994 north star new".to_string()),
     ]
 }
 
@@ -173,9 +173,9 @@ fn remote_control_plane_round_trips_and_drives_coordinator() {
         .with_control_plane(Box::new(rcp));
 
     let titles = [
-        "1990 topps chrome psa 10",
-        "1986 fleer",
-        "1994 upper deck rookie psa 10",
+        "1990 acme chrome pro",
+        "1986 vertex",
+        "1994 north star new pro",
     ];
     let before: Vec<Vec<u64>> = titles
         .iter()

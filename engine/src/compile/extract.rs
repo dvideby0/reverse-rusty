@@ -89,8 +89,8 @@ fn flush_positive_run_readonly(
 }
 
 /// Preserve one negated bare term as one complete predicate. A query-side term
-/// can analyze to several features (for example `psa10` under a grader vocab);
-/// the DSL negates that whole analyzed term, not each feature independently.
+/// can analyze to several features under a caller-defined vocabulary; the DSL
+/// negates that whole analyzed term, not each feature independently.
 /// Single-feature terms retain the flat forbidden fast path.
 fn push_forbidden_term(
     mut features: Vec<FeatureId>,
@@ -118,7 +118,7 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
     let mut forbidden_phrases = Vec::new();
 
     // Consecutive positive bare words are normalized JOINTLY (in original order)
-    // so multiword entities ("michael jordan", "psa 10") are recognized exactly
+    // so multiword entities ("wireless mouse", "pro") are recognized exactly
     // as they are in titles. Without this the query and title feature spaces
     // would disagree and we'd get false negatives.
     let mut pos_words: Vec<&str> = Vec::new();

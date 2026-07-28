@@ -438,7 +438,7 @@ fn grpc_reassign_and_move_aborts_clean_and_does_not_commit() {
 /// assignment (no servers needed — the guard fires before any move).
 #[test]
 fn grpc_reassign_and_move_rejects_replicated_position() {
-    let queries = vec![(1u64, "1994 upper deck rareplayer0".to_string())];
+    let queries = vec![(1u64, "1994 north star rareentity0".to_string())];
     let cfg = ClusterConfig {
         num_shards: 1,
         replication_factor: 2,

@@ -8,7 +8,7 @@ use super::*;
 fn list_shards_reports_slots_fence_and_counts() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["psa 10", "1994 upper deck"], &n);
+    let d = frozen_dict(&["pro", "1994 north star"], &n);
     let fp = d.fingerprint();
     let tag_fp = {
         let mut td = TagDict::new();
@@ -16,7 +16,7 @@ fn list_shards_reports_slots_fence_and_counts() {
         td.fingerprint()
     };
     let srv = ShardServer::new(Arc::clone(&n), Arc::new(d), EngineConfig::default());
-    rt.block_on(srv.insert_extracted(insert_req_single(10, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req_single(10, "pro")))
         .expect("write slot 0");
     rt.block_on(srv.fence(Request::new(proto::FenceRequest {
         generation: 7,
@@ -53,7 +53,7 @@ fn list_shards_reports_slots_fence_and_counts() {
 fn drop_shard_guards_refuse_unarmed_mismatched_and_divergent() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["psa 10"], &n);
+    let d = frozen_dict(&["pro"], &n);
     let fp = d.fingerprint();
     let tag_fp = {
         let mut td = TagDict::new();
@@ -110,7 +110,7 @@ fn drop_shard_guards_refuse_unarmed_mismatched_and_divergent() {
 fn drop_shard_refuses_held_retention_lease_then_drops_after_release() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["psa 10"], &n);
+    let d = frozen_dict(&["pro"], &n);
     let fp = d.fingerprint();
     let tag_fp = {
         let mut td = TagDict::new();
@@ -177,7 +177,7 @@ fn drop_shard_refuses_held_retention_lease_then_drops_after_release() {
 fn drop_shard_removes_slot_and_dir_and_is_idempotent() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["psa 10"], &n);
+    let d = frozen_dict(&["pro"], &n);
     let fp = d.fingerprint();
     let tag_fp = empty_tag_fp();
     let dir = std::env::temp_dir().join(format!("rr_gc_drop_{}", std::process::id()));
@@ -189,7 +189,7 @@ fn drop_shard_removes_slot_and_dir_and_is_idempotent() {
         dir.clone(),
     )
     .expect("durable server");
-    rt.block_on(srv.insert_extracted(insert_req_single(10, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req_single(10, "pro")))
         .expect("write slot 0");
     rt.block_on(srv.flush(Request::new(proto::FlushRequest {
         shard_id: 0,
@@ -278,7 +278,7 @@ fn open_durable_sweeps_dropped_trash_and_ignores_it() {
 fn unfence_refuses_to_clear_the_drop_tombstone() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["psa 10"], &n);
+    let d = frozen_dict(&["pro"], &n);
     let fp = d.fingerprint();
     let tag_fp = {
         let mut td = TagDict::new();

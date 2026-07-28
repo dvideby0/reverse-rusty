@@ -413,18 +413,18 @@ mod tests {
     }
 
     #[test]
-    fn forbidden_term_negates_its_complete_analyzed_predicate() {
-        let vocab = RefVocab::default_vocab().grader("psa");
-        let ast = parse("card -psa10").expect("valid query");
+    fn forbidden_term_negates_its_analyzed_feature() {
+        let vocab = RefVocab::default_vocab();
+        let ast = parse("widget -broken").expect("valid query");
         let query = analyze_literal(&ast, &vocab);
 
         assert!(
-            query.matches(&RefTitle::analyze(&vocab, "card psa")),
-            "one feature from a multi-feature forbidden term is not the whole predicate"
+            query.matches(&RefTitle::analyze(&vocab, "widget refurbished")),
+            "an unrelated feature must remain allowed"
         );
         assert!(
-            !query.matches(&RefTitle::analyze(&vocab, "card psa 10")),
-            "the complete analyzed forbidden term must reject"
+            !query.matches(&RefTitle::analyze(&vocab, "widget broken")),
+            "the analyzed forbidden feature must reject"
         );
     }
 }

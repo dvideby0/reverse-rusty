@@ -5,11 +5,11 @@ fn single_token_variant_pair_is_variant_kind() {
     let dict = Dict::new();
     // Plurals / truncations share a >=3 char prefix → variant.
     assert_eq!(
-        classify_kind(&forms(&["refractor", "refractors"]), &norm(), &dict),
+        classify_kind(&forms(&["premium", "premiums"]), &norm(), &dict),
         AliasKind::SingleTokenVariant
     );
     assert_eq!(
-        classify_kind(&forms(&["autograph", "autographed"]), &norm(), &dict),
+        classify_kind(&forms(&["adapter", "adapters"]), &norm(), &dict),
         AliasKind::SingleTokenVariant
     );
 }
@@ -17,14 +17,14 @@ fn single_token_variant_pair_is_variant_kind() {
 #[test]
 fn distinct_single_tokens_are_not_variants() {
     let dict = Dict::new();
-    // Graders: no shared prefix → distinct (the category-alternatives case).
+    // Unrelated categories share no prefix and remain distinct.
     assert_eq!(
-        classify_kind(&forms(&["psa", "bgs", "sgc"]), &norm(), &dict),
+        classify_kind(&forms(&["red", "blue", "green"]), &norm(), &dict),
         AliasKind::SingleTokenDistinct
     );
     // A 2-form distinct pair is still "distinct", not a variant.
     assert_eq!(
-        classify_kind(&forms(&["psa", "bgs"]), &norm(), &dict),
+        classify_kind(&forms(&["red", "blue"]), &norm(), &dict),
         AliasKind::SingleTokenDistinct
     );
 }
@@ -33,33 +33,34 @@ fn distinct_single_tokens_are_not_variants() {
 fn multi_token_form_is_multiword_kind() {
     let dict = Dict::new();
     assert_eq!(
-        classify_kind(&forms(&["ud", "upper deck"]), &norm(), &dict),
+        classify_kind(&forms(&["cordless", "wireless mouse"]), &norm(), &dict),
         AliasKind::MultiWord
     );
 }
 
 #[test]
 fn phrase_backed_multiword_form_stays_multiword() {
-    // Even when the vocab has a phrase rule that folds "upper deck" into ONE feature, the raw
+    // Even when the vocab has a phrase rule that folds "wireless mouse" into ONE feature, the raw
     // surface form is still multi-word and must classify as MultiWord (a learned candidate) — the
     // classifier boundary can't depend on which phrases happen to exist (Codex review, ADR-060).
     use crate::normalize::NormalizerBuilder;
     let mut b = NormalizerBuilder::new();
     b.add_phrase(
-        &["upper", "deck"],
-        "term:upper_deck",
+        &["wireless", "mouse"],
+        "entity:wireless_mouse",
         crate::dict::FeatureKind::Generic,
     );
     let n = b.build().expect("normalizer");
     let mut dict = Dict::new();
     let mut lc = String::new();
-    // Sanity: the phrase really does fold "upper deck" to a single feature.
+    // Sanity: the phrase really does fold the form to a single feature.
     assert_eq!(
-        n.compile_features("upper deck", &mut dict, &mut lc).len(),
+        n.compile_features("wireless mouse", &mut dict, &mut lc)
+            .len(),
         1
     );
     assert_eq!(
-        classify_kind(&forms(&["ud", "upper deck"]), &n, &dict),
+        classify_kind(&forms(&["cordless", "wireless mouse"]), &n, &dict),
         AliasKind::MultiWord
     );
 }
@@ -70,17 +71,17 @@ fn mixed_known_kinds_are_mixedkind() {
     let mut dict = Dict::new();
     let n = norm();
     let mut lc = String::new();
-    // compile_features interns; force a Brand and a Player kind via the dict directly.
-    let brand = dict.intern("term:topps", crate::dict::FeatureKind::Brand);
-    let player = dict.intern("term:jordan", crate::dict::FeatureKind::Player);
-    assert_ne!(brand, player);
+    // Force a Brand and an Entity kind via the dict directly.
+    let brand = dict.intern("term:acme", crate::dict::FeatureKind::Brand);
+    let entity = dict.intern("term:widget", crate::dict::FeatureKind::Entity);
+    assert_ne!(brand, entity);
     // The forms must normalize to exactly those interned features.
-    let tb = n.compile_features_readonly("topps", &dict, &mut lc);
-    let tj = n.compile_features_readonly("jordan", &dict, &mut lc);
+    let tb = n.compile_features_readonly("acme", &dict, &mut lc);
+    let tj = n.compile_features_readonly("widget", &dict, &mut lc);
     assert_eq!(tb, vec![brand]);
-    assert_eq!(tj, vec![player]);
+    assert_eq!(tj, vec![entity]);
     assert_eq!(
-        classify_kind(&forms(&["topps", "jordan"]), &n, &dict),
+        classify_kind(&forms(&["acme", "widget"]), &n, &dict),
         AliasKind::MixedKind
     );
 }
@@ -88,29 +89,29 @@ fn mixed_known_kinds_are_mixedkind() {
 #[test]
 fn cross_kind_multiword_is_mixedkind_not_multiword() {
     // ADR-061 (codex review): a multi-word group whose forms resolve to DIFFERENT known kinds (a
-    // Brand phrase ≡ a Player phrase) must classify as MixedKind — a review candidate — NOT
+    // Brand phrase equivalent to an Entity phrase must classify as MixedKind — a review candidate — NOT
     // auto-activate as MultiWord. The mixed-kind check runs before the multi-word classification,
     // and resolves the kinds of multi-word forms too.
     use crate::normalize::NormalizerBuilder;
     let mut b = NormalizerBuilder::new();
     b.add_phrase(
-        &["upper", "deck"],
-        "brand:upper_deck",
+        &["acme", "labs"],
+        "brand:acme_labs",
         crate::dict::FeatureKind::Brand,
     );
     b.add_phrase(
-        &["michael", "jordan"],
-        "player:mj",
-        crate::dict::FeatureKind::Player,
+        &["wireless", "mouse"],
+        "entity:wireless_mouse",
+        crate::dict::FeatureKind::Entity,
     );
     let n = b.build().expect("normalizer");
     // Intern each phrase entity with its kind so the forms resolve to KNOWN (non-Generic) kinds.
     let mut dict = Dict::new();
     let mut lc = String::new();
-    let _ = n.compile_features("upper deck", &mut dict, &mut lc);
-    let _ = n.compile_features("michael jordan", &mut dict, &mut lc);
+    let _ = n.compile_features("acme labs", &mut dict, &mut lc);
+    let _ = n.compile_features("wireless mouse", &mut dict, &mut lc);
     assert_eq!(
-        classify_kind(&forms(&["upper deck", "michael jordan"]), &n, &dict),
+        classify_kind(&forms(&["acme labs", "wireless mouse"]), &n, &dict),
         AliasKind::MixedKind,
         "a cross-kind multi-word group must not bypass the MixedKind refusal"
     );
@@ -122,8 +123,6 @@ fn unexpressible_single_token_forms_are_candidates_not_active() {
     // cannot be registered as an alias phrase, and `resolve_equivalences` would drop it — so it
     // must classify as MixedKind (a review candidate), never auto-activate a group that would be
     // reported active yet silently never match.
-    use crate::normalize::NormalizerBuilder;
-
     // (a) Zero-feature form: an all-punctuation surface cleans to nothing.
     let n = norm();
     let dict = Dict::new();
@@ -131,16 +130,6 @@ fn unexpressible_single_token_forms_are_candidates_not_active() {
         classify_kind(&forms(&["foo", "@@@"]), &n, &dict),
         AliasKind::MixedKind,
         "a zero-feature single-token form must stay a candidate"
-    );
-
-    // (b) Fused grader: `psa10` resolves to grader:psa + grade:10 (one cleaned token, two
-    //     features) — the case codex flagged.
-    let g = NormalizerBuilder::new().grader("psa").build().unwrap();
-    let gdict = Dict::new();
-    assert_eq!(
-        classify_kind(&forms(&["psa10", "card"]), &g, &gdict),
-        AliasKind::MixedKind,
-        "a fused-grader single-token form must stay a candidate"
     );
 }
 
@@ -210,7 +199,7 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
     // Seed a candidate via discovery, reject it, re-discover: stays rejected.
     assert_eq!(
         reg.add_classified(
-            &forms(&["refractor", "refractors"]),
+            &forms(&["premium", "premiums"]),
             AliasProvenance::LearnedDistributional,
             0.7,
             &n,
@@ -219,10 +208,10 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
         Some(AliasStatus::Candidate),
         "even a variant-looking pair lands Candidate from discovery"
     );
-    assert!(reg.reject(&forms(&["refractor", "refractors"])));
+    assert!(reg.reject(&forms(&["premium", "premiums"])));
     assert_eq!(
         reg.add_classified(
-            &forms(&["refractor", "refractors"]),
+            &forms(&["premium", "premiums"]),
             AliasProvenance::LearnedDistributional,
             0.9,
             &n,
@@ -235,7 +224,7 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
     // A re-discovered candidate refreshes confidence upward, never status.
     assert_eq!(
         reg.add_classified(
-            &forms(&["ud", "upperdeck"]),
+            &forms(&["north", "northstar"]),
             AliasProvenance::LearnedDistributional,
             0.6,
             &n,
@@ -245,7 +234,7 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
     );
     assert_eq!(
         reg.add_classified(
-            &forms(&["ud", "upperdeck"]),
+            &forms(&["north", "northstar"]),
             AliasProvenance::LearnedDistributional,
             0.8,
             &n,
@@ -257,7 +246,7 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
     let e = reg
         .entries()
         .iter()
-        .find(|e| e.forms == forms(&["ud", "upperdeck"]))
+        .find(|e| e.forms == forms(&["north", "northstar"]))
         .expect("entry recorded");
     assert!(
         (e.confidence - 0.8).abs() < 1e-12,
@@ -270,7 +259,7 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
     // distributional seed must not block the existing reconciliation ladder.
     assert_eq!(
         reg.add_classified(
-            &forms(&["ud", "upperdeck"]),
+            &forms(&["north", "northstar"]),
             AliasProvenance::DeclaredFile,
             1.0,
             &n,

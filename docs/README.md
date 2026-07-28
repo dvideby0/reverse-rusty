@@ -47,7 +47,7 @@ Four levels, each giving *just enough* to decide whether to go deeper:
 - [`design/README.md`](design/README.md) — mental model (the two-phase diagram) + the correctness
   contract + how the design answers the spec. **Start here to understand the system.**
 - [`design/normalization.md`](design/normalization.md) — DSL internals, the shared normalizer, the
-  feature dictionary, eBay-data hardening.
+  feature dictionary, and marketplace title-shape hardening.
 - [`design/matching.md`](design/matching.md) — signature-cover optimizer, candidate index, integer
   exact matcher, broad-query cost classes, explain.
 - [`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) — LSM write path, segments,
@@ -120,8 +120,8 @@ Four levels, each giving *just enough* to decide whether to go deeper:
   feature hashing; → ADR-046).
 - [`research/corpus-feature-learning.md`](research/corpus-feature-learning.md) — learning the feature
   extractor from the query corpus (NPMI).
-- [`research/real-data-findings.md`](research/real-data-findings.md) — testing the normalizer against
-  real eBay titles.
+- [`research/real-data-findings.md`](research/real-data-findings.md) — marketplace title shapes and
+  the generic ingestion boundary.
 - [`research/multiword-synonyms.md`](research/multiword-synonyms.md) — design learnings from an
   abandoned multi-word-alias attempt (the token-graph vs flat-feature-set / forbidden-feature wall).
 

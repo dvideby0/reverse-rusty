@@ -25,11 +25,10 @@
   running a candidate-only collector through the real stored posting/filter/lane traversal;
   candidate generation is compared for **recall only**, since extra candidates are legal.
 
-  The first review of that model immediately exposed a production divergence: a negated bare term
-  that analyzes to several features (for example `-psa10`) was flattened into independent
-  exclusions, rejecting a title that contained only one feature. Production now stores it as one
-  complete forbidden conjunction, the human differential pins partial and complete cases, and
-  compiler semantics **4** source-rebuilds semantics 0–3 before serving.
+  The first review of that model immediately exposed a production divergence: a negated analyzed
+  clause with several requirements was flattened into independent exclusions, rejecting a title
+  that contained only one requirement. Production now stores it as one complete forbidden
+  conjunction and the human differential pins partial and complete cases.
 
 - **Context:** This is **Phase 0, item 2** of the reality/adversarial audit — the
   highest-value net-new item, prioritized above every product-roadmap tier. Reverse Rusty's cardinal
@@ -54,8 +53,8 @@
      ADR-054/058/060/061/068/069 + the spec-authored golden tests) — **not** copied from
      `normalize/core.rs` / `compile/extract.rs`: the DSL parser (AND clauses, any-of groups, phrases,
      adjacent-`-` negation, the byte/clause/any-of limits), the two-phase normalizer (byte clean +
-     diacritic fold + the `PunctClass` table; the grader/grade/number/synonym/generic token pipeline
-     with the single-pending grader/grade-context aging windows; the ADR-061 two title views
+     diacritic fold + the `PunctClass` table; the phrase/year/synonym/generic token pipeline and
+     caller-defined numeric context; the ADR-061 two title views
      `N(T)` / `P(T)` with the force-additive parse-union, the raw-`term:` union, and the overlap
      scan), and a **plain semantic clause tree** from the user-facing grammar. Positive bare terms
      are analyzed only within maximal uninterrupted runs (ADR-118); any-of members remain complete
@@ -65,8 +64,9 @@
      frequency counter, retrieval proxy, signature, cost class, exact-store column, or singleton
      lowering from the production compiler.
   2. **It reuses none of the engine — provably.** No `reverse-rusty`, no `daachorse`, no `serde`. The
-     reference compares matches by **canonical feature string** (`year:1994`, `term:psa`,
-     `grade:10`, `grader_grade:psa10`), never the engine's interned `FeatureId` — which is what frees
+     reference compares matches by **canonical feature string** (`year:2024`,
+     `brand:north_star`, `entity:wireless_mouse`, `term:pro`), never the engine's interned
+     `FeatureId` — which is what frees
      it from the dictionary entirely (synthetic hashing included). Phrase matching is a **naive linear
      scan**, not an Aho-Corasick automaton: a test oracle optimizes for correctness + independence, and
      a structurally different second implementation is *more* likely to expose an integration bug than
@@ -80,7 +80,7 @@
   4. **Full front-end coverage, proven differentially.** The suite asserts **zero false negatives,
      zero false positives, and zero candidate-cover false negatives** over: the generated corpus
      under the empty default vocab (clean + the
-     adversarial messy/surface-noise pass); a populated grader+phrase+synonym vocab; the ADR-061
+     adversarial messy/surface-noise pass); a populated alias+phrase+synonym vocab; the ADR-061
      multi-word alias two-view path (a controlled mix exercising bidirectional aliases, nested/overlap
      entities, the forbidden-canonical-`N(T)` view, component tokens, any-of, and whitespace runs, plus
      a randomized at-scale alias corpus); a hand-written **gotcha table** asserted against BOTH sides
@@ -94,15 +94,13 @@
      is the spec + golden tests, not "trust the engine": spec mandates the reference's answer ⇒ an
      **engine bug** (the high-value catch); spec mandates the engine's ⇒ a reference bug; spec silent
      ⇒ a spec gap (decide intent, add a golden test + gotcha). The finite tables that must match
-     exactly (the diacritic fold map, the punct classes, the year `1900..=2099` and grade `1.0..=10.0`
-     ranges, the `>3`/`>2` aging windows) are called out in code so a reviewer diffs them against the
-     spec.
+     exactly (the diacritic fold map, punctuation classes, and year `1900..=2099` range) are called
+     out in code so a reviewer diffs them against the spec.
 
 - **Findings & non-obvious facts (recorded so they aren't re-discovered):**
-  - `Normalizer::default_vocab()` has **empty** graders/grade-words (only `number_context = ["pop"]`).
-    So under the default vocab the in-tree oracle runs, `psa10` does NOT fuse — it is a single generic
-    `term:psa10`, and `psa 10` is `term:psa` + `term:10`. Grader fusion + aging fire only under a
-    populated grader vocab. This shaped the default-vocab phase.
+  - `Normalizer::default_vocab()` has no phrases, synonyms, equivalences, aliases, or numeric-context
+    words. The default-vocabulary phase therefore exercises only generic terms, year recognition,
+    and shared byte normalization; a separate populated phase covers caller-supplied semantics.
   - **The reference has no candidate plan.** Earlier versions selected their own rarest feature for
     every any-of member, which was independent code but the same execution idea as production. That
     could make both implementations agree on an incorrect proxy interpretation. The semantic model
@@ -137,8 +135,9 @@
   2026-07-25 hardening replaces a reference-only execution-plan model with a smaller grammar tree.
   Its candidate observer is a diagnostic collector over the existing monomorphized traversal; every
   production collector keeps a no-op callback that optimizes away. The one production semantic
-  correction reuses the existing integer-only forbidden-conjunction program, and compiler semantics
-  4 forces source-driven standalone/cluster migration before an older row can be served. This closes
+  correction reuses the existing integer-only forbidden-conjunction program. Compiler semantics 5
+  is the current generic feature model; prototype state produced by earlier semantics is rebuilt
+  from source rather than upgraded. This closes
   both the shared-front-end blind spot and the “same lowering in different code” blind spot for the
   covered grammar, while retaining the ground truth used by Phase 0 item 3 (real-process crash
   injection).

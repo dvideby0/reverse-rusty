@@ -34,14 +34,14 @@ fn main() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x00C0_FFEE,
-        num_players: (num_queries / 40).max(2_000),
-        num_sets: (num_queries / 100).max(1_000),
+        num_entities: (num_queries / 40).max(2_000),
+        num_collections: (num_queries / 100).max(1_000),
     };
 
     eprintln!("[gen] queries={num_queries}");
     let data = generate(&cfg);
 
-    let norm = Normalizer::default_vocab().expect("built-in vocab");
+    let norm = Normalizer::default_vocab().expect("default vocabulary");
     let mut eng = Engine::new(norm);
     let tb = Instant::now();
     eng.build_from_queries(&data.queries);
@@ -76,7 +76,11 @@ fn main() {
     let t = Instant::now();
     for i in 0..iters {
         let logical = 10_000_000 + i as u64;
-        eng.insert_live("1994 upper deck michael jordan sp psa 10 -auto", logical, 1);
+        eng.insert_live(
+            "1994 north star wireless mouse limited pro -damaged",
+            logical,
+            1,
+        );
         std::hint::black_box(eng.snapshot());
     }
     let per_put = t.elapsed().as_secs_f64() / iters as f64;
@@ -110,7 +114,7 @@ fn main() {
                 let logical = 20_000_000 + (b * bulk_n + j) as u64;
                 (
                     logical,
-                    "1994 upper deck michael jordan sp psa 10".to_string(),
+                    "1994 north star wireless mouse limited pro".to_string(),
                 )
             })
             .collect();

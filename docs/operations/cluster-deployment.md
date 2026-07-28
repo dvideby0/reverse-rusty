@@ -121,12 +121,13 @@ Load data after the cluster is green — there is no baked corpus (unlike the te
 
 ```sh
 curl -fsS -XPUT http://127.0.0.1:9200/_doc/1 -H "authorization: Bearer $RR_AUTH_TOKEN" \
-  -H 'content-type: application/json' -d '{"query":"1990 topps griffey"}'
+  -H 'content-type: application/json' -d '{"query":"2024 acme labs mechanical keyboard"}'
 # bulk: POST /_bulk (newline-delimited) — see docs/reference/api.md
 ```
 
-**Negation-only (class-D) queries.** To accept queries that are purely exclusions (e.g. `-reprint` —
-"match any title *without* reprint"), add `--accept-class-d` to the **coordinator** command (the
+**Negation-only (class-D) queries.** To accept queries that are purely exclusions (e.g.
+`-refurbished` — "match any title *without* refurbished"), add `--accept-class-d` to the
+**coordinator** command (the
 `server …` service). The coordinator is the sole gate: a remote shard is coordinator-gated storage and
 accepts whatever the coordinator places, so there is no per-shard flag to set. Like every broad-lane
 query, an always-candidate is returned only when the request includes the broad lane (`include_broad`).

@@ -38,10 +38,9 @@ fn spawn_pending(
 type Corpus = (Vec<(u64, String)>, Vec<Vec<(String, String)>>);
 
 fn corpus() -> Corpus {
-    let mut queries: Vec<(u64, String)> = (1..=60)
-        .map(|id| (id, "topps chrome".to_string()))
-        .collect();
-    queries.push((61, "bowman draft".to_string()));
+    let mut queries: Vec<(u64, String)> =
+        (1..=60).map(|id| (id, "acme chrome".to_string())).collect();
+    queries.push((61, "summit prototype".to_string()));
     queries.push((62, "zzabsent zzterm".to_string()));
     let tags: Vec<Vec<(String, String)>> = queries
         .iter()
@@ -107,10 +106,10 @@ fn grpc_batch_top_k_matches_single_rpcs_and_reference() {
     let cluster_program = cluster.compile_rank_program(&raw).expect("rank program");
 
     let titles: Vec<String> = vec![
-        "2020 topps chrome update".to_string(),
-        "bowman draft chrome".to_string(),
+        "2020 acme chrome update".to_string(),
+        "summit prototype chrome".to_string(),
         "no match at all".to_string(),
-        "1998 topps chrome refractor".to_string(),
+        "1998 acme chrome premium".to_string(),
     ];
     for scope in [QueryScope::Standard, QueryScope::WithBroad] {
         for &size in &[0usize, 1, 7, 25] {
@@ -184,7 +183,7 @@ fn grpc_batch_top_k_matches_single_rpcs_and_reference() {
 #[test]
 fn grpc_batch_caps_reject_oversize_frames() {
     let queries: Vec<(u64, String)> = (1..=300)
-        .map(|id| (id, "topps chrome".to_string()))
+        .map(|id| (id, "acme chrome".to_string()))
         .collect();
     let norm = Arc::new(vocab());
     let dict = frozen_dict_over(&queries, &norm);
@@ -207,7 +206,7 @@ fn grpc_batch_caps_reject_oversize_frames() {
     let cluster_program = cluster
         .compile_rank_program(&RankProgramSpec::default())
         .expect("program");
-    let titles = vec!["2020 topps chrome update".to_string(); 3];
+    let titles = vec!["2020 acme chrome update".to_string(); 3];
     let err = cluster
         .try_percolate_filtered_top_k_batch(
             &titles,
@@ -230,7 +229,7 @@ fn grpc_batch_caps_reject_oversize_frames() {
 
 #[test]
 fn grpc_batch_expired_deadline_fails_the_whole_batch() {
-    let queries: Vec<(u64, String)> = vec![(1, "topps chrome".to_string())];
+    let queries: Vec<(u64, String)> = vec![(1, "acme chrome".to_string())];
     let norm = Arc::new(vocab());
     let dict = frozen_dict_over(&queries, &norm);
     let rt = tokio::runtime::Runtime::new().expect("runtime");
@@ -262,7 +261,7 @@ fn grpc_batch_expired_deadline_fails_the_whole_batch() {
         .expect("clock past epoch");
     let err = cluster
         .try_percolate_filtered_top_k_batch(
-            &["2020 topps chrome update".to_string()],
+            &["2020 acme chrome update".to_string()],
             &[],
             TopKOptions::default(),
             &cluster_program,
@@ -279,9 +278,9 @@ fn grpc_batch_expired_deadline_fails_the_whole_batch() {
 #[test]
 fn grpc_batch_fetch_chunks_oversized_owner_groups() {
     let mut queries: Vec<(u64, String)> = (1..=6_500u64)
-        .map(|id| (id, "topps chrome".to_string()))
+        .map(|id| (id, "acme chrome".to_string()))
         .collect();
-    queries.extend((6_501..=13_000u64).map(|id| (id, "bowman draft".to_string())));
+    queries.extend((6_501..=13_000u64).map(|id| (id, "summit prototype".to_string())));
     let norm = Arc::new(vocab());
     let dict = frozen_dict_over(&queries, &norm);
     let rt = tokio::runtime::Runtime::new().expect("runtime");
@@ -309,8 +308,8 @@ fn grpc_batch_fetch_chunks_oversized_owner_groups() {
         .compile_rank_program(&RankProgramSpec::default())
         .expect("program");
     let titles = vec![
-        "2020 topps chrome update".to_string(),
-        "bowman draft chrome".to_string(),
+        "2020 acme chrome update".to_string(),
+        "summit prototype chrome".to_string(),
     ];
     let batch = cluster
         .try_percolate_filtered_top_k_batch(

@@ -14,23 +14,19 @@ fn s(items: &[&str]) -> Vec<String> {
     items.iter().map(ToString::to_string).collect()
 }
 
-/// The spec's worked-example vocabulary, plus the preview/previews synonyms the
-/// §1 example relies on to collapse `(preview,previews)` into one feature.
-fn spec_vocab() -> Normalizer {
+/// A domain-neutral sample vocabulary with equivalent singular/plural synonyms.
+fn sample_vocab() -> Normalizer {
     NormalizerBuilder::new()
-        .phrase(&["upper", "deck"], "brand:upper_deck", FeatureKind::Brand)
+        .phrase(&["acme", "labs"], "brand:acme_labs", FeatureKind::Brand)
         .phrase(
-            &["michael", "jordan"],
-            "player:michael_jordan",
-            FeatureKind::Player,
+            &["wireless", "mouse"],
+            "entity:wireless_mouse",
+            FeatureKind::Entity,
         )
-        .synonym("ud", "brand:upper_deck", FeatureKind::Brand)
-        .synonym("sp", "card_term:sp", FeatureKind::Category)
-        .synonym("preview", "card_term:preview", FeatureKind::Category)
-        .synonym("previews", "card_term:preview", FeatureKind::Category)
-        .grader("psa")
-        .grader("bgs")
-        .grader("sgc")
+        .synonym("acme", "brand:acme_labs", FeatureKind::Brand)
+        .synonym("refurb", "category:refurbished", FeatureKind::Category)
+        .synonym("preview", "category:preview", FeatureKind::Category)
+        .synonym("previews", "category:preview", FeatureKind::Category)
         .build()
         .expect("spec vocab automaton")
 }
@@ -91,37 +87,14 @@ fn required_from_positive_terms() {
 #[test]
 fn joint_multiword_normalization_aligns_query_and_title() {
     // The "feature spaces align" proof (compile.rs joins consecutive positive bare
-    // words and normalizes them as ONE stream): "michael jordan" compiles to the
+    // words and normalizes them as ONE stream): "wireless mouse" compiles to the
     // same single feature a title produces, and a trailing synonym resolves in the
     // same pass.
-    let n = spec_vocab();
-    let (req, _, _) = named(&n, "michael jordan");
-    assert_eq!(req, s(&["player:michael_jordan"]));
-    let (req, _, _) = named(&n, "michael jordan sp");
-    assert_eq!(req, s(&["card_term:sp", "player:michael_jordan"]));
-}
-
-#[test]
-fn positioned_semantic_predicate_fails_open_on_incomplete_positive_graph() {
-    let mut builder = Normalizer::builder();
-    builder.add_grader("psa");
-    builder.add_phrase_alias(
-        &["unused", "alias"],
-        "term:unused_alias",
-        FeatureKind::Generic,
-    );
-    let norm = builder.build().expect("normalizer");
-    let mut dict = Dict::new();
-    let mut lc = String::new();
-    let ast = parse("\"red shoe\"").expect("parse phrase");
-    let ex = extract(&ast, &norm, &mut dict, &mut lc);
-
-    let graders = std::iter::repeat_n("psa", 65).collect::<Vec<_>>().join(" ");
-    let title = format!("red {graders} boot");
-    assert!(
-        semantic_match(&norm, &dict, &ex, &title),
-        "the shared oracle predicate must mirror production's positive fail-open"
-    );
+    let n = sample_vocab();
+    let (req, _, _) = named(&n, "wireless mouse");
+    assert_eq!(req, s(&["entity:wireless_mouse"]));
+    let (req, _, _) = named(&n, "wireless mouse refurb");
+    assert_eq!(req, s(&["category:refurbished", "entity:wireless_mouse"]));
 }
 
 #[test]
@@ -220,24 +193,6 @@ fn multi_token_anyof_members_remain_whole_predicates() {
 }
 
 #[test]
-fn multi_feature_negated_term_remains_one_complete_predicate() {
-    let norm = spec_vocab();
-    let mut dict = Dict::new();
-    let mut lc = String::new();
-    let negative = extract(&parse("card -psa10").unwrap(), &norm, &mut dict, &mut lc);
-
-    assert!(
-        negative.forbidden.is_empty(),
-        "a multi-feature term must not be flattened into independent exclusions"
-    );
-    assert_eq!(negative.forbidden_conjunctions.len(), 1);
-    assert!(semantic_match(&norm, &dict, &negative, "card psa"));
-    assert!(semantic_match(&norm, &dict, &negative, "card psa 9"));
-    assert!(!semantic_match(&norm, &dict, &negative, "card psa10"));
-    assert!(!semantic_match(&norm, &dict, &negative, "card psa 10"));
-}
-
-#[test]
 fn distinct_members_survive_a_shared_retrieval_proxy() {
     let norm = Normalizer::default_vocab().unwrap();
     let mut dict = Dict::new();
@@ -267,18 +222,18 @@ fn distinct_members_survive_a_shared_retrieval_proxy() {
 #[test]
 fn anyof_dedups_repeated_members() {
     let n = Normalizer::default_vocab().unwrap();
-    let (_, _, anyof) = named(&n, "(rookie,rc,rc)");
-    assert_eq!(anyof, vec![s(&["term:rc", "term:rookie"])]);
+    let (_, _, anyof) = named(&n, "(refurb,used,used)");
+    assert_eq!(anyof, vec![s(&["term:refurb", "term:used"])]);
 }
 
 #[test]
 fn singleton_anyof_is_promoted_to_required() {
-    // (upper deck, UD) both normalize to brand:upper_deck, so the group collapses to
+    // (acme labs, acme) both normalize to brand:acme_labs, so the group collapses to
     // a singleton; extract promotes that into `required` (strictly more selective).
     // normalization.md §1 ("several OR groups become singletons").
-    let n = spec_vocab();
-    let (req, forb, anyof) = named(&n, "(upper deck,ud) jordan");
-    assert_eq!(req, s(&["brand:upper_deck", "term:jordan"]));
+    let n = sample_vocab();
+    let (req, forb, anyof) = named(&n, "(acme labs,acme) mouse");
+    assert_eq!(req, s(&["brand:acme_labs", "term:mouse"]));
     assert!(forb.is_empty());
     assert!(
         anyof.is_empty(),
@@ -287,76 +242,41 @@ fn singleton_anyof_is_promoted_to_required() {
 }
 
 #[test]
-fn vocab_drives_grader_semantics() {
-    // Identical query text; the vocabulary alone decides whether "psa 10" is two
-    // generic terms or the grader triple. This is exactly the stage the empty-vocab
-    // oracle cannot exercise.
-    let (req_default, _, _) = named(&Normalizer::default_vocab().unwrap(), "psa 10");
-    assert_eq!(req_default, s(&["term:10", "term:psa"]));
-    let (req_spec, _, _) = named(&spec_vocab(), "psa 10");
-    assert_eq!(
-        req_spec,
-        s(&["grade:10", "grader:psa", "grader_grade:psa10"])
-    );
+fn vocab_drives_generic_entity_semantics() {
+    // Identical query text; the vocabulary alone decides whether it is two generic
+    // terms or one declared entity.
+    let (req_default, _, _) = named(&Normalizer::default_vocab().unwrap(), "wireless mouse");
+    assert_eq!(req_default, s(&["term:mouse", "term:wireless"]));
+    let (req_sample, _, _) = named(&sample_vocab(), "wireless mouse");
+    assert_eq!(req_sample, s(&["entity:wireless_mouse"]));
 }
 
 #[test]
-fn worked_example_compiles_as_documented() {
-    // docs/design/normalization.md §1 — the spec's own compiled-output example.
-    let n = spec_vocab();
-    let q = "1994 (upper deck,UD) michael jordan sp (preview,previews) \
-                 -(next,checklist,checklists,heroes,long,count) \
-                 -(minor,minors,top,classic,alumni) \
-                 -(auto,autograph,autographs,autographed,signed,dna,signature) \
-                 PSA 10 -(sgc,bgs)";
+fn representative_generic_query_compiles_as_documented() {
+    let n = sample_vocab();
+    let q = "1994 (acme labs,acme) wireless mouse refurb (preview,previews) \
+             -(broken,damaged,parts) -(blue,green)";
     let (req, forb, anyof) = named(&n, q);
 
-    // REQUIRED — exactly the doc's set, with both OR-singletons promoted in.
     assert_eq!(
         req,
         s(&[
-            "brand:upper_deck",
-            "card_term:preview",
-            "card_term:sp",
-            "grade:10",
-            "grader:psa",
-            "grader_grade:psa10",
-            "player:michael_jordan",
+            "brand:acme_labs",
+            "category:preview",
+            "category:refurbished",
+            "entity:wireless_mouse",
             "year:1994",
         ])
     );
-
-    // Both positive OR groups collapsed to singletons -> no any-of survives.
     assert!(anyof.is_empty());
-
-    // FORBIDDEN — the doc prints a DEDUPLICATED, illustrative summary that elides the
-    // morphological variants (checklists, minors, autograph(s)(ed)). With no stemmer
-    // those are distinct features, so we assert the mechanically-exact set every
-    // negated member produces (extract builds `forbidden` member-by-member). The
-    // graders sgc/bgs normalize to grader:* features.
     assert_eq!(
         forb,
         s(&[
-            "grader:bgs",
-            "grader:sgc",
-            "term:alumni",
-            "term:auto",
-            "term:autograph",
-            "term:autographed",
-            "term:autographs",
-            "term:checklist",
-            "term:checklists",
-            "term:classic",
-            "term:count",
-            "term:dna",
-            "term:heroes",
-            "term:long",
-            "term:minor",
-            "term:minors",
-            "term:next",
-            "term:signature",
-            "term:signed",
-            "term:top",
+            "term:blue",
+            "term:broken",
+            "term:damaged",
+            "term:green",
+            "term:parts",
         ])
     );
 }
@@ -366,10 +286,10 @@ fn forbidden_never_appears_in_anchors() {
     // Signatures/anchors are built ONLY from positive requirements, never from forbidden
     // features or graphs (the lossless-cover invariant; ADR-006). Assert it at the data level
     // as a regression guard against a future refactor.
-    let n = spec_vocab();
+    let n = sample_vocab();
     let mut dict = Dict::new();
     let mut lc = String::new();
-    let ast = parse("michael jordan psa 10 -(auto,signed) -(sgc,bgs)").unwrap();
+    let ast = parse("wireless mouse acme -(broken,damaged) -(blue,green)").unwrap();
     let ex = extract(&ast, &n, &mut dict, &mut lc);
     dict.finalize_mask();
     let plan = anchor_plan(&ex, &dict, 0);
@@ -492,8 +412,8 @@ fn would_be_hot_flags_exactly_the_rank_cliff_shapes() {
     assert!(!p.would_be_hot);
 
     // build_signatures carries the flag through unchanged.
-    let sp = build_signatures(&ex(vec![fat], vec![]), &dict, 0);
-    assert!(sp.would_be_hot);
+    let limited = build_signatures(&ex(vec![fat], vec![]), &dict, 0);
+    assert!(limited.would_be_hot);
 }
 
 #[test]

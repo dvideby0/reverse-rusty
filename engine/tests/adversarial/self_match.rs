@@ -23,8 +23,8 @@ fn small_corpus(seed: u64) -> reverse_rusty::gen::Dataset {
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     })
 }
 
@@ -139,29 +139,29 @@ fn clean_queries_match_perturbed_positive_titles() {
 #[test]
 fn structured_queries_self_match_on_every_branch() {
     let queries: Vec<(u64, String)> = vec![
-        (1, "1994 (upper,ud) jordan".into()),
-        (2, "bowman (rookie,rc) -lot".into()),
-        (3, "\"gem mt\" psa 10".into()),
-        (4, "(upper deck,ud) refractor".into()),
-        (5, "1986 fleer -auto -(signed,reprint) sticker".into()),
-        (6, "topps (red,blue,green) parallel -damaged".into()),
+        (1, "1994 (upper,ns) product gamma".into()),
+        (2, "summit (new,pkg) -lot".into()),
+        (3, "\"deluxe\" pro".into()),
+        (4, "(north star,ns) premium".into()),
+        (5, "1986 vertex -manual -(used,damaged) accessory".into()),
+        (6, "acme (red,blue,green) edition -damaged".into()),
     ];
     let eng = engine_from(&queries);
     let mut s = MatchScratch::new();
 
     // (query id, title that must match) — one title per any-of branch.
     let must_match: &[(u64, &str)] = &[
-        (1, "1994 upper jordan"),
-        (1, "1994 ud jordan"),
-        (2, "bowman rookie"),
-        (2, "bowman rc"),
-        (3, "gem mt psa 10"),
-        (4, "upper deck refractor"),
-        (4, "ud refractor"),
-        (5, "1986 fleer sticker"),
-        (6, "topps red parallel"),
-        (6, "topps blue parallel"),
-        (6, "topps green parallel"),
+        (1, "1994 upper product gamma"),
+        (1, "1994 ns product gamma"),
+        (2, "summit new"),
+        (2, "summit pkg"),
+        (3, "deluxe pro"),
+        (4, "north star premium"),
+        (4, "ns premium"),
+        (5, "1986 vertex accessory"),
+        (6, "acme red edition"),
+        (6, "acme blue edition"),
+        (6, "acme green edition"),
     ];
     for (id, title) in must_match {
         assert!(
@@ -172,10 +172,10 @@ fn structured_queries_self_match_on_every_branch() {
 
     // Negation sanity: the removed negative term really does block.
     let must_not: &[(u64, &str)] = &[
-        (2, "bowman rookie lot"),
-        (5, "1986 fleer sticker auto"),
-        (5, "1986 fleer sticker reprint"),
-        (6, "topps red parallel damaged"),
+        (2, "summit new lot"),
+        (5, "1986 vertex accessory manual"),
+        (5, "1986 vertex accessory used"),
+        (6, "acme red edition damaged"),
     ];
     for (id, title) in must_not {
         assert!(

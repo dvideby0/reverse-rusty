@@ -158,7 +158,7 @@ from collisions.
   common mask and always land in the exact verifier's non-mask required tail.
 
 ### 5b. New **alias / synonym rules** → runtime normalizer learning
-Aliases (`Upper Deck` ≡ `UD`) are a **normalizer** operation: only the normalizer sees raw text and can
+Aliases (`North Star` ≡ `NS`) are a **normalizer** operation: only the normalizer sees raw text and can
 canonicalize two surface forms to one feature name *before* id assignment, so hashing cannot express them.
 Reuse the ADR-015 `Vocab` machinery to learn the alias (it already learns from any-of groups), rebuild the
 `Normalizer`, and swap its `Arc`. **In-process (the Cluster v1 core) there is one shared `Arc<Normalizer>`,

@@ -399,7 +399,7 @@ mod tests {
                 seqno: 7,
                 op: Some(translog_entry::Op::Add(AddItem {
                     logical_id: 9,
-                    dsl: "1994 topps".to_string(),
+                    dsl: "1994 acme".to_string(),
                     version: v,
                     tags: Vec::new(),
                     placement: Some(super::placement_to_proto(

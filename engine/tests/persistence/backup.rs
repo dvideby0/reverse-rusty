@@ -33,18 +33,20 @@ fn backup_then_open_matches_source() {
     // Force multiple segments + a base-segment tombstone + an un-flushed WAL tail.
     engine.flush();
     engine
-        .try_insert_live("juan soto bowman chrome", 11, 1)
+        .try_insert_live("product sigma summit chrome", 11, 1)
         .unwrap();
-    engine.try_insert_live("ronald acuna prizm", 12, 1).unwrap();
+    engine
+        .try_insert_live("product tau contoso", 12, 1)
+        .unwrap();
     engine.delete_by_logical_id(2).unwrap(); // tombstone an existing (base) query
     engine.compact_all();
 
     let titles = [
-        "1986 Fleer Michael Jordan Rookie Card #57 PSA 10",
-        "LeBron James 2003 Topps Chrome Rookie RC", // query 2 — deleted, must not match
-        "Juan Soto 2018 Bowman Chrome",
-        "Ronald Acuna Jr Prizm Silver",
-        "Mike Trout 2011 Topps Update RC US175",
+        "1986 Vertex Wireless Mouse New Item #57 PRO",
+        "Mechanical Keyboard 2003 Acme Chrome New PKG", // query 2 — deleted, must not match
+        "Product Sigma 2018 Summit Chrome",
+        "Product Tau Jr Contoso Silver",
+        "Air Purifier 2011 Acme Update PKG US175",
         "a title that matches nothing",
     ];
     let expected: Vec<Vec<u64>> = titles.iter().map(|t| match_ids(&engine, t)).collect();
@@ -60,7 +62,7 @@ fn backup_then_open_matches_source() {
         );
     }
     assert!(
-        !match_ids(&restored, "LeBron James 2003 Topps Chrome Rookie RC").contains(&2),
+        !match_ids(&restored, "Mechanical Keyboard 2003 Acme Chrome New PKG").contains(&2),
         "the pre-backup delete of query 2 must survive into the restore"
     );
 
@@ -78,8 +80,8 @@ fn backup_isolated_from_post_backup_mutations() {
 
     let mut engine = Engine::with_config(make_norm(), cfg(&src));
     engine.build_from_queries(&sample_queries());
-    let title_q1 = "1986 Fleer Michael Jordan Rookie Card #57 PSA 10"; // query 1
-    let title_new = "Juan Soto 2018 Bowman Chrome"; // not present at backup time
+    let title_q1 = "1986 Vertex Wireless Mouse New Item #57 PRO"; // query 1
+    let title_new = "Product Sigma 2018 Summit Chrome"; // not present at backup time
     let expected_q1 = match_ids(&engine, title_q1);
     assert!(expected_q1.contains(&1));
 
@@ -87,7 +89,7 @@ fn backup_isolated_from_post_backup_mutations() {
 
     // Churn the original AFTER the backup.
     engine
-        .try_insert_live("juan soto bowman chrome", 11, 1)
+        .try_insert_live("product sigma summit chrome", 11, 1)
         .unwrap();
     engine.delete_by_logical_id(1).unwrap();
     engine.flush();
@@ -118,15 +120,17 @@ fn backup_of_unflushed_engine_recovers_via_wal() {
 
     let mut engine = Engine::with_config(make_norm(), cfg(&src));
     engine
-        .try_insert_live("michael jordan 1986 fleer", 1, 1)
+        .try_insert_live("wireless mouse 1986 vertex", 1, 1)
         .unwrap();
-    engine.try_insert_live("lebron james rookie", 2, 1).unwrap();
+    engine
+        .try_insert_live("mechanical keyboard new", 2, 1)
+        .unwrap();
     assert!(
         !src.join("manifest.bin").exists(),
         "precondition: no manifest yet"
     );
 
-    let title = "1986 Fleer Michael Jordan Rookie";
+    let title = "1986 Vertex Wireless Mouse New";
     let expected = match_ids(&engine, title);
     assert!(expected.contains(&1));
 

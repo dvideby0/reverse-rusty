@@ -32,14 +32,14 @@ async fn send_bulk(
 async fn index_replaces_create_conflicts_and_response_is_es_familiar() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
     engine
-        .try_insert_live("michael jordan", 1, 1)
+        .try_insert_live("wireless mouse", 1, 1)
         .expect("seed");
     let state = state_with_engine(engine);
     let body = concat!(
         "{\"index\":{\"_index\":\"queries\",\"_id\":\"1\",\"require_alias\":false}}\n",
-        "{\"query\":\"lebron james\",\"version\":7,\"rank_fields\":{\"priority\":50}}\n",
+        "{\"query\":\"mechanical keyboard\",\"version\":7,\"rank_fields\":{\"priority\":50}}\n",
         "{\"create\":{\"_id\":2}}\n",
-        "{\"query\":\"1996 skybox\",\"version\":3}\n",
+        "{\"query\":\"1996 vertex\",\"version\":3}\n",
         "{\"create\":{\"_id\":1}}\n",
         "{\"query\":\"must not replace\",\"version\":9}\n",
     );
@@ -69,10 +69,10 @@ async fn index_replaces_create_conflicts_and_response_is_es_familiar() {
     );
 
     assert!(
-        !matches_in_snapshot(&state, "michael jordan").contains(&1),
+        !matches_in_snapshot(&state, "wireless mouse").contains(&1),
         "index must replace, not retain the old same-id query"
     );
-    assert!(matches_in_snapshot(&state, "lebron james").contains(&1));
+    assert!(matches_in_snapshot(&state, "mechanical keyboard").contains(&1));
     let snapshot = state.snapshot.load();
     assert_eq!(
         snapshot
@@ -89,9 +89,9 @@ async fn fresh_unique_items_keep_the_direct_segment_fast_path() {
     let before = state.engine.lock().snapshot().segment_infos().len();
     let body = concat!(
         "{\"index\":{\"_id\":10}}\n",
-        "{\"query\":\"topps chrome\",\"rank_fields\":{\"priority\":25}}\n",
+        "{\"query\":\"acme chrome\",\"rank_fields\":{\"priority\":25}}\n",
         "{\"create\":{\"_id\":11}}\n",
-        "{\"query\":\"1995 fleer ultra\"}\n",
+        "{\"query\":\"1995 vertex ultra\"}\n",
     );
     let (status, response) = send_bulk(
         &state,
@@ -117,15 +117,15 @@ async fn source_failures_are_per_item_and_do_not_desynchronize_later_actions() {
     let state = state();
     let body = concat!(
         "{\"index\":{\"_id\":20}}\n",
-        "{\"query\":\"topps chrome\"}\n",
+        "{\"query\":\"acme chrome\"}\n",
         "{\"index\":{\"_id\":21}}\n",
         "{\n",
         "{\"index\":{\"_id\":22}}\n",
-        "{\"tags\":{\"category\":\"cards\"}}\n",
+        "{\"tags\":{\"category\":\"items\"}}\n",
         "{\"index\":{\"_id\":23}}\n",
         "{\"query\":\"(((\"}\n",
         "{\"index\":{\"_id\":24}}\n",
-        "{\"query\":\"1996 skybox\"}\n",
+        "{\"query\":\"1996 vertex\"}\n",
     );
     let (status, response) = send_bulk(&state, "/_bulk", Some("application/x-ndjson"), body).await;
     assert_eq!(status, StatusCode::OK, "{response}");
@@ -140,8 +140,8 @@ async fn source_failures_are_per_item_and_do_not_desynchronize_later_actions() {
     assert_eq!(items[2]["index"]["status"], 400);
     assert_eq!(items[3]["index"]["error"]["type"], "parse_exception");
     assert_eq!(items[4]["index"]["status"], 201);
-    assert!(matches_in_snapshot(&state, "topps chrome").contains(&20));
-    assert!(matches_in_snapshot(&state, "1996 skybox").contains(&24));
+    assert!(matches_in_snapshot(&state, "acme chrome").contains(&20));
+    assert!(matches_in_snapshot(&state, "1996 vertex").contains(&24));
 }
 
 #[tokio::test]
@@ -149,9 +149,9 @@ async fn repeated_ids_execute_in_order_and_structural_errors_preflight_the_batch
     let state = state();
     let ordered = concat!(
         "{\"index\":{\"_id\":30}}\n",
-        "{\"query\":\"topps chrome\"}\n",
+        "{\"query\":\"acme chrome\"}\n",
         "{\"index\":{\"_id\":30}}\n",
-        "{\"query\":\"fleer ultra\"}\n",
+        "{\"query\":\"vertex ultra\"}\n",
         "{\"create\":{\"_id\":30}}\n",
         "{\"query\":\"must not replace\"}\n",
     );
@@ -167,8 +167,8 @@ async fn repeated_ids_execute_in_order_and_structural_errors_preflight_the_batch
     assert_eq!(response["items"][1]["index"]["status"], 200);
     assert_eq!(response["items"][1]["index"]["result"], "updated");
     assert_eq!(response["items"][2]["create"]["status"], 409);
-    assert!(!matches_in_snapshot(&state, "topps chrome").contains(&30));
-    assert!(matches_in_snapshot(&state, "fleer ultra").contains(&30));
+    assert!(!matches_in_snapshot(&state, "acme chrome").contains(&30));
+    assert!(matches_in_snapshot(&state, "vertex ultra").contains(&30));
     assert!(!matches_in_snapshot(&state, "must not replace").contains(&30));
 
     let invalid = concat!(
@@ -185,7 +185,7 @@ async fn repeated_ids_execute_in_order_and_structural_errors_preflight_the_batch
         "a structural error must reject the request before earlier pairs mutate"
     );
     assert!(
-        matches_in_snapshot(&state, "fleer ultra").contains(&30),
+        matches_in_snapshot(&state, "vertex ultra").contains(&30),
         "an unsupported delete must not mutate its target"
     );
 }
@@ -209,7 +209,7 @@ async fn an_all_rejected_ordered_batch_still_publishes_engine_diagnostics() {
 #[tokio::test]
 async fn transport_and_action_envelope_are_strict_and_structured() {
     let state = state();
-    let valid = "{\"index\":{\"_id\":1}}\n{\"query\":\"topps chrome\"}\n";
+    let valid = "{\"index\":{\"_id\":1}}\n{\"query\":\"acme chrome\"}\n";
     for (label, path, content_type, body, expected) in [
         (
             "missing content type",
@@ -291,7 +291,7 @@ async fn body_limit_and_post_only_route_preserve_http_statuses() {
     use axum::extract::DefaultBodyLimit;
 
     let state = state();
-    let body = "{\"index\":{\"_id\":1}}\n{\"query\":\"topps chrome\"}\n";
+    let body = "{\"index\":{\"_id\":1}}\n{\"query\":\"acme chrome\"}\n";
     let response = bulk_router(&state)
         .layer(DefaultBodyLimit::max(16))
         .oneshot(

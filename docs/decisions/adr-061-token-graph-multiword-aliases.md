@@ -42,21 +42,8 @@
     **overlapping** (`MatchKind::Standard`) entity pass over **all** phrases. This is a strict
     superset of *every* parse, so it never drops a feature a different parse would emit — including
     the **components of a phrase displaced** from the leftmost-longest parse by an overlapping one
-    (e.g. a collapsing `new york` consuming the `york` of an alias `york city`). The force-additive
-    pass also tracks **all active graders** (not a single overwritable pending one) so the superset
-    claim holds for *stateful* features (grades): each number grades with **every** grader still in
-    its window. Without this, a number consumed by a phrase in one parse can hide a later grade from
-    `P(T)` — the "Goldilocks parse", with two failure modes both fixed: (1) an intervening number
-    eats the pending grader (`psa 9 lives 8`, overlapping `psa 9` / `9 lives`, reads a genuine
-    `psa 8` only once `9 lives` collapses); (2) a second grader overwrites the pending one
-    (`psa a bgs 8`, overlapping `psa a` / `a bgs`, reads a `psa 8` only once `a bgs` collapses).
-    Neither the leftmost-longest nor the zero-consume extreme emits these; the active-grader set
-    does. The set is **deduped per canonical grader** (a repeat refreshes the age — the freshest
-    occurrence outlives any older one, so the superset claim is unaffected), bounding it by the
-    distinct-grader vocabulary; without the dedup a crafted title of N repeated graders + M numbers
-    emits N×M duplicate grades (a quadratic normalization DoS).
-    (Over-emitting a grade no parse produces is a bounded false positive, recall-safe.) An
-    exhaustive **parse-union oracle** (`normalize/parse_union_oracle.rs`) enumerates every
+    (e.g. a collapsing `new york` consuming the `york` of an alias `york city`). An exhaustive
+    **parse-union oracle** (`normalize/parse_union_oracle.rs`) enumerates every
     phrase-collapse parse of short titles and asserts `P(T) ⊇` their union — the independent check
     the differential oracle cannot do (it reuses `match_features_dual` itself). Used for: signature
     **retrieval**, the required-mask gate, the required tail, and any-of groups. (`N(T) ⊆ P(T)`: the
@@ -134,13 +121,14 @@
     `adopt_vocab` detects the hazard (non-empty memtable + declared equivalences) and escalates to
     `set_vocab` + full recompile. Symmetrically, every equivalence-install seam first runs
     `AliasRegistry::demote_unexpressible`: an Active entry whose form the live normalizer can no longer
-    express (one cleaned token resolving to ≠1 feature, e.g. a fused grader after a punctuation refold)
+    express (one cleaned token resolving to ≠1 feature, e.g. a fused alias after a punctuation refold)
     demotes back to a review candidate instead of reporting active while `resolve_equivalences`
     silently drops it. The demotion is **status-only** (the kind snapshot is preserved, so a repaired
     vocabulary re-activates via `activate` or re-import — codex R14) and deliberately not a full
     reclassification (kind drift after activation is precision-only — expansion can only widen
     any-of groups — and is corrected on re-import). The cluster's `set_vocab` runs the heal **before**
-    its multi-word refusal, so the refusal judges the healed vocabulary.
+    its expressibility check. At decision time that check was the now-retired cluster multi-word
+    refusal; ADR-076 later made cluster routing aware of the positive token-graph view.
 
 - **The forbidden policy (decided up front, recall-justified).** A title `T` *forbidden-contains* a
   phrase iff that phrase is an entity in `T`'s **leftmost-longest canonical parse** `N(T)`. Consequences,
@@ -174,9 +162,9 @@
   NOT cross-vocab match-set monotonicity — `set_vocab` is a semantics-changing operation by design
   (recompile applies the new semantics to every query). Three deliberate consequences when a multi-word
   alias activates:
-  - A query containing the alias text (`new york mets`) reads the phrase as the **entity**: it gains the
-    alias reach (`ny mets` titles) and stops matching the *scattered-components* reading
-    (`new amazing york mets`). This is the same shift a declared collapse phrase has always made (and
+  - A query containing the alias text (`new york inventory`) reads the phrase as the **entity**: it gains the
+    alias reach (`ny inventory` titles) and stops matching the *scattered-components* reading
+    (`new seasonal york inventory`). This is the same shift a declared collapse phrase has always made (and
     alternative (3) below rejects keeping components required). Preserving the component conjunction *as
     an alternative* is expressible in the existing plan structure via CNF distributivity —
     `(entity ∨ ny ∨ new) ∧ (entity ∨ ny ∨ york)` ≡ `(entity ∨ ny) ∨ (new ∧ york)`, strictly widening —

@@ -186,8 +186,8 @@ impl Engine {
     ) -> Result<Self, crate::error::NormalizerError> {
         let mut norm = vocab.to_normalizer()?;
         // Self-heal stale-active aliases (codex R13): a persisted vocab can carry an Active
-        // entry whose form the CURRENT classification can no longer express (e.g. a fused
-        // grader after a punctuation refold) — demote it to a candidate rather than install an
+        // entry whose form the CURRENT classification can no longer express after a
+        // punctuation refold — demote it to a candidate rather than install an
         // alias that reports active and never matches. Expressibility is dict-independent
         // (a feature COUNT), so the fresh empty dict is fine here.
         if vocab

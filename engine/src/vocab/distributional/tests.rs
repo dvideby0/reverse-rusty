@@ -62,16 +62,16 @@ fn has_pair(pairs: &[DiscoveredPair], a: &str, b: &str) -> bool {
 fn planted_alias_pair_is_discovered() {
     let mut queries = Vec::new();
     let mut id = 1u64;
-    substitute_family(&mut queries, &mut id, "zzud", "zzupperdeck", "ua", 40);
+    substitute_family(&mut queries, &mut id, "zzns", "zznorthstar", "ua", 40);
     filler(&mut queries, &mut id, 200);
     let pairs = discover_pairs(&queries, &cfg());
     assert!(
-        has_pair(&pairs, "zzud", "zzupperdeck"),
+        has_pair(&pairs, "zzns", "zznorthstar"),
         "identical-context, never-co-occurring pair must be discovered; got {pairs:?}"
     );
     let p = pairs
         .iter()
-        .find(|p| p.forms.contains(&"zzud".to_string()))
+        .find(|p| p.forms.contains(&"zzns".to_string()))
         .unwrap();
     assert!(p.similarity >= 0.5 && p.similarity.is_finite());
     assert!(
@@ -87,15 +87,15 @@ fn co_hyponym_pair_suppressed_by_cooccurrence() {
     // cannot tell these apart; the co-occurrence penalty must.
     let mut queries = Vec::new();
     let mut id = 1u64;
-    substitute_family(&mut queries, &mut id, "zzpsa", "zzbgs", "gr", 40);
+    substitute_family(&mut queries, &mut id, "zzleft", "zzright", "gr", 40);
     for i in 0..40 {
-        queries.push((id, format!("(zzpsa,zzbgs) grp{}", i % 7)));
+        queries.push((id, format!("(zzleft,zzright) grp{}", i % 7)));
         id += 1;
     }
     filler(&mut queries, &mut id, 200);
     let pairs = discover_pairs(&queries, &cfg());
     assert!(
-        !has_pair(&pairs, "zzpsa", "zzbgs"),
+        !has_pair(&pairs, "zzleft", "zzright"),
         "a frequently co-occurring pair must be dropped by the co-occurrence penalty; got {pairs:?}"
     );
 }
@@ -131,33 +131,33 @@ fn negated_clauses_contribute_no_context() {
     let mut queries = Vec::new();
     let mut id = 1u64;
     for i in 0..40 {
-        queries.push((id, format!("anchor{} -zzud -negp{}", i % 3, i % 7)));
+        queries.push((id, format!("anchor{} -zzns -negp{}", i % 3, i % 7)));
         id += 1;
-        queries.push((id, format!("anchor{} -zzupperdeck -negp{}", i % 3, i % 7)));
+        queries.push((id, format!("anchor{} -zznorthstar -negp{}", i % 3, i % 7)));
         id += 1;
     }
     filler(&mut queries, &mut id, 200);
     let pairs = discover_pairs(&queries, &cfg());
     assert!(
-        !has_pair(&pairs, "zzud", "zzupperdeck"),
+        !has_pair(&pairs, "zzns", "zznorthstar"),
         "forbidden terms are not semantic context; got {pairs:?}"
     );
 }
 
 #[test]
 fn phrase_glue_discovers_token_vs_multiword_pair() {
-    // `zzupper zzdeck` is a 40-support adjacent bigram; with glue on it becomes one unit whose
-    // contexts mirror `zzud`'s — the canonical abbreviation case, emitted space-joined.
-    // npmi_min_count is raised above the incidental `zzud <ctx>` bigram support so only the
+    // `zznorth zzstar` is a 40-support adjacent bigram; with glue on it becomes one unit whose
+    // contexts mirror `zzns`'s — the canonical abbreviation case, emitted space-joined.
+    // npmi_min_count is raised above the incidental `zzns <ctx>` bigram support so only the
     // planted phrase glues.
     let mut queries = Vec::new();
     let mut id = 1u64;
     for i in 0..40 {
         let c1 = format!("uap{}", i % 7);
         let c2 = format!("uab{}", i % 5);
-        queries.push((id, format!("zzud {c1} {c2}")));
+        queries.push((id, format!("zzns {c1} {c2}")));
         id += 1;
-        queries.push((id, format!("zzupper zzdeck {c1} {c2}")));
+        queries.push((id, format!("zznorth zzstar {c1} {c2}")));
         id += 1;
     }
     filler(&mut queries, &mut id, 200);
@@ -170,7 +170,7 @@ fn phrase_glue_discovers_token_vs_multiword_pair() {
         },
     );
     assert!(
-        has_pair(&pairs, "zzud", "zzupper zzdeck"),
+        has_pair(&pairs, "zzns", "zznorth zzstar"),
         "the glued multi-word unit must surface space-joined; got {pairs:?}"
     );
 }

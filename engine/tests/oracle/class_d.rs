@@ -35,8 +35,8 @@ fn mixed_corpus(
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: 2_000,
-        num_sets: 1_000,
+        num_entities: 2_000,
+        num_collections: 1_000,
     });
     let class_d = gen_class_d_queries(seed ^ 0xD00D, n_class_d);
     let step = (n_regular / n_class_d.max(1)).max(1);
@@ -273,7 +273,7 @@ fn effectively_empty_query_rejected_even_with_lane_on() {
     assert_eq!(eng.rejected_class_d(), 2);
     // The bulk path agrees.
     let (report, statuses) = eng
-        .try_bulk_ingest_detailed(&[(1, "-auto".into()), (2, String::new())])
+        .try_bulk_ingest_detailed(&[(1, "-manual".into()), (2, String::new())])
         .expect("bulk");
     assert_eq!(report.ingested, 1, "the forbidden-only query is accepted");
     assert_eq!(report.rejected_class_d, 1, "the empty query is not");
@@ -337,7 +337,7 @@ fn tombstones_and_compaction_preserve_always_candidates() {
 #[test]
 fn durability_flush_mmap_and_wal_replay_survive_a_knob_flip() {
     let dir = tempdir();
-    let titles = ["1990 brand card auto lot", "1990 brand card mint"];
+    let titles = ["1990 brand item manual lot", "1990 brand item premium"];
     {
         let mut cfg = lane_on();
         cfg.data_dir = Some(dir.clone());
@@ -346,13 +346,13 @@ fn durability_flush_mmap_and_wal_replay_survive_a_knob_flip() {
         // d1 sealed into a .seg (the mmap universal-probe path), d2 left in the
         // WAL tail (the replay path), plus one regular query for ballast.
         assert!(matches!(
-            eng.try_insert_live("-auto -signed", CLASS_D_ID_BASE, 1),
+            eng.try_insert_live("-manual -signed", CLASS_D_ID_BASE, 1),
             Ok(InsertOutcome::Inserted(_))
         ));
         eng.insert_live("1990 brand", 7, 1);
         eng.flush();
         assert!(matches!(
-            eng.try_insert_live("-reprint -lot", CLASS_D_ID_BASE + 1, 1),
+            eng.try_insert_live("-replica -lot", CLASS_D_ID_BASE + 1, 1),
             Ok(InsertOutcome::Inserted(_))
         ));
     }
@@ -411,7 +411,7 @@ fn vocab_change_keeps_always_candidates() {
     // always-candidate must survive it (the recompile passes accept=true
     // unconditionally — a stored query is never dropped by the knob).
     let mut vocab = reverse_rusty::vocab::Vocab::new();
-    vocab.add_synonym("rc", "rookie", reverse_rusty::dict::FeatureKind::Category);
+    vocab.add_synonym("pkg", "new", reverse_rusty::dict::FeatureKind::Category);
     eng.set_vocab(vocab).expect("set_vocab");
     eng.recompile_stale_segments();
 
@@ -476,7 +476,7 @@ fn legacy_rejected_class_d_frames_replay_under_the_old_gate() {
         // binary wrote.
         let mut wal = Wal::open(&dir.join("wal.log"), false).expect("wal");
         wal.append_insert(7, 1, "1990 brand", &[]).expect("frame");
-        wal.append_insert(8, 1, "-auto", &[]).expect("frame");
+        wal.append_insert(8, 1, "-manual", &[]).expect("frame");
         wal.append_upsert(7, 2, "-brand", &[]).expect("frame");
     }
     let cfg = EngineConfig {
@@ -535,7 +535,7 @@ fn class_d_segments_write_the_v4_rollback_fence() {
         cfg.data_dir = Some(dir_d.clone());
         let mut eng = Engine::open(Normalizer::default_vocab().expect("vocab"), cfg).expect("open");
         eng.insert_live("1990 brand", 1, 1);
-        eng.insert_live("-auto", 2, 1);
+        eng.insert_live("-manual", 2, 1);
         eng.flush();
     }
     assert!(

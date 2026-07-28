@@ -22,7 +22,7 @@
   The cost: a live write whose query introduces a term absent from the frozen dict was **silently dropped**
   in the read-only compile (`cluster/coordinator/ingest.rs:140`, `cluster/server.rs:211` →
   `compile::extract_readonly`) — the query broadened, and an all-unknown any-of group risked a **false
-  negative**. A production percolator over eBay-style listings must instead **absorb** new vocabulary. The
+  negative**. A production percolator over marketplace-style listings must instead **absorb** new vocabulary. The
   hard part: our **content-routed** sharding (a title routes by its anchor `FeatureId`) needs *cross-shard
   agreement* on a new term's id — unlike a scatter-gather engine, which never needs two nodes to agree.
 - **Prior art (two camps, neither a direct fit — survey in the research doc):** *growable local
@@ -42,7 +42,7 @@
      **bounded false *positive* that survives verification, never a false negative** (a term always hashes
      the same, so query-requires-`t` and title-contains-`t` always agree). This *fixes* both original bugs
      (broadening + any-of collapse).
-  2. **New alias / synonym rules → runtime normalizer learning.** Aliases (`Upper Deck` ≡ `UD`) are a
+  2. **New alias / synonym rules → runtime normalizer learning.** Aliases (`North Star` ≡ `NS`) are a
      *normalizer* operation — only the normalizer sees raw text and can canonicalize two surface forms to
      one feature name *before* id assignment, so hashing cannot express them. Reuse the ADR-015 `Vocab`
      machinery (it already learns synonyms from query any-of groups) to rebuild the `Normalizer` and swap

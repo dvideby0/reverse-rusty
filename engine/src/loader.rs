@@ -3,7 +3,7 @@
 //! Formats:
 //!   **CSV** — first row is a header (`id,query`), subsequent rows are `<u64>,<query_dsl>`.
 //!     Commas inside a quoted field are handled (standard RFC-4180 quoting).
-//!   **JSONL** — one JSON object per line: `{"id": 123, "query": "pokemon base set"}`.
+//!   **JSONL** — one JSON object per line: `{"id": 123, "query": "electronics starter collection"}`.
 //!
 //! Auto-detection: if the file extension is `.csv` or `.tsv` we use the CSV parser;
 //! `.jsonl` or `.ndjson` use the JSONL parser. Otherwise we peek at the first
@@ -163,7 +163,7 @@ fn csv_first_field(line: &str) -> &str {
 }
 
 /// Parse one CSV line into (id, query).
-/// Supports: `123,pokemon base set` and `123,"pokemon, base set"` (quoted commas).
+/// Supports: `123,electronics starter collection` and `123,"electronics, starter collection"` (quoted commas).
 fn parse_csv_line(line: &str) -> Result<(u64, String), String> {
     let comma = line
         .find(',')
@@ -249,27 +249,27 @@ mod tests {
 
     #[test]
     fn csv_with_header() {
-        let input = "id,query\n1,pokemon base set\n2,charizard holo\n";
+        let input = "id,query\n1,electronics starter collection\n2,product delta special\n";
         let r = load_str(input, Some("csv"));
         assert_eq!(r.queries.len(), 2);
-        assert_eq!(r.queries[0], (1, "pokemon base set".into()));
-        assert_eq!(r.queries[1], (2, "charizard holo".into()));
+        assert_eq!(r.queries[0], (1, "electronics starter collection".into()));
+        assert_eq!(r.queries[1], (2, "product delta special".into()));
         assert!(r.errors.is_empty());
     }
 
     #[test]
     fn csv_without_header() {
-        let input = "1,pokemon base set\n2,charizard holo\n";
+        let input = "1,electronics starter collection\n2,product delta special\n";
         let r = load_str(input, Some("csv"));
         assert_eq!(r.queries.len(), 2);
     }
 
     #[test]
     fn csv_quoted_field() {
-        let input = "id,query\n1,\"pokemon, base set\"\n";
+        let input = "id,query\n1,\"electronics, starter collection\"\n";
         let r = load_str(input, Some("csv"));
         assert_eq!(r.queries.len(), 1);
-        assert_eq!(r.queries[0].1, "pokemon, base set");
+        assert_eq!(r.queries[0].1, "electronics, starter collection");
     }
 
     #[test]
@@ -282,12 +282,12 @@ mod tests {
 
     #[test]
     fn jsonl_basic() {
-        let input = r#"{"id": 1, "query": "pokemon base set"}
-{"id": 2, "query": "charizard holo"}
+        let input = r#"{"id": 1, "query": "electronics starter collection"}
+{"id": 2, "query": "product delta special"}
 "#;
         let r = load_str(input, Some("jsonl"));
         assert_eq!(r.queries.len(), 2);
-        assert_eq!(r.queries[0], (1, "pokemon base set".into()));
+        assert_eq!(r.queries[0], (1, "electronics starter collection".into()));
         assert!(r.errors.is_empty());
     }
 

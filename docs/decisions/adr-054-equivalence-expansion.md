@@ -7,10 +7,10 @@
 > this widening-only expansion primitive; neither changes its false-negative safety argument.
 
 - **Context.** Surface-form variation is the dominant threat to recall in this engine's domain —
-  eBay titles spell the same entity many ways (`UD`/`Upper Deck`/`upperdeck`, `rc`/`rookie`,
-  `psa10`/`PSA 10`). A saved search that misses a listing because of a variant is a **false
+  marketplace titles spell the same entity many ways (`NS`/`North Star`/`northstar`,
+  `pkg`/`package`). A saved search that misses a listing because of a variant is a **false
   negative — the cardinal sin**; over-matching is tolerable (the integer exact-verifier and the
-  domain both absorb it). So equivalence handling serves the zero-FN mission, but its failure mode
+  deployment can absorb it). So equivalence handling serves the zero-FN mission, but its failure mode
   must be FP, never FN. The existing alias path (ADR-015 any-of learning → `Vocab` synonyms) applies
   equivalences by **collapse**: the normalizer rewrites an alias to the canonical's feature, and the
   canonical's bare token emits the same feature, so both sides agree. That is FN-safe *only* because
@@ -39,7 +39,7 @@
     `{a,b,c}` — so a shared member is never order-dependently overwritten).
   - **Sources (high-precision first):** *declared* — operators `PUT /_vocab` an `equivalences` block
     (curated alias lists); *learned* — `learn_equivalences_from_queries` counts the **unordered pairs**
-    within any-of groups (so `(rc,rookie)` and `(rc,rookie,X)` both reinforce `rc≡rookie`, like the
+    within any-of groups (so `(pkg,package)` and `(pkg,package,X)` both reinforce the pair, like the
     pair-level synonym learner) and emits surviving pairs, unioned transitively at resolve time; opt-in
     via `CorpusLearnConfig::learn_equivalences` (expansion mode) instead of collapse synonyms. Threaded
     through `Engine`/`ClusterEngine::learn_and_apply_with` and the
@@ -63,7 +63,7 @@
   FN-safe application primitive + a source-agnostic representation + the two high-precision sources
   (declared, any-of-learned). The lower-precision automated discovery is deliberately deferred behind
   this seam, in precision order: **distributional discovery** (context-set similarity — noisy: it
-  conflates substitutes like `rc`/`rookie` with co-hyponyms like `psa`/`bgs`, so it needs review-first
+  conflates substitutes like `pkg`/`package` with co-categories like `new`/`refurbished`, so it needs review-first
   gating) and **match-feedback validation** (the highest-precision automated signal, but it needs an
   operational title→query loop). Building those before the mechanism is proven — and before feedback
   exists to validate them — would put a low-trust heuristic in front of an unproven primitive. Both

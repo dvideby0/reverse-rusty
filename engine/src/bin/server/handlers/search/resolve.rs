@@ -283,7 +283,7 @@ mod tests {
         let query = serde_json::json!({
             "percolate": {
                 "field": "legacy_name",
-                "document": {"title": "topps chrome", "sku": "ABC-1"},
+                "document": {"title": "acme chrome", "sku": "ABC-1"},
                 "legacy_option": true
             },
             "legacy_sibling": {}
@@ -291,7 +291,7 @@ mod tests {
 
         let (titles, single, _) =
             resolve_percolate(None, None, None, Some(query.clone())).expect("legacy resolver");
-        assert_eq!(titles, vec!["topps chrome"]);
+        assert_eq!(titles, vec!["acme chrome"]);
         assert!(single);
         assert!(
             resolve_percolate_strict(None, None, None, Some(query)).is_err(),

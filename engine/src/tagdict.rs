@@ -248,8 +248,8 @@ mod tests {
     #[test]
     fn key_value_round_trips_for_interned_and_is_none_for_synthetic() {
         let mut td = TagDict::new();
-        let id = td.intern("category", "trading-cards");
-        assert_eq!(td.key_value(id), Some(("category", "trading-cards")));
+        let id = td.intern("category", "products");
+        assert_eq!(td.key_value(id), Some(("category", "products")));
         // a synthetic id has no stored string.
         assert_eq!(td.key_value(synthetic_tag_id("category", "oov")), None);
     }

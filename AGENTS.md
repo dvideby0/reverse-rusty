@@ -181,3 +181,9 @@ Follow [`docs/README.md`](docs/README.md) when moving or adding documentation.
 When work ships, remove its roadmap entry instead of marking it complete. Keep ADRs as immutable
 decision history, updating only explicit status/outcome/cross-reference sections when later facts
 change. If a path or heading moves, repoint every inbound link in the same change.
+
+One owner-authorized exception applies to the 2026-07 domain-neutral prototype reset: obsolete
+product-specific examples and specialized implementation details may be sanitized in place so the
+public tree contains no deployment-domain vocabulary. Preserve decision numbers, status,
+architecture constraints, evaluated alternatives, measurements, and revision outcomes in generic
+form. New decisions and later maintenance return to the immutable-history rule above.

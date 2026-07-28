@@ -15,7 +15,7 @@ cheap — the exact verifier and stage-two filter them).
 
 ## What is easy: single-token aliases
 
-`auto, autograph, signature` (all single-token) maps cleanly onto RR's existing **equivalence
+`package, packages, pkg` (all single-token) maps cleanly onto RR's existing **equivalence
 expansion** (a required feature widens to an any-of over the group): fully bidirectional, zero-drop,
 no caveats. This is the roadmap's headline case and is genuinely simple. **Re-land it on its own.**
 
@@ -30,12 +30,12 @@ and the query are analyzed.
 
 ### Approaches tried, and why each failed
 
-1. **Collapse phrase** (`upper deck` → one entity feature, consume components). Bidirectional, but a
-   title `upper deck` no longer emits `deck`, so a pre-existing **component-token query** (`deck`)
+1. **Collapse phrase** (`north star` → one entity feature, consume components). Bidirectional, but a
+   title `north star` no longer emits `star`, so a pre-existing **component-token query** (`star`)
    stops matching → **false negative.**
 2. **Additive phrase to a single-token canonical** (emit the entity *and* keep components). Fixes the
    component query, but a query *phrased* with the multi-word form keeps its components required, so
-   it only matches one direction (`ud` query → `upper deck` title, never the reverse) → **one-way, not
+   it only matches one direction (`ns` query → `north star` title, never the reverse) → **one-way, not
    the advertised bidirectional alias.**
 3. **Alias-entity phrase** — the asymmetry ES uses: **collapse on the query side** (a multi-word query
    collapses to the entity, which expansion widens to its synonyms) but **additive on the title side**

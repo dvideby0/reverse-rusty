@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn tagdict_round_trips_and_empty_blob_reads_empty() {
         let mut td = TagDict::new();
-        let a = td.intern("category", "trading-cards");
+        let a = td.intern("category", "products");
         let b = td.intern("status", "active");
         let c = td.intern("category", "coins");
         td.mark_finalized();
@@ -125,7 +125,7 @@ mod tests {
 
         // ids are preserved (dense, in-order) and resolve identically.
         assert_eq!(got.len(), 3);
-        assert_eq!(got.get("category", "trading-cards"), Some(a));
+        assert_eq!(got.get("category", "products"), Some(a));
         assert_eq!(got.get("status", "active"), Some(b));
         assert_eq!(got.get("category", "coins"), Some(c));
         assert!(got.is_finalized());
@@ -142,7 +142,7 @@ mod tests {
         // The v1 body is byte-identical to the pre-ADR-057 v0 layout, so a header-stripped
         // blob is a genuine legacy tag space and must still deserialize equally.
         let mut td = TagDict::new();
-        td.intern("category", "cards");
+        td.intern("category", "items");
         td.intern("status", "active");
         td.mark_finalized();
         let v1 = serialize_tagdict(&td);
@@ -150,7 +150,7 @@ mod tests {
         assert_ne!(&v0[0..4], &TAGDICT_MAGIC);
         let got = deserialize_tagdict(v0).expect("legacy v0 deserialize");
         assert_eq!(got.len(), 2);
-        assert_eq!(got.get("category", "cards"), Some(0));
+        assert_eq!(got.get("category", "items"), Some(0));
         assert_eq!(got.get("status", "active"), Some(1));
         assert!(got.is_finalized());
     }
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn truncation_errors_without_panicking() {
         let mut td = TagDict::new();
-        td.intern("category", "trading-cards");
+        td.intern("category", "products");
         td.intern("status", "active");
         let full = serialize_tagdict(&td);
         for cut in 0..full.len() {

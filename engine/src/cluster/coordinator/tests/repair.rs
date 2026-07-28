@@ -13,7 +13,7 @@ fn partial_apply_is_detected_then_resync_converges() {
         ..Default::default()
     };
     // A throwaway build gives a frozen norm + dict that already know the query's tokens.
-    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let norm = Arc::clone(&real.norm);
     let dict = Arc::clone(&real.dict);
@@ -143,7 +143,7 @@ fn resync_requeues_when_shard_still_failing() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let norm = Arc::clone(&real.norm);
     let dict = Arc::clone(&real.dict);

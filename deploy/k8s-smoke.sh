@@ -87,11 +87,11 @@ echo "==> ingest one query (auth-gated write) and percolate a matching title"
 # `Path<u64>`), so the id must be numeric — a non-numeric id is a 400 at the router.
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/_doc/1" \
   -H "authorization: Bearer $AUTH" -H 'content-type: application/json' \
-  -d '{"query":"1990 topps smokeplayer"}')
+  -d '{"query":"2024 acme smokeproduct"}')
 [[ "$code" == "201" || "$code" == "200" ]] || fail "ingest rejected (HTTP $code)"
 
 hits=$(curl -s -X POST "$BASE/_search" -H 'content-type: application/json' \
-  -d '{"document":{"title":"1990 topps smokeplayer psa 10"},"size":10}' | jq -c '[.hits.hits[]._id]|sort')
+  -d '{"document":{"title":"2024 acme smokeproduct pro"},"size":10}' | jq -c '[.hits.hits[]._id]|sort')
 [[ "$hits" == '[1]' ]] || fail "percolate did not return the ingested query (got $hits)"
 
 echo "PASS: Helm chart came up on kind and served a match (hits=$hits)"

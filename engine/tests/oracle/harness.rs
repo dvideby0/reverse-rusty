@@ -24,12 +24,12 @@ impl Brute {
     pub(crate) fn build(queries: &[(u64, String)]) -> Self {
         Self::build_with(
             queries,
-            Normalizer::default_vocab().expect("built-in vocab"),
+            Normalizer::default_vocab().expect("default vocabulary"),
         )
     }
 
     /// Build the brute reference with an explicit normalizer vocabulary. The default
-    /// `build` uses the empty `default_vocab` (so the phrase/synonym/grader paths are
+    /// `build` uses the empty `default_vocab` (so the phrase/synonym paths are
     /// never exercised); `zero_false_negatives_with_populated_vocab` passes a populated
     /// one so they are. See docs/DECISIONS.md ADR-050.
     pub(crate) fn build_with(queries: &[(u64, String)], norm: Normalizer) -> Self {
@@ -63,7 +63,7 @@ impl Brute {
     /// kept class-D query matches exactly the titles bearing none of its
     /// forbidden features.
     pub(crate) fn build_accepting_class_d(queries: &[(u64, String)]) -> Self {
-        let norm = Normalizer::default_vocab().expect("built-in vocab");
+        let norm = Normalizer::default_vocab().expect("default vocabulary");
         let mut dict = Dict::new();
         let mut lc = String::new();
         let mut qs = Vec::new();

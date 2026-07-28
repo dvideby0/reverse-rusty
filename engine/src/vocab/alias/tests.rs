@@ -4,7 +4,7 @@ use super::classify::{classify_kind, default_status_for, AliasKind};
 use super::solr::parse_solr_synonyms;
 use super::{AliasProvenance, AliasRegistry, AliasStatus};
 use crate::dict::Dict;
-use crate::normalize::{Normalizer, NormalizerBuilder};
+use crate::normalize::Normalizer;
 
 fn norm() -> Normalizer {
     Normalizer::default_vocab().expect("default normalizer")

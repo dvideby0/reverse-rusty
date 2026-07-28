@@ -13,8 +13,8 @@ fn corrupt_wal_file_recovers_gracefully() {
         ..Default::default()
     };
     let mut engine = Engine::with_config(make_norm(), config.clone());
-    engine.insert_live("michael jordan 1986 fleer", 1, 1);
-    engine.insert_live("lebron james rookie", 2, 1);
+    engine.insert_live("wireless mouse 1986 vertex", 1, 1);
+    engine.insert_live("mechanical keyboard new", 2, 1);
     engine.flush();
 
     // Append garbage to the WAL file (simulates torn write)

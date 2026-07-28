@@ -129,12 +129,14 @@
   the synthetic corpus before enforcement shipped (the counter doing exactly its job):
   the generated broad-intent population is ~130k (~43.5k per shape — `gen.rs` draws the 5%
   branch per *family iteration*), not ~1M; the fat 43,533-entry main posting is the **shared
-  class-B arity-2 pair posting of ~43.5k byte-identical "psa 10" queries** — an
+  class-B arity-2 pair posting of ~43.5k byte-identical fixed two-token queries** — an
   identical-query concentration (the dedup lever's case, spec §5.1, plus the ADR-080 deferred
   B-arity-2 note), NOT a rank-#65 class-A anchor; and the genuine θ-reclassifiable population
-  at θ=1024 is `would_be_hot = 782` (Zipf-head players). θ-reclassification does not move
+  at θ=1024 is `would_be_hot = 782` (Zipf-head entities). θ-reclassification does not move
   class B, so **the hot tier alone does not recover the synthetic corpus's 32×** — the top-64
-  cliff it fixes is real *by construction* but nearly absent from that specific corpus. Per
+  cliff it fixes is real *by construction* but nearly absent from that specific corpus. The retired
+  fixture supplied the measured token labels; the current domain-neutral generator preserves the
+  same branch shape as `wireless pro`. Per
   the maintainer's decision, increment 1 therefore ships **paired with dedup Stage A**
   (increment 2's cheap half), and the recovery measurement runs with BOTH in place — the
   combined increment attacks the measured defect honestly. Details + cross-checks:

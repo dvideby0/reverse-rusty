@@ -7,8 +7,8 @@
 //! tracked (bounded by `alias_feedback_max_pairs`), each accumulating bounded behavioral
 //! evidence — how many titles said form A vs form B, and a bottom-k sketch of WHICH queries
 //! each side satisfied. High Jaccard overlap of the (degenerate-filtered) matched-query
-//! populations is the research doc's technique-2 signal: titles that say `ud` and titles that
-//! say `upper deck` satisfying the *same* queries is behavioral evidence of equivalence.
+//! populations is the research doc's technique-2 signal: titles that say `ns` and titles that
+//! say `north star` satisfying the *same* queries is behavioral evidence of equivalence.
 
 use serde::{Deserialize, Serialize};
 
@@ -114,7 +114,7 @@ pub(crate) fn jaccard(left: &[(u64, u64)], right: &[(u64, u64)]) -> f64 {
 }
 
 /// True iff `needle` occurs as a CONTIGUOUS token run in `haystack` — token-level equality,
-/// never substring (`ud` never matches inside `stud`); a multi-word form is an adjacent run.
+/// never substring (`ns` never matches inside `stud`); a multi-word form is an adjacent run.
 pub(crate) fn contains_run(haystack: &[String], needle: &[String]) -> bool {
     if needle.is_empty() || haystack.len() < needle.len() {
         return false;
@@ -248,7 +248,7 @@ impl AliasFeedback {
     /// Render the per-pair report. `lookup` resolves a sampled query id to its source text —
     /// the **degenerate-evidence exclusion** (the correctness core, ADR-103): a sampled query
     /// whose OWN text references either form is dropped before the overlap is computed. Why: a
-    /// query *requiring* `ud` matches `ud`-titles and structurally cannot match `upper deck`
+    /// query *requiring* `ns` matches `ns`-titles and structurally cannot match `north star`
     /// titles pre-activation (mechanically depressing a true alias's overlap), while a query
     /// already bridging the pair through an active equivalence inflates it — the exclusion
     /// removes both distortions. Filtering preserves the bottom-k sample property (the k
@@ -367,14 +367,14 @@ mod tests {
 
     #[test]
     fn contains_run_is_token_exact_and_adjacent() {
-        let hay = s(&["1994", "stud", "upper", "deck", "psa"]);
-        assert!(contains_run(&hay, &s(&["upper", "deck"])));
+        let hay = s(&["1994", "dense", "north", "star", "alpha"]);
+        assert!(contains_run(&hay, &s(&["north", "star"])));
         assert!(
-            !contains_run(&hay, &s(&["ud"])),
-            "ud ⊄ stud — token equality, never substring"
+            !contains_run(&hay, &s(&["ns"])),
+            "ns ⊄ dense — token equality, never substring"
         );
         assert!(
-            !contains_run(&hay, &s(&["upper", "psa"])),
+            !contains_run(&hay, &s(&["north", "alpha"])),
             "must be adjacent"
         );
         assert!(!contains_run(&hay, &[]));
@@ -402,20 +402,20 @@ mod tests {
     #[test]
     fn sync_tracks_candidates_deterministically_and_retains_evidence() {
         let reg = registry_with_candidates(&[
-            ("ud", "upperdeck", 0.9),
-            ("rc", "rookie", 0.7),
-            ("gem", "gemmint", 0.8),
+            ("ns", "northstar", 0.9),
+            ("pkg", "new", 0.7),
+            ("deluxe", "deluxeplus", 0.8),
         ]);
         let mut fb = AliasFeedback::default();
         fb.sync_tracked(&reg, 2);
         assert_eq!(fb.tracked_pairs(), 2, "capped (confidence desc)");
         // Accumulate evidence on the top pair, then re-sync: evidence retained.
-        fb.observe(&s(&["ud", "fleer"]), &[1, 2, 3]);
+        fb.observe(&s(&["ns", "vertex"]), &[1, 2, 3]);
         fb.sync_tracked(&reg, 2);
         let rep = fb.report(0.5, 1, 1, |_| None);
         let top = rep
             .iter()
-            .find(|r| r.forms.contains(&"ud".to_string()))
+            .find(|r| r.forms.contains(&"ns".to_string()))
             .unwrap();
         assert_eq!(
             top.titles_a + top.titles_b,
@@ -440,14 +440,14 @@ mod tests {
 
     #[test]
     fn observe_classifies_sides_and_excludes_both_form_titles() {
-        let reg = registry_with_candidates(&[("ud", "upperdeck", 0.9)]);
+        let reg = registry_with_candidates(&[("ns", "northstar", 0.9)]);
         let mut fb = AliasFeedback::default();
         fb.sync_tracked(&reg, 8);
-        fb.observe(&s(&["ud", "fleer"]), &[1, 2]);
-        fb.observe(&s(&["upperdeck", "fleer"]), &[1, 2]);
-        fb.observe(&s(&["ud", "upperdeck"]), &[9]); // both forms ⇒ excluded
-        fb.observe(&s(&["stud", "fleer"]), &[7]); // neither (token-exact) ⇒ ignored
-        let rep = fb.report(0.5, 1, 1, |_| Some("fleer jordan".to_string()));
+        fb.observe(&s(&["ns", "vertex"]), &[1, 2]);
+        fb.observe(&s(&["northstar", "vertex"]), &[1, 2]);
+        fb.observe(&s(&["ns", "northstar"]), &[9]); // both forms ⇒ excluded
+        fb.observe(&s(&["stud", "vertex"]), &[7]); // neither (token-exact) ⇒ ignored
+        let rep = fb.report(0.5, 1, 1, |_| Some("vertex product gamma".to_string()));
         let r = &rep[0];
         assert_eq!((r.titles_a, r.titles_b, r.titles_both), (1, 1, 1));
         assert!((r.overlap - 1.0).abs() < 1e-9, "identical populations");
@@ -456,15 +456,15 @@ mod tests {
 
     #[test]
     fn report_excludes_form_referencing_queries_and_unresolvable_ids() {
-        let reg = registry_with_candidates(&[("ud", "upperdeck", 0.9)]);
+        let reg = registry_with_candidates(&[("ns", "northstar", 0.9)]);
         let mut fb = AliasFeedback::default();
         fb.sync_tracked(&reg, 8);
-        // Both sides match queries {1, 2}: 1 is clean, 2 names the form `ud`.
-        fb.observe(&s(&["ud", "fleer"]), &[1, 2]);
-        fb.observe(&s(&["upperdeck", "fleer"]), &[1, 2]);
+        // Both sides match queries {1, 2}: 1 is clean, 2 names the form `ns`.
+        fb.observe(&s(&["ns", "vertex"]), &[1, 2]);
+        fb.observe(&s(&["northstar", "vertex"]), &[1, 2]);
         let rep = fb.report(0.5, 1, 1, |id| match id {
-            1 => Some("fleer jordan".to_string()),
-            2 => Some("ud fleer".to_string()), // references a form ⇒ excluded
+            1 => Some("vertex product gamma".to_string()),
+            2 => Some("ns vertex".to_string()), // references a form ⇒ excluded
             _ => None,
         });
         let r = &rep[0];
@@ -478,9 +478,9 @@ mod tests {
         // A corpus of ONLY form-referencing queries yields zero surviving evidence.
         let mut fb = AliasFeedback::default();
         fb.sync_tracked(&reg, 8);
-        fb.observe(&s(&["ud", "fleer"]), &[2]);
-        fb.observe(&s(&["upperdeck", "fleer"]), &[2]);
-        let rep = fb.report(0.5, 1, 1, |_| Some("ud fleer".to_string()));
+        fb.observe(&s(&["ns", "vertex"]), &[2]);
+        fb.observe(&s(&["northstar", "vertex"]), &[2]);
+        let rep = fb.report(0.5, 1, 1, |_| Some("ns vertex".to_string()));
         assert!(!rep[0].validated, "no surviving samples ⇒ never validated");
         assert!(rep[0].overlap.abs() < 1e-12);
     }
@@ -492,20 +492,20 @@ mod tests {
     /// `min_queries`.
     #[test]
     fn oversampled_sketch_survives_heavy_exclusion() {
-        let reg = registry_with_candidates(&[("ud", "upperdeck", 0.9)]);
+        let reg = registry_with_candidates(&[("ns", "northstar", 0.9)]);
         let mut fb = AliasFeedback::default();
         fb.sync_tracked(&reg, 8);
         let ids: Vec<u64> = (0..2000).collect();
         for i in 0..60 {
-            fb.observe(&s(&["ud", &format!("p{i}")]), &ids);
-            fb.observe(&s(&["upperdeck", &format!("p{i}")]), &ids);
+            fb.observe(&s(&["ns", &format!("p{i}")]), &ids);
+            fb.observe(&s(&["northstar", &format!("p{i}")]), &ids);
         }
         // 95% of queries reference a form (excluded); 5% are clean evidence.
         let rep = fb.report(0.5, 50, 20, |id| {
             Some(if id % 20 == 0 {
-                "fleer jordan".to_string()
+                "vertex product gamma".to_string()
             } else {
-                "ud fleer".to_string()
+                "ns vertex".to_string()
             })
         });
         let r = &rep[0];

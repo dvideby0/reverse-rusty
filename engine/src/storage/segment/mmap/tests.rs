@@ -57,7 +57,7 @@ fn v6_rejects_priority_column_count_mismatch() {
     let _ = std::fs::remove_file(&path);
     let norm = crate::normalize::Normalizer::default_vocab().expect("normalizer");
     let mut dict = crate::dict::Dict::new();
-    let ast = crate::dsl::parse("topps chrome").expect("query");
+    let ast = crate::dsl::parse("acme chrome").expect("query");
     let mut lc = String::new();
     let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
     dict.finalize_mask();

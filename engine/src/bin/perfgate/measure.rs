@@ -58,8 +58,8 @@ pub(super) fn measure_static_report() -> Result<(Report, Engine, Vec<String>), B
         hot_skew: f64::from(super::HOT_SKEW_MILLIONTHS) / 1_000_000.0,
         family_size: workload.family_size,
         seed: workload.seed,
-        num_players: (workload.num_queries / 40).max(2_000),
-        num_sets: (workload.num_queries / 100).max(1_000),
+        num_entities: (workload.num_queries / 40).max(2_000),
+        num_collections: (workload.num_queries / 100).max(1_000),
     });
 
     eprintln!("[perfgate] building in-memory reference");

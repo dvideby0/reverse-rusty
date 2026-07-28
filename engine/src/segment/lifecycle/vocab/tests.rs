@@ -7,7 +7,7 @@ mod source_generation_tests {
     fn live_document_gather_rejects_same_version_stale_source() {
         let mut engine = Engine::new(Normalizer::default_vocab().expect("default normalizer"));
         engine
-            .try_upsert_live_with_tags("1994 topps", 7, 1, &[("status".into(), "old".into())])
+            .try_upsert_live_with_tags("1994 acme", 7, 1, &[("status".into(), "old".into())])
             .expect("first write");
         let stale = engine
             .query_store
@@ -15,7 +15,7 @@ mod source_generation_tests {
             .expect("first source document");
 
         engine
-            .try_upsert_live_with_tags("1995 fleer", 7, 1, &[("status".into(), "new".into())])
+            .try_upsert_live_with_tags("1995 vertex", 7, 1, &[("status".into(), "new".into())])
             .expect("same-version replacement");
         // The source store intentionally refuses generation rollback. Model a
         // divergent sidecar by publishing the stale payload under a distinct,
@@ -47,16 +47,16 @@ mod source_generation_tests {
     fn additive_live_then_bulk_uses_the_newest_source_generation() {
         let mut engine = Engine::new(Normalizer::default_vocab().expect("default normalizer"));
         engine
-            .try_insert_live("1994 topps", 7, 1)
+            .try_insert_live("1994 acme", 7, 1)
             .expect("live insert");
-        let report = engine.bulk_ingest(&[(7, "1995 fleer".to_string())]);
+        let report = engine.bulk_ingest(&[(7, "1995 vertex".to_string())]);
         assert_eq!(report.ingested, 1);
 
         let document = engine
             .snapshot()
             .get_query_document(7)
             .expect("newer bulk source must pair with its base-segment exact row");
-        assert_eq!(document.query(), "1995 fleer");
+        assert_eq!(document.query(), "1995 vertex");
         engine
             .set_vocab(crate::vocab::Vocab::default())
             .expect("a coherent additive history must remain rebuildable");
@@ -111,13 +111,13 @@ mod metadata_only_tests {
     #[test]
     fn fast_path_only_for_registry_candidate_changes() {
         let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
-        eng.build_from_queries(&[(1, "fleer jordan".to_string())]);
+        eng.build_from_queries(&[(1, "vertex product gamma".to_string())]);
         let e0 = eng.vocab_epoch();
 
         // Candidates-only: fast path — vocab installed, epoch untouched.
         let mut v = eng.vocab().cloned().unwrap_or_default();
         let status = v.aliases_mut().add_classified(
-            &["zzud".to_string(), "zzupperdeck".to_string()],
+            &["zzns".to_string(), "zznorthstar".to_string()],
             AliasProvenance::LearnedDistributional,
             0.7,
             &eng.norm,

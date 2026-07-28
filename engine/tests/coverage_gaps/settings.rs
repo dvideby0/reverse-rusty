@@ -12,12 +12,12 @@ fn metrics_consistent_with_known_corpus() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xAE7_21C5,
-        num_players: 1_000,
-        num_sets: 400,
+        num_entities: 1_000,
+        num_collections: 400,
     };
     let data = generate(&cfg);
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     let report = eng.build_from_queries(&data.queries);
 
     assert!(
@@ -136,16 +136,16 @@ fn configured_query_limits_are_enforced_at_ingest_and_are_dynamic() {
 fn segment_infos_reports_layout_and_holes() {
     use reverse_rusty::events::SegmentKind;
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     // First (sealed) base segment with a handful of anchorable queries.
     eng.build_from_queries(&[
-        (1, "michael jordan 1994".to_string()),
-        (2, "larry bird 1986".to_string()),
-        (3, "magic johnson 1987".to_string()),
+        (1, "wireless mouse 1994".to_string()),
+        (2, "product epsilon 1986".to_string()),
+        (3, "product eta 1987".to_string()),
     ]);
     // Two live inserts land in the mutable memtable.
-    let _ = eng.insert_live("kobe bryant 2000", 4, 1);
-    let _ = eng.insert_live("tim duncan 1998", 5, 1);
+    let _ = eng.insert_live("noise cancelling headphones 2000", 4, 1);
+    let _ = eng.insert_live("product zeta 1998", 5, 1);
 
     let infos = eng.segment_infos();
     assert!(!infos.is_empty(), "always at least the memtable row");

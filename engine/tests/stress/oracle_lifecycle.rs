@@ -18,8 +18,8 @@ fn multi_segment_interleaved_ops_oracle() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x1E_2E_AE,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     };
     let data = generate(&cfg);
     let q = &data.queries;
@@ -154,8 +154,8 @@ fn full_lifecycle_soak() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x50A0_7E57,
-        num_players: 4_000,
-        num_sets: 1_600,
+        num_entities: 4_000,
+        num_collections: 1_600,
     };
     let data = generate(&cfg);
     let q = &data.queries;

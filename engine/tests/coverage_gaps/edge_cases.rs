@@ -8,10 +8,10 @@ use reverse_rusty::segment::{Engine, MatchScratch};
 /// Empty title should match nothing and not panic.
 #[test]
 fn empty_title_matches_nothing() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&[
-        (1, "michael jordan".to_string()),
-        (2, "1994 upper deck".to_string()),
+        (1, "wireless mouse".to_string()),
+        (2, "1994 north star".to_string()),
     ]);
 
     let mut scratch = MatchScratch::new();
@@ -23,8 +23,8 @@ fn empty_title_matches_nothing() {
 /// Whitespace-only title should match nothing and not panic.
 #[test]
 fn whitespace_title_matches_nothing() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
-    eng.build_from_queries(&[(1, "michael jordan".to_string())]);
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
+    eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
 
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
@@ -35,14 +35,14 @@ fn whitespace_title_matches_nothing() {
 /// Empty query corpus: matching should work (return empty) with no panics.
 #[test]
 fn empty_corpus_matches_nothing() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     let report = eng.build_from_queries(&[]);
     assert_eq!(report.ingested, 0);
 
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
     eng.match_title(
-        "michael jordan 1994 upper deck",
+        "wireless mouse 1994 north star",
         &mut scratch,
         &mut out,
         true,
@@ -56,18 +56,18 @@ fn empty_corpus_matches_nothing() {
 /// (delete → delete → reinsert, the full tombstone life cycle at its edge).
 #[test]
 fn delete_same_logical_id_twice_is_idempotent_and_reinsert_revives() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&[
-        (1, "michael jordan rookie".to_string()),
-        (2, "1994 upper deck".to_string()),
+        (1, "wireless mouse new".to_string()),
+        (2, "1994 north star".to_string()),
     ]);
     // A second live copy of logical 1 in the memtable, so the delete must reach both
     // a flushed segment and the memtable.
-    eng.insert_live("michael jordan rookie", 1, 2);
+    eng.insert_live("wireless mouse new", 1, 2);
 
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
-    let title = "1996 michael jordan rookie card";
+    let title = "1996 wireless mouse new item";
     eng.match_title(title, &mut scratch, &mut out, true);
     assert!(out.contains(&1), "precondition: query 1 matches");
 
@@ -84,7 +84,7 @@ fn delete_same_logical_id_twice_is_idempotent_and_reinsert_revives() {
     assert!(!out.contains(&1), "still deleted after the double delete");
 
     // Reinsert under the same logical id: the tombstones must not swallow the new copy.
-    eng.insert_live("michael jordan rookie", 1, 3);
+    eng.insert_live("wireless mouse new", 1, 3);
     eng.match_title(title, &mut scratch, &mut out, true);
     assert!(
         out.contains(&1),
@@ -92,27 +92,32 @@ fn delete_same_logical_id_twice_is_idempotent_and_reinsert_revives() {
     );
 
     // And the unrelated query was never disturbed.
-    eng.match_title("1994 upper deck jordan", &mut scratch, &mut out, true);
+    eng.match_title(
+        "1994 north star product gamma",
+        &mut scratch,
+        &mut out,
+        true,
+    );
     assert!(out.contains(&2), "unrelated query survives the churn");
 }
 
 /// Very long title should not panic or corrupt state.
 #[test]
 fn very_long_title_does_not_panic() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
-    eng.build_from_queries(&[(1, "michael jordan".to_string())]);
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
+    eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
 
     // Build a ~100KB title
     let mut long_title = String::with_capacity(100_000);
     for i in 0..5000 {
         long_title.push_str(&format!("word{i} "));
     }
-    long_title.push_str("michael jordan");
+    long_title.push_str("wireless mouse");
 
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
     eng.match_title(&long_title, &mut scratch, &mut out, true);
-    // Should find "michael jordan" even buried in the long title
+    // Should find "wireless mouse" even buried in the long title
     assert!(
         out.contains(&1),
         "long title containing the query terms should still match"
@@ -122,15 +127,15 @@ fn very_long_title_does_not_panic() {
 /// Unicode and diacritics: the normalizer should fold these correctly.
 #[test]
 fn unicode_diacritics_handled() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
-    eng.build_from_queries(&[(1, "michael jordan".to_string())]);
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
+    eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
 
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
 
-    // Diacritic folding: "Michaël Jördàn" should match "michael jordan"
+    // Diacritic folding: "Michaël Jördàn" should match "wireless mouse"
     eng.match_title(
-        "Michaël Jördàn 1994 upper deck",
+        "Michaël Jördàn 1994 north star",
         &mut scratch,
         &mut out,
         true,
@@ -146,17 +151,17 @@ fn unicode_diacritics_handled() {
 /// Mixed case: engine should be case-insensitive.
 #[test]
 fn case_insensitive_matching() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
-    eng.build_from_queries(&[(1, "Michael Jordan".to_string())]);
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
+    eng.build_from_queries(&[(1, "Wireless Mouse".to_string())]);
 
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
 
     let cases = [
-        "MICHAEL JORDAN",
-        "michael jordan",
-        "Michael Jordan",
-        "mIcHaEl JoRdAn",
+        "WIRELESS MOUSE",
+        "wireless mouse",
+        "Wireless Mouse",
+        "wIrElEsS mOuSe",
     ];
     for title in &cases {
         eng.match_title(title, &mut scratch, &mut out, true);
@@ -171,17 +176,17 @@ fn case_insensitive_matching() {
 /// produce duplicate matches.
 #[test]
 fn duplicate_logical_ids_deduped_in_results() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
 
     // Insert same logical ID via two different paths
-    eng.build_from_queries(&[(42, "michael jordan 1994".to_string())]);
+    eng.build_from_queries(&[(42, "wireless mouse 1994".to_string())]);
     // Re-insert same logical ID with slightly different text via bulk_ingest
-    eng.bulk_ingest(&[(42, "michael jordan 1994 upper deck".to_string())]);
+    eng.bulk_ingest(&[(42, "wireless mouse 1994 north star".to_string())]);
 
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
     eng.match_title(
-        "michael jordan 1994 upper deck psa 10",
+        "wireless mouse 1994 north star pro",
         &mut scratch,
         &mut out,
         true,
@@ -198,9 +203,9 @@ fn duplicate_logical_ids_deduped_in_results() {
 /// All-forbidden query (only MUST_NOT terms) should be rejected as class D.
 #[test]
 fn all_forbidden_query_rejected() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     let report = eng.build_from_queries(&[
-        (1, "-(auto,signed,graded)".to_string()), // only negatives
+        (1, "-(manual,signed,damaged)".to_string()), // only negatives
     ]);
     assert_eq!(
         report.rejected_class_d, 1,
@@ -212,7 +217,7 @@ fn all_forbidden_query_rejected() {
 /// Single-character queries should parse without panic (even if rejected).
 #[test]
 fn single_char_queries_dont_panic() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     let chars = ["a", "1", "-", "(", ")", ",", " ", "Z", "#"];
     for &c in &chars {
         // Should not panic regardless of whether it parses
@@ -223,11 +228,11 @@ fn single_char_queries_dont_panic() {
 /// Matching against an engine with only tombstoned entries should return nothing.
 #[test]
 fn fully_tombstoned_engine_matches_nothing() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&[
-        (1, "michael jordan".to_string()),
-        (2, "lebron james".to_string()),
-        (3, "kobe bryant".to_string()),
+        (1, "wireless mouse".to_string()),
+        (2, "mechanical keyboard".to_string()),
+        (3, "noise cancelling headphones".to_string()),
     ]);
 
     // Tombstone all entries in segment 0
@@ -239,7 +244,7 @@ fn fully_tombstoned_engine_matches_nothing() {
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
     eng.match_title(
-        "michael jordan lebron james kobe bryant",
+        "wireless mouse mechanical keyboard noise cancelling headphones",
         &mut scratch,
         &mut out,
         true,
@@ -253,10 +258,10 @@ fn fully_tombstoned_engine_matches_nothing() {
 /// Compacting a fully tombstoned engine should produce an empty segment.
 #[test]
 fn compact_fully_tombstoned_produces_empty_segment() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     // Use two separate ingests to create 2 base segments (compact_all requires >=2)
-    eng.build_from_queries(&[(1, "michael jordan".to_string())]);
-    eng.bulk_ingest(&[(2, "lebron james".to_string())]);
+    eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
+    eng.bulk_ingest(&[(2, "mechanical keyboard".to_string())]);
 
     // Tombstone everything (segment 0 has local 0, segment 1 has local 0)
     let first = eng.segment_address(0, 0, 1).unwrap();
@@ -276,26 +281,31 @@ fn compact_fully_tombstoned_produces_empty_segment() {
     // Verify no matches
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
-    eng.match_title("michael jordan lebron james", &mut scratch, &mut out, true);
+    eng.match_title(
+        "wireless mouse mechanical keyboard",
+        &mut scratch,
+        &mut out,
+        true,
+    );
     assert!(out.is_empty());
 }
 
 /// Title with special characters (hyphens, ampersands, numbers) should not panic.
 #[test]
 fn special_characters_in_title() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
-    eng.build_from_queries(&[(1, "michael jordan".to_string())]);
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
+    eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
 
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
 
     let titles = [
-        "michael-jordan #23 1994",
-        "michael & jordan co. ltd.",
-        "michael jordan !!! @#$%^&*()",
-        "michael\tjordan\nnewline",
-        "michael jordan 🏀🏆",
-        "100% authentic michael jordan card",
+        "product-gamma #23 1994",
+        "product & gamma co. ltd.",
+        "wireless mouse !!! @#$%^&*()",
+        "product\tgamma\nnewline",
+        "wireless mouse 🏀🏆",
+        "100% authentic wireless mouse item",
     ];
     for title in &titles {
         // Should not panic
@@ -306,7 +316,7 @@ fn special_characters_in_title() {
 /// Build + bulk_ingest + flush + compact with zero queries should not panic.
 #[test]
 fn lifecycle_with_zero_queries() {
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
 
     // All lifecycle operations on an empty engine
     let report = eng.build_from_queries(&[]);

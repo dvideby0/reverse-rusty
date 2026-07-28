@@ -15,7 +15,7 @@ rank, or boost fields are 400 errors rather than ignored input.
 
 ```json
 {
-  "document": {"title": "1996 Skybox Premium Michael Jordan PSA 10"},
+  "document": {"title": "2024 North Star Wireless Mouse Pro New"},
   "query_scope": "standard",
   "result_mode": "top_k",
   "size": 100,
@@ -45,7 +45,7 @@ rank, or boost fields are 400 errors rather than ignored input.
       {
         "_id": 42,
         "_score": 1050,
-        "_source": {"query": "michael jordan psa 10"}
+        "_source": {"query": "wireless mouse pro"}
       }
     ]
   }
@@ -209,7 +209,7 @@ bounded provisional chunks and a required terminal completion record. The minima
 
 ```json
 {
-  "document": {"title": "1996 Skybox Premium Michael Jordan PSA 10"}
+  "document": {"title": "2024 North Star Wireless Mouse Pro New"}
 }
 ```
 
@@ -218,7 +218,7 @@ The full native shape remains available:
 ```json
 {
   "event_id": "listing-123/version-7",
-  "document": {"title": "1996 Skybox Premium Michael Jordan PSA 10"},
+  "document": {"title": "2024 North Star Wireless Mouse Pro New"},
   "query_scope": "with_broad",
   "result_mode": "all",
   "filter": {"tenant": ["acme"]},
@@ -685,8 +685,8 @@ outrank priority? Choose boost magnitudes above your priority range.
 
 ```bash
 curl -X POST localhost:9200/_search -H 'Content-Type: application/json' -d '{
-  "document": {"title": "2020 Topps Chrome Update"},
-  "filter": {"category": "cards"},
+  "document": {"title": "2020 Acme Labs Chrome Pro New"},
+  "filter": {"category": "items"},
   "size": 20,
   "rank": {
     "priority_key": "priority",
@@ -703,9 +703,9 @@ curl -X POST localhost:9200/_search -H 'Content-Type: application/json' -d '{
   "hits": {
     "total": 3,
     "hits": [
-      {"_index": "queries", "_id": 1, "_score": 110, "_source": {"query": "topps chrome"}},
-      {"_index": "queries", "_id": 3, "_score": 100, "_source": {"query": "topps chrome auto"}},
-      {"_index": "queries", "_id": 2, "_score": 50,  "_source": {"query": "topps chrome rookie"}}
+      {"_index": "queries", "_id": 1, "_score": 110, "_source": {"query": "acme labs chrome"}},
+      {"_index": "queries", "_id": 3, "_score": 100, "_source": {"query": "acme labs chrome pro"}},
+      {"_index": "queries", "_id": 2, "_score": 50,  "_source": {"query": "acme labs chrome new"}}
     ]
   }
 }
@@ -727,7 +727,7 @@ instead of a per-document fan.
 curl -X POST localhost:9200/v2/_mpercolate \
   -H 'Content-Type: application/json' \
   -d '{
-    "documents": [{"title": "1996 skybox premium michael jordan psa 10"},
+    "documents": [{"title": "2024 north star wireless mouse pro new"},
                   {"title": "generic unmatched listing"}],
     "query_scope": "standard",
     "size": 10,

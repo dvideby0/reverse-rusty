@@ -14,17 +14,17 @@ fn bulk_ingest_persists_sources_across_reopen() {
     engine.build_from_queries(&sample_queries());
 
     let batch = vec![
-        (100u64, "wander franco prospect".to_string()),
-        (101u64, "fernando tatis jr rookie".to_string()),
+        (100u64, "product omega preview".to_string()),
+        (101u64, "portable monitor new".to_string()),
     ];
     let report = engine.bulk_ingest(&batch);
     assert_eq!(report.ingested, 2);
     assert_eq!(
         engine.get_query_source(100).as_deref(),
-        Some("wander franco prospect")
+        Some("product omega preview")
     );
 
-    let title = "Wander Franco 2019 Bowman Chrome Prospect";
+    let title = "Product Omega 2019 Summit Chrome Preview";
     let expected = match_ids(&engine, title);
     assert!(
         expected.contains(&100),
@@ -41,7 +41,7 @@ fn bulk_ingest_persists_sources_across_reopen() {
     );
     assert_eq!(
         engine2.get_query_source(100).as_deref(),
-        Some("wander franco prospect"),
+        Some("product omega preview"),
         "bulk-ingested source text lost after reopen (sources.dat not persisted)"
     );
 
@@ -70,7 +70,7 @@ fn bulk_ingest_failure_is_all_or_nothing() {
     let orig = std::fs::metadata(&seg_dir).unwrap().permissions();
     std::fs::set_permissions(&seg_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    let batch = vec![(100u64, "wander franco prospect".to_string())];
+    let batch = vec![(100u64, "product omega preview".to_string())];
     let failed = engine.try_bulk_ingest(&batch);
 
     // Restore perms BEFORE asserting so temp-dir cleanup always works.
@@ -103,7 +103,7 @@ fn bulk_ingest_failure_is_all_or_nothing() {
     assert_eq!(engine.num_segments(), segs_before + 1);
     assert_eq!(
         engine.get_query_source(100).as_deref(),
-        Some("wander franco prospect")
+        Some("product omega preview")
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -124,7 +124,7 @@ fn bulk_source_prepare_failure_rolls_back_match_commit() {
     // The segment write succeeds first. Poison only the next source candidate's
     // temporary path so the prepare phase fails after that artifact exists.
     std::fs::create_dir(next_source_temp_path(&dir)).expect("poison source candidate tmp");
-    let failed = engine.try_bulk_ingest(&[(100, "wander franco prospect".to_string())]);
+    let failed = engine.try_bulk_ingest(&[(100, "product omega preview".to_string())]);
 
     assert!(failed.is_err(), "source preparation must reject the batch");
     assert_eq!(engine.num_segments(), segments_before);
@@ -149,7 +149,7 @@ fn flush_source_prepare_failure_keeps_wal_recovery_authoritative() {
     {
         let mut engine = Engine::with_config(make_norm(), cfg());
         engine
-            .try_insert_live("wander franco prospect", 100, 1)
+            .try_insert_live("product omega preview", 100, 1)
             .expect("WAL-backed insert");
         let poison = dir
             .join("sources_g00000000000000000001.dat")
@@ -167,10 +167,10 @@ fn flush_source_prepare_failure_keeps_wal_recovery_authoritative() {
     let mut reopened = Engine::open(make_norm(), cfg()).expect("recover complete WAL");
     assert_eq!(
         reopened.get_query_source(100).as_deref(),
-        Some("wander franco prospect")
+        Some("product omega preview")
     );
     assert!(
-        match_ids(&reopened, "Wander Franco Prospect").contains(&100),
+        match_ids(&reopened, "Product Omega Preview").contains(&100),
         "the unretired WAL must recover matching data too"
     );
     reopened.flush();
@@ -178,7 +178,7 @@ fn flush_source_prepare_failure_keeps_wal_recovery_authoritative() {
     let reopened = Engine::open(make_norm(), cfg()).expect("reopen committed retry");
     assert_eq!(
         reopened.get_query_source(100).as_deref(),
-        Some("wander franco prospect")
+        Some("product omega preview")
     );
 
     let _ = std::fs::remove_dir_all(&dir);

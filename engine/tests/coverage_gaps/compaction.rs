@@ -20,15 +20,15 @@ fn repeated_compaction_preserves_correctness() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x00C0_AC72,
-        num_players: 2_500,
-        num_sets: 1_000,
+        num_entities: 2_500,
+        num_collections: 1_000,
     };
     let data = generate(&cfg);
     let q = &data.queries;
     let n = q.len();
     let chunk = n / 6;
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
 
     // Phase 1: build 3 segments
     eng.build_from_queries(&q[..chunk]);
@@ -110,12 +110,12 @@ fn compaction_under_churn() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x000C_4020,
-        num_players: 1_500,
-        num_sets: 600,
+        num_entities: 1_500,
+        num_collections: 600,
     };
     let data = generate(&cfg);
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&data.queries);
 
     // Perform 5 rounds of: add live queries, flush, compact
@@ -123,7 +123,7 @@ fn compaction_under_churn() {
     for round in 0..5 {
         // add 50 queries
         for i in 0..50 {
-            let text = format!("round {round} item {i} michael jordan upper deck 1994");
+            let text = format!("round {round} item {i} wireless mouse north star 1994");
             let _ = eng.insert_live(&text, extra_id, (round + 2) as u32);
             extra_id += 1;
         }

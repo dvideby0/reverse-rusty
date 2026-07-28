@@ -22,7 +22,7 @@ fn placement_by_cost_class() {
 
     // class A: a rare anchor -> exactly one selective shard.
     match cluster
-        .add_query(next(), "1994 upper deck rareplayer0")
+        .add_query(next(), "1994 north star rareentity0")
         .unwrap()
     {
         AddOutcome::Placed { shards } => {
@@ -34,21 +34,21 @@ fn placement_by_cost_class() {
 
     // class B arity-2: all-hot required, no rare anchor -> replicated lane.
     assert_eq!(
-        cluster.add_query(next(), "1994 upper deck").unwrap(),
+        cluster.add_query(next(), "1994 north star").unwrap(),
         AddOutcome::Replicated,
         "all-hot {{year}} {{brand}} should be class-B arity-2 -> replicated lane"
     );
 
     // class C: a single hot anchor (broad) -> replicated lane.
     assert_eq!(
-        cluster.add_query(next(), "rookie").unwrap(),
+        cluster.add_query(next(), "standard").unwrap(),
         AddOutcome::Replicated,
         "broad single-hot anchor should be replicated"
     );
 
-    // class B any-of: pure any-of of two rare players -> selective (1..=2 shards).
+    // class B any-of: pure any-of of two rare entities -> selective (1..=2 shards).
     match cluster
-        .add_query(next(), "(rareplayer0,rareplayer1000)")
+        .add_query(next(), "(rareentity0,rareentity1000)")
         .unwrap()
     {
         AddOutcome::Placed { shards } => {
@@ -79,14 +79,14 @@ fn anyof_query_can_place_on_multiple_shards() {
         ..ClusterConfig::default()
     };
     let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
-    // Over many distinct rare-player pairs on a 16-shard ring, at least one
+    // Over many distinct rare-entity pairs on a 16-shard ring, at least one
     // any-of query must straddle two shards — the multi-shard placement case.
     let mut id = 8_000_000u64;
     let mut saw_two = false;
     for i in 0..150u64 {
         id += 1;
         if let AddOutcome::Placed { shards } = cluster
-            .add_query(id, &format!("(rareplayer{i},rareplayer{})", i + 1000))
+            .add_query(id, &format!("(rareentity{i},rareentity{})", i + 1000))
             .unwrap()
         {
             if shards.len() == 2 {
@@ -143,8 +143,8 @@ fn ingest_on_a_populated_cluster_is_rejected() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x1234_5678,
-        num_players: 200,
-        num_sets: 100,
+        num_entities: 200,
+        num_collections: 100,
     });
     let cfg = ClusterConfig {
         num_shards: 3,

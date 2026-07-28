@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub(crate) fn vocab() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 /// Independent ground-truth matcher (copied from `tests/cluster_oracle/` — shares
@@ -160,8 +160,8 @@ pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0CEA_5ADE,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
     let mut queries = data.queries;
@@ -169,7 +169,7 @@ pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
     let mut next_id = queries.iter().map(|(id, _)| *id).max().unwrap_or(0) + 1;
 
     for i in 0..150u64 {
-        queries.push((next_id, format!("(rareplayer{i},rareplayer{})", i + 1000)));
+        queries.push((next_id, format!("(rareentity{i},rareentity{})", i + 1000)));
         next_id += 1;
     }
     for i in 0..100u64 {
@@ -181,7 +181,7 @@ pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
     for i in 0..150u64 {
         let year = 1986 + (i % 39);
         let brand = BRANDS[(i % BRANDS.len() as u64) as usize];
-        queries.push((next_id, format!("{year} {brand} rareplayer{i}")));
+        queries.push((next_id, format!("{year} {brand} rareentity{i}")));
         next_id += 1;
     }
     for i in 0..200u64 {
@@ -189,7 +189,7 @@ pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
         let brand = BRANDS[(i % BRANDS.len() as u64) as usize];
         let a = i % 150;
         titles.push(format!(
-            "{year} {brand} rareplayer{a} rareplayer{} psa 10",
+            "{year} {brand} rareentity{a} rareentity{} pro",
             a + 1000
         ));
     }
@@ -198,7 +198,7 @@ pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
 }
 
 // ---- per-query tags + filtered percolation (ADR-049/055), copied from `tests/cluster_oracle/` ----
-pub(crate) const CATEGORIES: [&str; 6] = ["cards", "coins", "stamps", "comics", "toys", "art"];
+pub(crate) const CATEGORIES: [&str; 6] = ["items", "coins", "stamps", "comics", "toys", "art"];
 pub(crate) const STATUSES: [&str; 3] = ["active", "inactive", "archived"];
 
 pub(crate) fn tags_for(logical: u64) -> Vec<(String, String)> {
@@ -266,13 +266,13 @@ pub(crate) fn churn(queries: &[(u64, String)]) -> (Vec<(u64, String)>, Vec<u64>)
     }
     if let Some((_, t)) = queries
         .iter()
-        .find(|(_, t)| t.contains("rareplayer") && !t.starts_with('('))
+        .find(|(_, t)| t.contains("rareentity") && !t.starts_with('('))
     {
         added.push((base + 1, t.clone())); // class A
     }
     if let Some((_, t)) = queries
         .iter()
-        .find(|(_, t)| !t.contains("rareplayer") && !t.starts_with('('))
+        .find(|(_, t)| !t.contains("rareentity") && !t.starts_with('('))
     {
         added.push((base + 2, t.clone())); // arity-2 / broad (replicated lane)
     }

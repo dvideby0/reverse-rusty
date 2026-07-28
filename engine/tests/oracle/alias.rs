@@ -37,23 +37,23 @@ fn matched(eng: &mut Engine, s: &mut MatchScratch, title: &str) -> HashSet<u64> 
 /// the other — zero false negatives.
 #[test]
 fn learns_single_token_alias_from_anyof_group() {
-    // `autograph`/`autographs` are a plural variant ⇒ SingleTokenVariant ⇒ auto-active.
-    let mut queries: Vec<(u64, String)> = vec![(1, "fleer autograph".into())];
+    // `adapter`/`adapters` are a plural variant ⇒ SingleTokenVariant ⇒ auto-active.
+    let mut queries: Vec<(u64, String)> = vec![(1, "vertex adapter".into())];
     for i in 0..6u64 {
-        queries.push((100 + i, "(autograph,autographs)".into())); // any-of seen >= min_count
+        queries.push((100 + i, "(adapter,adapters)".into())); // any-of seen >= min_count
     }
     for i in 0..10u64 {
-        queries.push((200 + i, format!("autograph u{i}")));
-        queries.push((300 + i, format!("autographs u{i}")));
+        queries.push((200 + i, format!("adapter u{i}")));
+        queries.push((300 + i, format!("adapters u{i}")));
     }
-    let title = "fleer autographs psa 10"; // has autographs, NOT autograph
+    let title = "vertex adapters pro"; // has adapters, NOT adapter
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
     let mut s = MatchScratch::new();
     assert!(
         !matched(&mut eng, &mut s, title).contains(&1),
-        "before learning, the autograph-query must not match an autographs-only title"
+        "before learning, the adapter-query must not match an adapters-only title"
     );
 
     let report = eng
@@ -64,29 +64,29 @@ fn learns_single_token_alias_from_anyof_group() {
         "a single-token variant group must auto-activate (activated={})",
         report.activated
     );
-    let entry = find_entry(&eng, &["autograph", "autographs"]).expect("alias learned");
+    let entry = find_entry(&eng, &["adapter", "adapters"]).expect("alias learned");
     assert_eq!(entry.kind, AliasKind::SingleTokenVariant);
     assert_eq!(entry.status, AliasStatus::Active);
     assert_eq!(entry.provenance, AliasProvenance::LearnedFromQueries);
 
     assert!(
         matched(&mut eng, &mut s, title).contains(&1),
-        "after learning autograph≡autographs, the autograph-query matches an autographs title"
+        "after learning adapter≡adapters, the adapter-query matches an adapters title"
     );
 }
 
-/// (2) A multi-form learned **category alternative** (`(psa, bgs, sgc)` — distinct single
+/// (2) A multi-form learned **category alternative** (`(alpha, beta, gamma)` — distinct single
 /// tokens, no shared prefix) is recorded as a review candidate, never silently activated.
 #[test]
 fn does_not_auto_activate_category_alternatives() {
     let mut queries: Vec<(u64, String)> = Vec::new();
     for i in 0..6u64 {
-        queries.push((100 + i, "(psa,bgs,sgc) card".into()));
+        queries.push((100 + i, "(alpha,beta,gamma) item".into()));
     }
     // Filler so the tokens are interned and the queries are non-degenerate.
     for i in 0..10u64 {
-        queries.push((200 + i, format!("psa u{i}")));
-        queries.push((300 + i, format!("bgs u{i}")));
+        queries.push((200 + i, format!("alpha u{i}")));
+        queries.push((300 + i, format!("beta u{i}")));
     }
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
@@ -99,7 +99,7 @@ fn does_not_auto_activate_category_alternatives() {
         report.activated, 0,
         "a learned 3-form category alternative must NOT auto-activate"
     );
-    let entry = find_entry(&eng, &["bgs", "psa", "sgc"]).expect("group recorded as candidate");
+    let entry = find_entry(&eng, &["beta", "alpha", "gamma"]).expect("group recorded as candidate");
     assert_eq!(entry.kind, AliasKind::SingleTokenDistinct);
     assert_eq!(entry.status, AliasStatus::Candidate);
     assert!(
@@ -121,7 +121,7 @@ fn alias_ids_are_stable_after_future_insert() {
     let cls_dict = Dict::new();
     let mut v = Vocab::new();
     let status = v.aliases_mut().add_classified(
-        &["autograph".into(), "autographs".into()],
+        &["adapter".into(), "adapters".into()],
         AliasProvenance::Manual,
         1.0,
         &cls_norm,
@@ -137,15 +137,14 @@ fn alias_ids_are_stable_after_future_insert() {
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.set_vocab(v).expect("set_vocab");
 
-    // A LATER insert interns `autograph` as a dense id. The fix interned both alias forms at
+    // A LATER insert interns `adapter` as a dense id. The fix interned both alias forms at
     // activation, so the equivalence map already keys on that same dense id.
-    eng.try_insert_live("autograph card9", 1, 1)
-        .expect("insert");
+    eng.try_insert_live("adapter card9", 1, 1).expect("insert");
 
     let mut s = MatchScratch::new();
     assert!(
-        matched(&mut eng, &mut s, "autographs card9").contains(&1),
-        "alias must survive a future insert: an autographs title matches the autograph query"
+        matched(&mut eng, &mut s, "adapters card9").contains(&1),
+        "alias must survive a future insert: an adapters title matches the adapter query"
     );
 }
 
@@ -160,7 +159,7 @@ fn adopt_vocab_on_fresh_engine_keeps_alias_active_after_insert() {
     let cls_dict = Dict::new();
     let mut v = Vocab::new();
     v.aliases_mut().add_classified(
-        &["autograph".into(), "autographs".into()],
+        &["adapter".into(), "adapters".into()],
         AliasProvenance::Manual,
         1.0,
         &cls_norm,
@@ -169,12 +168,11 @@ fn adopt_vocab_on_fresh_engine_keeps_alias_active_after_insert() {
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab")); // fresh: no queries
     eng.adopt_vocab(v).expect("adopt_vocab");
-    eng.try_insert_live("autograph card9", 1, 1)
-        .expect("insert");
+    eng.try_insert_live("adapter card9", 1, 1).expect("insert");
 
     let mut s = MatchScratch::new();
     assert!(
-        matched(&mut eng, &mut s, "autographs card9").contains(&1),
+        matched(&mut eng, &mut s, "adapters card9").contains(&1),
         "adopt on a fresh engine must intern alias forms so the alias survives a future insert"
     );
 }
@@ -183,23 +181,23 @@ fn adopt_vocab_on_fresh_engine_keeps_alias_active_after_insert() {
 /// rebuild — so an existing query gains the alias's reach immediately, zero false negatives.
 #[test]
 fn vocab_apply_recompiles_existing_queries_without_restart() {
-    let mut queries: Vec<(u64, String)> = vec![(1, "fleer autograph".into())];
+    let mut queries: Vec<(u64, String)> = vec![(1, "vertex adapter".into())];
     for i in 0..6u64 {
-        queries.push((200 + i, format!("autographs u{i}"))); // intern `autographs`
+        queries.push((200 + i, format!("adapters u{i}"))); // intern `adapters`
     }
-    let title = "fleer autographs psa 10";
+    let title = "vertex adapters pro";
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
     let mut s = MatchScratch::new();
     assert!(
         !matched(&mut eng, &mut s, title).contains(&1),
-        "before the alias, the autograph-query must not match an autographs title"
+        "before the alias, the adapter-query must not match an adapters title"
     );
 
     // Import a declared single-token alias and apply it live.
     let report = eng
-        .import_alias_synonyms("autograph, autographs")
+        .import_alias_synonyms("adapter, adapters")
         .expect("import + apply");
     assert!(
         report.recompiled >= 1,
@@ -209,7 +207,7 @@ fn vocab_apply_recompiles_existing_queries_without_restart() {
 
     assert!(
         matched(&mut eng, &mut s, title).contains(&1),
-        "the pre-existing query matches the autographs title after a live apply (no restart)"
+        "the pre-existing query matches the adapters title after a live apply (no restart)"
     );
 }
 
@@ -231,8 +229,8 @@ fn engine_with_aliases(queries: &[(u64, String)], solr: &str) -> (Engine, Vocab)
 #[test]
 fn multiword_alias_activates_and_matches_bidirectionally() {
     let queries: Vec<(u64, String)> = vec![
-        (1, "ny mets".into()),          // single-token alias form `ny`
-        (2, "new york yankees".into()), // multi-word alias form `new york`
+        (1, "ny catalog".into()),         // single-token alias form `ny`
+        (2, "new york inventory".into()), // multi-word alias form `new york`
     ];
     let (mut eng, _vocab) = engine_with_aliases(&queries, "ny => new york");
 
@@ -247,12 +245,12 @@ fn multiword_alias_activates_and_matches_bidirectionally() {
     let mut s = MatchScratch::new();
     // Forward: a `ny` query reaches a `new york` title.
     assert!(
-        matched(&mut eng, &mut s, "new york mets").contains(&1),
+        matched(&mut eng, &mut s, "new york catalog").contains(&1),
         "ny query must match a new york title (alias forward)"
     );
     // Reverse: a `new york` query reaches a `ny` title.
     assert!(
-        matched(&mut eng, &mut s, "ny yankees").contains(&2),
+        matched(&mut eng, &mut s, "ny inventory").contains(&2),
         "new york query must match a ny title (alias reverse)"
     );
 }
@@ -265,30 +263,26 @@ fn multiword_alias_activates_and_matches_bidirectionally() {
 #[test]
 fn positive_bare_term_runs_stop_at_clause_boundaries() {
     let cases = [
-        (
-            "negated term",
-            "new -used york",
-            "new vintage collectible york",
-        ),
+        ("negated term", "new -used york", "new vintage product york"),
         (
             "negated phrase",
             "new -\"used item\" york",
-            "new vintage collectible york",
+            "new vintage product york",
         ),
         (
             "negated any-of",
             "new -(used,damaged) york",
-            "new vintage collectible york",
+            "new vintage product york",
         ),
         (
             "positive phrase",
             "new \"vintage\" york",
-            "new vintage collectible york",
+            "new vintage product york",
         ),
         (
             "positive any-of",
             "new (vintage,modern) york",
-            "new vintage collectible york",
+            "new vintage product york",
         ),
     ];
 
@@ -356,13 +350,13 @@ fn multiword_alias_forbidden_uses_canonical_view() {
 /// views fix.
 #[test]
 fn multiword_alias_overlapping_nested_retrieval() {
-    let queries: Vec<(u64, String)> = vec![(1, "new york yankees".into())];
+    let queries: Vec<(u64, String)> = vec![(1, "new york inventory".into())];
     let (mut eng, vocab) = engine_with_aliases(&queries, "ny => new york\nnyc => new york city");
     let brute = Brute::build_with_vocab(&queries, &vocab);
 
     let mut s = MatchScratch::new();
     let (mut lc, mut bf) = (String::new(), Vec::new());
-    let title = "new york city yankees";
+    let title = "new york city inventory";
     assert!(
         matched(&mut eng, &mut s, title).contains(&1),
         "a new york query must match a new york city title (overlap superset)"
@@ -390,7 +384,7 @@ fn activating_alias_does_not_drop_an_overlapping_existing_phrase() {
     eng.set_vocab(v).expect("install the york city phrase");
     eng.build_from_queries(&[(1, "york city".into())]);
 
-    let title = "new york city yankees";
+    let title = "new york city inventory";
     let mut s = MatchScratch::new();
     assert!(
         matched(&mut eng, &mut s, title).contains(&1),
@@ -437,44 +431,12 @@ fn displaced_alias_phrase_keeps_its_components() {
 /// adds to `P(T)`.
 #[test]
 fn multiword_alias_matches_a_double_space_title() {
-    let queries: Vec<(u64, String)> = vec![(1, "ny mets".into())];
+    let queries: Vec<(u64, String)> = vec![(1, "ny catalog".into())];
     let (mut eng, _vocab) = engine_with_aliases(&queries, "ny => new york");
     let mut s = MatchScratch::new();
     assert!(
-        matched(&mut eng, &mut s, "new  york mets").contains(&1),
+        matched(&mut eng, &mut s, "new  york catalog").contains(&1),
         "the ny alias must match a double-spaced `new  york` title (positive-view overlap scan)"
-    );
-}
-
-/// (8e) Activating an alias that displaces a collapsing phrase containing a grader must not drop a
-/// STATEFUL token feature (codex R9). `psa foo` collapses (consuming the `psa` grader), so `10`
-/// reads as `term:10` and a `10` query matches `psa foo bar 10`. Activating `pfb => psa foo bar`
-/// makes the additive alias un-consume `psa` (→ `grade:10`) in every phrase parse, but P(T)'s raw
-/// token pass keeps `term:10`, so the query still matches.
-#[test]
-fn activating_alias_keeps_a_stateful_component_feature() {
-    let mut v = Vocab::new();
-    v.add_grader("psa");
-    v.add_phrase(
-        &["psa", "foo"],
-        "term:psa_foo",
-        reverse_rusty::dict::FeatureKind::Generic,
-    );
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
-    eng.set_vocab(v).expect("install grader + phrase");
-    eng.build_from_queries(&[(1, "10".into())]);
-
-    let title = "psa foo bar 10";
-    let mut s = MatchScratch::new();
-    assert!(
-        matched(&mut eng, &mut s, title).contains(&1),
-        "baseline: a `10` query matches `psa foo bar 10` (term:10)"
-    );
-    eng.import_alias_synonyms("pfb => psa foo bar")
-        .expect("apply the alias");
-    assert!(
-        matched(&mut eng, &mut s, title).contains(&1),
-        "the `10` match must survive activating an alias that displaces the `psa foo` phrase"
     );
 }
 
@@ -486,7 +448,7 @@ fn multiword_alias_title_is_additive_for_components() {
     let (mut eng, _vocab) = engine_with_aliases(&queries, "ny => new york");
     let mut s = MatchScratch::new();
     assert!(
-        matched(&mut eng, &mut s, "new york mets").contains(&1),
+        matched(&mut eng, &mut s, "new york catalog").contains(&1),
         "component-token query `york` matches a `new york` title (additive title side)"
     );
 }
@@ -503,8 +465,8 @@ fn alias_registry_application_is_fn_safe_at_scale() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0A11_A500,
-        num_players: 500,
-        num_sets: 250,
+        num_entities: 500,
+        num_collections: 250,
     };
     let data = generate(&cfg);
 
@@ -550,28 +512,28 @@ fn alias_registry_application_is_fn_safe_at_scale() {
 #[test]
 fn multiword_alias_differential_matches_brute() {
     let queries: Vec<(u64, String)> = vec![
-        (1, "ny mets".into()),
-        (2, "new york yankees".into()),
-        (3, "new york -mets".into()),
+        (1, "ny catalog".into()),
+        (2, "new york inventory".into()),
+        (3, "new york -catalog".into()),
         (4, "foo -\"new york\"".into()),
         (5, "york".into()),
         (6, "new york city subway".into()),
-        (7, "(ny,boston) finals".into()),
+        (7, "(ny,chicago) closing".into()),
         (8, "brooklyn".into()),
     ];
     let (mut eng, vocab) = engine_with_aliases(&queries, "ny => new york\nnyc => new york city");
     let brute = Brute::build_with_vocab(&queries, &vocab);
 
     let titles = [
-        "new york mets opening day",
-        "ny yankees world series",
+        "new york catalog opening day",
+        "ny inventory annual sale",
         "new york city subway map",
         "foo new york city skyline",
         "foo new york state",
-        "boston finals run",
+        "chicago closing run",
         "brooklyn bridge",
         "york peppermint pattie",
-        "ny mets vs boston",
+        "ny catalog near chicago",
         "new york city",
     ];
     let mut s = MatchScratch::new();
@@ -596,8 +558,8 @@ fn multiword_alias_application_is_fn_safe_at_scale() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0A11_A5E2,
-        num_players: 500,
-        num_sets: 250,
+        num_entities: 500,
+        num_collections: 250,
     };
     let data = generate(&cfg);
 

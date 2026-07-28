@@ -127,9 +127,9 @@ fn ingest_dsl_preload_is_emitted_under_ownership() {
     use crate::cluster::shard::Shard;
 
     let norm = norm();
-    let dict = Arc::new(frozen_dict(&["1994 topps"], &norm));
+    let dict = Arc::new(frozen_dict(&["1994 acme"], &norm));
     let server = ShardServer::new(Arc::clone(&norm), dict, EngineConfig::default());
-    server.ingest_dsl(&[(7u64, "1994 topps".to_string())]);
+    server.ingest_dsl(&[(7u64, "1994 acme".to_string())]);
 
     let (_, st) = server.loaded_slot(0).expect("slot 0 loaded");
     let context = crate::ownership::OwnershipContext::new(
@@ -142,7 +142,7 @@ fn ingest_dsl_preload_is_emitted_under_ownership() {
     let (ids, _) = st
         .shard
         .percolate_filtered_owned(
-            "1994 topps baseball",
+            "1994 acme appliance",
             true,
             &crate::exact::TagPredicate::empty(),
             &context,

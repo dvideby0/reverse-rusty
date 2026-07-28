@@ -19,16 +19,16 @@ fn add_then_percolate_then_remove_roundtrip() {
     let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
 
     let qid = 7_777_777u64;
-    // class A: rare anchor (rareplayer0 is in the frozen dict via the any-of injection).
+    // class A: rare anchor (rareentity0 is in the frozen dict via the any-of injection).
     let placed = cluster
-        .add_query(qid, "1994 upper deck rareplayer0")
+        .add_query(qid, "1994 north star rareentity0")
         .unwrap();
     assert!(
         matches!(placed, AddOutcome::Placed { .. }),
         "expected class-A Placed, got {placed:?}"
     );
 
-    let title = "1994 upper deck rareplayer0 psa 10";
+    let title = "1994 north star rareentity0 pro";
     assert!(
         cluster.percolate(title).unwrap().contains(&qid),
         "a live-added query must match a title that satisfies it"
@@ -62,7 +62,7 @@ fn live_add_with_new_required_term_is_absorbed_not_broadened() {
 
     let qid = 9_100_001u64;
     let placed = cluster
-        .add_query(qid, "1994 upper deck zzgloxinia")
+        .add_query(qid, "1994 north star zzgloxinia")
         .unwrap();
     assert!(
         matches!(placed, AddOutcome::Placed { .. }),
@@ -70,7 +70,7 @@ fn live_add_with_new_required_term_is_absorbed_not_broadened() {
     );
 
     // A title containing the new term satisfies the query -> matched (zero false negative).
-    let with_term = "1994 upper deck zzgloxinia psa 10";
+    let with_term = "1994 north star zzgloxinia pro";
     assert!(
         cluster.percolate(with_term).unwrap().contains(&qid),
         "a new term must be absorbed so its query still matches a title containing it"
@@ -78,8 +78,8 @@ fn live_add_with_new_required_term_is_absorbed_not_broadened() {
 
     // A title WITHOUT the new term (but with the query's other required features) must NOT
     // match -> the query did not broaden. (With the old drop-on-miss behavior the query
-    // would collapse to "1994 upper deck" and match this title.)
-    let without_term = "1994 upper deck rookie psa 10";
+    // would collapse to "1994 north star" and match this title.)
+    let without_term = "1994 north star new pro";
     assert!(
         !cluster.percolate(without_term).unwrap().contains(&qid),
         "the query must not broaden: a title lacking the new term must not match"
@@ -113,7 +113,7 @@ fn live_add_with_all_unknown_anyof_group_is_satisfiable() {
     // A title containing either member satisfies the any-of -> matched (no false negative).
     assert!(
         cluster
-            .percolate("1994 upper deck zznovela psa 10")
+            .percolate("1994 north star zznovela pro")
             .unwrap()
             .contains(&qid),
         "an all-new any-of group must be satisfiable, not collapse to a missed match"

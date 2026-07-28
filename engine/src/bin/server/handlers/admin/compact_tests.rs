@@ -59,8 +59,8 @@ fn engine_with_two_segments() -> Engine {
         ..EngineConfig::default()
     };
     let mut engine = Engine::with_config(Normalizer::default_vocab().expect("vocab"), config);
-    engine.build_from_queries(&[(1, "1994 topps".into())]);
-    engine.bulk_ingest(&[(2, "1986 fleer".into())]);
+    engine.build_from_queries(&[(1, "1994 acme".into())]);
+    engine.bulk_ingest(&[(2, "1986 vertex".into())]);
     assert_eq!(engine.metrics().base_segments, 2);
     engine
 }
@@ -158,9 +158,9 @@ async fn force_merge_honors_the_familiar_flush_control() {
             ..EngineConfig::default()
         };
         let mut engine = Engine::with_config(Normalizer::default_vocab().expect("vocab"), config);
-        engine.build_from_queries(&[(1, "1994 topps".into())]);
+        engine.build_from_queries(&[(1, "1994 acme".into())]);
         engine
-            .try_insert_live("1986 fleer", 2, 1)
+            .try_insert_live("1986 vertex", 2, 1)
             .expect("memtable insert");
         state_with_engine(engine)
     };
@@ -288,8 +288,8 @@ async fn durable_failure_rolls_back_and_is_a_failed_shard() {
         ..EngineConfig::default()
     };
     let mut engine = Engine::with_config(Normalizer::default_vocab().expect("vocab"), config);
-    engine.build_from_queries(&[(1, "1994 topps".into())]);
-    engine.bulk_ingest(&[(2, "1986 fleer".into())]);
+    engine.build_from_queries(&[(1, "1994 acme".into())]);
+    engine.bulk_ingest(&[(2, "1986 vertex".into())]);
     let state = state_with_engine(engine);
 
     let segments = dir.join("segments");

@@ -9,7 +9,7 @@ async fn cluster_exhaustive_creation_matches_the_local_http_contract() {
             "POST",
             "/_percolate/jobs?timeout=2s&allow_partial_search_results=false",
             &serde_json::json!({
-                "document": {"title": "1994 topps"}
+                "document": {"title": "1994 acme"}
             }),
         ),
     )
@@ -64,7 +64,7 @@ async fn cluster_exhaustive_stream_matches_the_local_http_contract() {
             "POST",
             "/_percolate/jobs?timeout=2s&allow_partial_search_results=false",
             &serde_json::json!({
-                "document": {"title": "1994 topps"}
+                "document": {"title": "1994 acme"}
             }),
         ),
     )

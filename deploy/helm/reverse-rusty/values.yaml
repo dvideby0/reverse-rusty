@@ -76,7 +76,7 @@ coordinator:
   # Broad (class-C) queries match by default when true; also a per-request flag in the
   # _search body, so leave off unless every request should include broad.
   includeBroad: false
-  # Accept negation-only (class-D) queries (e.g. `-reprint`). The coordinator is the
+  # Accept negation-only (class-D) queries (e.g. `-refurbished`). The coordinator is the
   # sole gate; remote shards accept whatever it places (no per-shard flag, ADR-080/082).
   acceptClassD: false
   # Route by the committed shard->node assignments instead of the static --shard-endpoint

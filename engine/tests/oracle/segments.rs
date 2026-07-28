@@ -20,8 +20,8 @@ fn multi_segment_identical_to_single_build() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x5E6_3A77,
-        num_players: 2_500,
-        num_sets: 1_000,
+        num_entities: 2_500,
+        num_collections: 1_000,
     };
     let data = generate(&cfg);
     let q = &data.queries;
@@ -39,7 +39,7 @@ fn multi_segment_identical_to_single_build() {
 
     // pick some logical ids from the initial batch to update with new text
     let new_text =
-        "1994 upper deck michael jordan sp preview psa 10 -(auto,signed,sgc,bgs)".to_string();
+        "2024 north star wireless mouse limited pro -(manual,used,damaged,refurbished)".to_string();
     let mut updates: Vec<(u64, String)> = Vec::new();
     let mut i = 7usize;
     while i < n_init && updates.len() < 200 {
@@ -50,7 +50,7 @@ fn multi_segment_identical_to_single_build() {
     let updated_ids: HashSet<u64> = updates.iter().map(|(l, _)| *l).collect();
 
     // ---- multi-segment engine ----
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&q[..n_init]); // base segment 0
     eng.bulk_ingest(b0); // base segment 1
     eng.bulk_ingest(b1); // base segment 2
@@ -87,7 +87,7 @@ fn multi_segment_identical_to_single_build() {
             final_set.push((*logical, text.clone()));
         }
     }
-    let mut reference = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut reference = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     reference.build_from_queries(&final_set);
 
     // brute-force oracle over the same final live set (zero-false-negative check)
@@ -155,7 +155,7 @@ fn multi_segment_identical_to_single_build() {
 /// first base segment. Reconstructs segment-0 local ids by replaying the build
 /// order (queries added in order, class-D skipped) with an independent matcher.
 fn tombstone_originals(eng: &mut Engine, build_batch: &[(u64, String)], updated: &HashSet<u64>) {
-    let norm = Normalizer::default_vocab().expect("built-in vocab");
+    let norm = Normalizer::default_vocab().expect("default vocabulary");
     let mut dict = Dict::new();
     let mut lc = String::new();
     let mut local: u32 = 0;
@@ -191,8 +191,8 @@ fn compaction_preserves_correctness() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xC0_AC7,
-        num_players: 2_500,
-        num_sets: 1_000,
+        num_entities: 2_500,
+        num_collections: 1_000,
     };
     let data = generate(&cfg);
     let q = &data.queries;
@@ -200,7 +200,7 @@ fn compaction_preserves_correctness() {
 
     // Build 5 base segments + some tombstones (simulating update churn)
     let chunk = n / 5;
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&q[..chunk]); // segment 0
     eng.bulk_ingest(&q[chunk..2 * chunk]); // segment 1
     eng.bulk_ingest(&q[2 * chunk..3 * chunk]); // segment 2
@@ -208,7 +208,7 @@ fn compaction_preserves_correctness() {
     eng.bulk_ingest(&q[4 * chunk..]); // segment 4
 
     // Simulate updates: re-insert some queries with new text, tombstone originals
-    let new_text = "1994 upper deck michael jordan sp preview psa 10 -(auto,signed)".to_string();
+    let new_text = "2024 north star wireless mouse limited pro -(manual,used)".to_string();
     let mut updated_ids: HashSet<u64> = HashSet::new();
     let mut i = 11usize;
     while i < chunk && updated_ids.len() < 150 {
@@ -326,14 +326,14 @@ fn compact_range_preserves_correctness() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xBA_93E,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
     let q = &data.queries;
     let chunk = q.len() / 4;
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&q[..chunk]);
     eng.bulk_ingest(&q[chunk..2 * chunk]);
     eng.bulk_ingest(&q[2 * chunk..3 * chunk]);

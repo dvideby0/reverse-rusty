@@ -1,218 +1,100 @@
-# Corpus-Driven Feature Learning — building the "tokenizer" from the queries
+# Corpus-driven feature learning
 
-*Can we build the feature extractor (the normalizer / tokenizer) **from the supplied queries
-themselves**, so we never hand-enumerate that "jo kep" is a player, "upper deck" is a brand, and so
-on — given no oracle of every entity that exists, and queries that don't tag fields? Short answer:
-yes for the part that controls candidate selectivity (demonstrated and measured in
-`engine/src/bin/learn.rs`). The one part not freely learnable without risk is cross-form equivalence
-(aliasing); §5 explains exactly why and how to do it safely.*
+*Can the feature vocabulary be built from supplied queries instead of embedded product knowledge?
+Largely yes. Phrase induction and any-of learning are implemented; alias activation remains
+review-governed because equivalence changes match semantics.*
 
----
+## 1. Why the matching core does not need a taxonomy
 
-## 1. The reframing that makes this possible
+Candidate selection uses observed query-document frequency, not `FeatureKind`. The compiler asks
+which positive requirement or required any-of branch gives the cheapest lossless cover. It does not
+need to know whether that requirement represents a brand, model, entity, category, or ordinary word.
 
-Our matching core is already **semantics-agnostic**. Look at what actually selects candidates in
-`compile.rs::build_signatures`: it uses `dict.freq(feature)` and `is_hot(feature)` — pure
-**frequency rank**. It never consults the `FeatureKind` ("player" vs "brand" vs "grade") to choose an
-anchor. The hand-built vocabulary was only ever doing two jobs:
+Vocabulary improves two independent things:
 
-1. **Gluing multi-token entities** into one feature (`michael jordan` → one token), which *raises
-   selectivity* (a two-word unit is rarer than either word).
-2. **Canonicalizing equivalent surface forms** (`PSA 10` = `PSA10` = `PSA GEM MT 10`; `UD` =
-   `Upper Deck`), which *raises recall of user intent*.
+1. **Phrase gluing** turns a recurring multi-token expression such as `wireless mouse` into one
+   feature, often producing a shorter candidate posting.
+2. **Surface-form relationships** let `north star`, `northstar`, and `ns` express one operator-approved
+   concept.
 
-Neither job requires knowing *what* the thing is. And there are two more facts that make the corpus
-sufficient:
+The first can be proposed from corpus statistics. The second needs governance because an apparent
+substitute may instead be a related but distinct category.
 
-- **The query corpus defines the entire feature universe.** A token that appears in *no* stored query
-  is irrelevant to matching — our `match_features` already drops title tokens that aren't in the
-  dictionary. So we never need a global entity list; we need only the tokens/phrases that some query
-  actually uses.
-- **Selectivity is a measurable statistic**, not a semantic judgment. "jo kep" is a good anchor iff it
-  is *rare in the corpus* — which we can count directly.
+## 2. Implemented learning sources
 
-So the feature extractor we need is: a corpus-learned **(a) tokenizer + (b) multi-token-entity glue +
-(c) frequency table**, plus a carefully-bounded **(d) equivalence learner**.
+### Any-of relationships
 
----
+Repeated query groups such as `(package,pkg)` provide evidence that two forms are alternatives.
+The free function `reverse_rusty::vocab::learn_from_queries` can emit collapse synonyms, while
+`reverse_rusty::vocab::learn_equivalences_from_queries` can emit widening equivalence groups.
+`min_count` bounds one-off noise.
 
-## 2. What we built and measured (`learn` binary)
+An any-of group is still only a disjunction, not proof of identity. Clear single-token spelling or
+abbreviation variants may auto-activate under the alias policy; distinct words and multi-word forms
+remain review candidates.
 
-We take raw query text (no `Vocab`, no field taxonomy — the learner sees only strings), tokenize on
-whitespace/punctuation, count unigrams and adjacent bigrams, and induce multi-token entities with
-**NPMI collocation mining** (the word2vec / Mikolov "New York" phrase trick):
+### NPMI phrase induction
 
-```
-NPMI(a,b) = ln( P(ab) / (P(a)·P(b)) ) / ( −ln P(ab) )      merge if NPMI ≥ τ and count ≥ min_count
+The corpus learner counts unigrams and adjacent n-grams, then proposes phrases whose normalized
+pointwise mutual information and count exceed configured thresholds:
+
+```text
+NPMI(a,b) = ln(P(ab) / (P(a)·P(b))) / -ln(P(ab))
 ```
 
-We iterate (bigram → trigram) by rewriting the corpus with merged phrases and re-mining.
+It can iterate from bigrams to longer expressions by rewriting the corpus with accepted phrases.
+The runtime surface is `CorpusLearnConfig` and
+`POST /_vocab/learn[/_and_apply]?corpus_phrases=true`.
 
-**Result on 500,000 synthetic queries, zero hand-coded vocabulary** (`min_count=50, τ=0.30`):
+Learned phrases are additive: a match emits the phrase feature and keeps its component features.
+That protects queries which require a component. A query written in the learned phrase form still
+adopts adjacency semantics, so phrase induction is opt-in, reviewable, and evaluated against a
+labeled corpus rather than assumed universally correct.
 
-```
---- name-like entities, top by binding strength (npmi) ---
-upper_deck       count 63696   npmi 1.073
-michael_jordan   count  4239   npmi 1.043
-lebron_james     count  1811   npmi 1.038
-kobe_bryant      count  1402   npmi 1.037
-ken_griffey      count  1162   npmi 1.036
-wayne_gretzky    count  1002   npmi 1.035
-tom_brady        count   986   npmi 1.035
-mike_trout       count   858   npmi 1.035
-patrick_mahomes  count   816   npmi 1.034
-```
+### Distributional alias proposals
 
-It discovered **every multi-word player and the multi-word brand** — the exact entities the hand-built
-vocab encoded — without ever being told players or brands exist. It also learned grader+grade units
-(`psa_10`, `psa_9.5`, `bgs_8`) and longer trigrams (`rookie_psa_8`). The feature universe it derived
-was ~17,200 distinct unigrams + ~190 learned entities, entirely from co-occurrence.
+Tokens with similar query contexts can be proposed as aliases. This is a noisy signal: substitutes
+and co-categories often have similar neighbors. Distributional discovery therefore never activates
+matching by itself. It records ranked candidates for review (ADR-102).
 
-**Selectivity gain (the payoff for candidate counts):** a learned entity used as the anchor has a
-lower document-frequency than either of its parts, so its candidate posting is shorter:
+### Match-feedback evidence
 
-```
-learned entity      df(phrase)   min df(part)   gain
-psa_10                   24,115        41,092    1.7×
-bgs_8                    35,206        71,153    2.0×
-sp_psa                   17,194        49,739    2.9×
-rookie_psa               17,036        50,408    3.0×
-```
+For a tracked two-form candidate, the feedback loop compares sampled query-match sets for titles
+containing either form. Strong overlap is useful evidence but still does not mutate semantics unless
+an operator explicitly activates the candidate (ADR-103).
 
-Multi-word *names* (rare entities) gain far more — `michael_jordan` (df ≈ 4,239) is a vastly better
-anchor than `michael` or `jordan` alone. This is candidate reduction obtained *for free* from the
-corpus, with no taxonomy. (Full learner capture in
-[`../performance/benchmark-results.txt`](../performance/benchmark-results.txt).)
+## 3. Correctness boundaries
 
----
+- Token cleaning, punctuation, and numeric context are safe only when the same configuration runs on
+  both queries and titles.
+- Additive phrase features can widen candidate retrieval; exact verification remains authoritative.
+- Equivalence expansion widens positive requirements and cannot remove an existing match, but a bad
+  equivalence can add false-positive results. It is therefore governed and reversible.
+- Destructive one-sided canonicalization is forbidden because it can create false negatives.
+- Query frequency chooses anchors but never changes Boolean truth.
 
-## 3. Which parts are SAFE to learn (and why they can't break the contract)
+These boundaries are why the engine exposes vocabulary as data and recompiles stored queries when it
+changes.
 
-The zero-false-negative contract requires only that **queries and titles normalize consistently** and
-that signatures are built from required features. Against that bar:
+## 4. Operational workflow
 
-- **Tokenization** — deterministic, applied identically to queries and titles. Safe.
-- **Entity gluing (phrase induction)** — safe, and this is the important one. The learned phrase set is
-  applied identically at compile time and match time. If the learner *wrongly* glues two tokens, the
-  worst outcome is a slightly different (still consistent) feature, which can only produce extra
-  **candidate** false positives — caught by exact verification, never a false negative. If it *fails*
-  to glue a real entity, we just fall back to the unigram anchors (less selective, still correct).
-  So phrase learning can only ever change *performance*, not *correctness*.
-- **Frequency / selectivity model** — pure counting; feeds the existing optimizer. Safe.
+1. Ingest representative stored queries.
+2. Preview any-of and NPMI results with `POST /_vocab/learn`.
+3. Run alias discovery for additional review candidates.
+4. Validate proposals against labeled query/title pairs and, optionally, match-feedback evidence.
+5. Install reviewed vocabulary with `PUT /_vocab` or `learn_and_apply`.
+6. Persist the resulting `GET /_vocab` document for single-node reopen; clusters checkpoint it.
+7. Re-run the independent oracle and workload benchmarks after every semantic vocabulary change.
 
-In other words, the entire selectivity-relevant half of normalization is **freely learnable from the
-corpus with no correctness risk**, because it only influences which anchor we pick, and the exact
-matcher is the source of truth.
+The engine can therefore reach selective, category-aware matching without category-specific code.
+The caller supplies structured knowledge directly or lets the generic learners propose it through
+the same vocabulary API.
 
----
+Run the standalone learner:
 
-## 4. The numeric/pattern features come almost for free too
-
-`year:1994`, `grade:10` were pattern rules in the hand normalizer. Two corpus-driven options:
-
-- **Treat numbers as ordinary tokens.** `1994` is just a token with a measured df; the optimizer ranks
-  it like anything else. No rule needed. (Range queries — "1990–1995" — would need an explicit
-  integer-comparison literal.)
-- **Auto-detect token *classes* by behavior**, optionally: tokens that share positional and
-  co-occurrence statistics form a latent "field" (all 4-digit 19xx/20xx tokens behave alike; graders
-  behave alike). This recovers field structure *without naming it*, via clustering — useful for the
-  common-mask assignment, but not required for correctness.
-
----
-
-## 5. The one risky part — equivalence / aliasing — and how to do it safely
-
-`UD` ≡ `Upper Deck`, `MJ` ≡ `Michael Jordan`, `PSA10` ≡ `PSA 10`. This is the *only* job that touches
-**exact-match semantics**, so it's the only one where learning can hurt correctness:
-
-- A **wrong** equivalence (merging two genuinely different things) → false-positive **results**
-  (precision loss), not just candidates.
-- A **destructive, inconsistent** canonicalization (collapsing a form on one side but not the other) →
-  false **negatives** — a contract violation.
-
-Note phrase induction already absorbs the *adjacency* variants safely: `PSA10` (one token) and
-`PSA 10` (two adjacent tokens → glued to `psa_10`) both land on the same feature, no equivalence
-machinery needed. The genuinely hard cases are **non-adjacent / abbreviation** equivalences (`UD` vs
-`upper deck`). Three escalating, precision-first techniques:
-
-1. **Distributional similarity.** Two tokens are equivalence candidates if they appear in highly
-   similar query *contexts* (same neighbor distributions). Cheap to compute from the same co-occurrence
-   counts; medium precision — propose, don't auto-apply.
-2. **Match-feedback validation.** Use the title→query stream: if titles that say `UD` and titles that
-   say `upper deck` satisfy the *same* query sets, that's strong, behavioral evidence of equivalence.
-   This is self-supervising and high-precision.
-3. **Expansion, not collapse.** Implement a confirmed equivalence by *expanding* a query to index under
-   *both* surface forms (an any-of over learned-equivalent features) rather than destructively rewriting
-   to a canonical token. Expansion only *adds* signatures, so it can never drop a true match; a wrong
-   expansion costs candidate false positives, not false negatives. Exact match must also honor the
-   equivalence, so equivalences stay **confidence-gated, human-overridable, and reversible**.
-
-Practical recommendation: seed a tiny curated alias set for the few high-value, high-risk equivalences
-(graders, the handful of canonical brands), and let the corpus learner propose the long tail under
-techniques 1–2, applied via 3. The 80% (entity gluing + selectivity) is fully automatic; the risky
-20% (aliasing) is automatic-with-a-safety-rail.
-
----
-
-## 6. How it slots into the architecture
-
-The learner is an **offline job over the query corpus** that emits a *compiled feature model*:
-
-```
-feature_model = {
-  token -> dense id,
-  learned phrases  -> a daachorse double-array automaton (now DATA-DERIVED, not hand-written),
-  df / frequency table,
-  optional token-class clusters (latent fields),
-  confirmed equivalence classes (with confidence + provenance),
-}
+```bash
+cargo run --release --bin learn -- 500000 50 0.30
 ```
 
-The engine loads this model as its normalizer — the same `Normalizer::emit` interface, but the phrase
-list and frequencies come from the model instead of `default_vocab()`. The daachorse automaton we
-already named as the production phrase extractor ([`prior-art.md`](prior-art.md) §5) is the natural
-runtime carrier; the only change is that its patterns are *learned* rather than coded.
-
-This also **ties into the "improving compaction" loop** (see the
-[design overview](../design/README.md) and [ingestion design](../design/ingestion-and-updates.md)):
-each compaction
-re-runs the learner on the current query population, re-discovers entities and frequencies, re-ranks
-anchors, and rewrites poor signature covers. The feature extractor becomes a living artifact that
-tracks the query corpus, instead of a static dictionary that goes stale.
-
-### 6.1 Now wired as a runtime vocab source (ADR-053)
-
-The phrase-induction half of this is **built**. The NPMI core is now a library module
-(`src/corpus.rs`) — `tokenize` / `learn_phrases` / `apply_phrases` plus `learn_phrases_from_text`,
-which returns the induced entities as a `Vocab` of phrase entries. It is composed **under** the
-ADR-015 any-of synonym learner via an opt-in `vocab::CorpusLearnConfig` (`corpus_phrases`, default
-off), threaded through `Engine::learn_and_apply_with` / `ClusterEngine::learn_and_apply_with` and the
-`POST /_vocab/learn[/_and_apply]?corpus_phrases=true` endpoints. So an operator can self-derive the
-phrase feature model from the live corpus on demand — no offline job, no hand-coded vocabulary — and
-apply it through the proven `set_vocab` + recompile / blue-green machinery (ADR-046). Because this engine
-is a **recall-first candidate generator**, corpus phrases are applied **additively** (emit the phrase
-feature AND keep the component features), so a query referencing a component never loses a candidate;
-engine ≡ brute under the learned normalizer (oracle-proven, single-engine + cluster). The honest residual
-is that a phrase-*form* query tightens to adjacency (re-tokenization) — negligible for genuine entities,
-and the feature is opt-in/reviewable/reversible. Phrases only; the **aliasing** safety rail (§5) is now
-built via expansion ([ADR-054](../decisions/adr-054-equivalence-expansion.md)), and the
-**compaction**-driven re-materialize (§6) is the roadmap's
-[`vocabulary consolidation`](../roadmap.md#vocabulary-consolidation-during-compaction) item.
-
----
-
-## 7. Bottom line
-
-The hand-built vocabulary was never load-bearing for *correctness* or for the *core selectivity
-mechanism* — the matcher ranks anchors by frequency, and the query corpus is the feature universe.
-We demonstrated, on 500k queries with zero hand-coded vocabulary, that NPMI collocation mining
-recovers exactly the entities we had encoded by hand (all multi-word players, the brand, grader+grade
-units) and delivers 1.7–3× selectivity gains, purely from co-occurrence. So:
-
-- **Build the tokenizer/feature-extractor from the queries** — entity gluing and frequencies:
-  fully automatic, zero correctness risk, and it directly optimizes candidate counts.
-- **Keep a thin safety rail only around aliasing** — expansion-not-collapse, feedback-validated,
-  confidence-gated — because that is the only sub-problem that can affect result correctness.
-- **Wire it into compaction** so the feature model self-updates with the query population.
-
-Run it: `cargo run --release --bin learn -- 500000 50 0.30`.
+No checked-in learner capture is treated as a production baseline; phrase quality depends on the
+deployment corpus.

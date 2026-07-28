@@ -80,31 +80,31 @@ mkdir -p "$RR_CORPUS_DIR"
 {
   for i in $(seq 0 79); do
     year=$((1986 + i % 39))
-    echo "$((1000 + i)),\"$year topps rareplayer$i\""
+    echo "$((1000 + i)),\"$year acme rareproduct$i\""
   done
   for i in $(seq 0 39); do
-    echo "$((2000 + i)),\"(rareplayer$i,rareplayer$((i + 200)))\""
+    echo "$((2000 + i)),\"(rareproduct$i,rareproduct$((i + 200)))\""
   done
   for i in $(seq 0 39); do
     year=$((1986 + i % 39))
-    echo "$((3000 + i)),\"$year fleer rareplayer$((i + 40))\""
+    echo "$((3000 + i)),\"$year vertex rareproduct$((i + 40))\""
   done
   # broad (hot-only) queries ride the replicated lane.
   for i in $(seq 0 19); do
     year=$((1986 + i))
-    echo "$((4000 + i)),\"$year topps\""
+    echo "$((4000 + i)),\"$year acme\""
   done
 } > "$RR_CORPUS_DIR/queries.csv"
 
 PROBES=()
 for i in 0 7 19 33 41 55 63 77; do
   year=$((1986 + i % 39))
-  PROBES+=("$year topps rareplayer$i psa 10")
+  PROBES+=("$year acme rareproduct$i pro")
 done
 for i in 3 21 38; do
-  PROBES+=("rareplayer$((i + 200)) gem mint")
+  PROBES+=("rareproduct$((i + 200)) premium pro")
 done
-PROBES+=("1990 topps sealed box")
+PROBES+=("1990 acme sealed box")
 
 # ---------------------------------------------------------------------------
 if [[ -n "$PREBUILT_DIR" ]]; then
@@ -187,8 +187,8 @@ step "leg 0 — baseline over the secured mesh"
 wait_for_green "startup"
 total=$(rqcurl -f "$BASE/_stats" | jq '.total_queries')
 [[ "$total" -gt 0 ]] || fail "corpus did not load (total_queries=$total)"
-[[ "$(put_doc 9001 'zzharness gem mint')" == "201" ]] || fail "live write rejected"
-PROBES+=("zzharness gem mint psa 10")
+[[ "$(put_doc 9001 'zzharness premium pro')" == "201" ]] || fail "live write rejected"
+PROBES+=("zzharness premium pro")
 snapshot_baseline "$WORK/baseline.txt"
 grep -q '9001' <(tail -1 "$WORK/baseline.txt") || fail "live write not matchable"
 echo "    baseline captured (${#PROBES[@]} probes, $total queries)"

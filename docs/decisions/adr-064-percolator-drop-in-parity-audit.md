@@ -40,13 +40,11 @@
      consistent with "never gate on MUST_NOT" (the cover of an empty positive set is the universal
      signature). Rides the broad-lane batching for amortization (the analogue of OS's blind per-doc
      evaluation). Interim integration contract: callers side-list class-D rejections as always-candidates.
-  3. **A parity-mode normalizer knob disables the `pop` number-context demotion.** The hard-coded rule
-     (a 4-digit 1900–2099 token immediately after `pop` emits `term:N`, not `year:N`) makes number
-     typing **position-sensitive** — the *one residual false-negative class* the audit demonstrated in
-     both directions against a position-insensitive reference matcher (a query-side year vs a title-side
-     `pop`-adjacent year, and vice versa). Decision: a vocab-persisted knob disabling the context rule
-     (and evaluate emitting both typings title-side in parity mode — recall-superset, FP-only); default
-     = current behavior, byte-identical.
+  3. **Number-context typing becomes explicit vocabulary.** Some catalogs use four-digit model
+     identifiers while others use the same shape as a year. Decision: persist a caller-defined
+     `number_context` list in `Vocab` and apply it symmetrically to queries and titles. Compiler
+     semantics 5 makes the default list empty; a catalog that needs `model 1995` to stay generic
+     declares `model`.
   4. **Non-string tag values fail loud.** Ingest silently drops a non-string tag value
      (`{"tags": {"priority": 7}}` ingests with *no* priority tag and no error) and a filter value array
      silently drops non-string elements, while a scalar non-string filter value 400s — an inconsistent
@@ -80,7 +78,7 @@
   4–6 turn silent behavior loud. Nothing alters the lossless-cover contract — the class-D lane *extends*
   it. Each item must keep the full oracle + adversarial suites green and ship with its own tests
   (item 1 needs a re-PUT-narrower-then-percolate pin; item 2 a vacuous-accept differential; item 3
-  golden pins for the `pop` cases).
+  golden pins for empty and custom numeric-context cases).
 - **See also:** ADR-049/055/059 (the percolator-parity family), ADR-046 (synthetic IDs — the audit
   leaned on both-sides hashing), ADR-026 (the broad lane — the class-D lane's home), ADR-018 (`/_bulk`
   per-item statuses — verified matching the reference bulk contract), ADR-065 (Distributed v1 — the

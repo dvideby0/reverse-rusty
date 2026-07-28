@@ -2,7 +2,7 @@
 //!
 //! Question: can we build the "tokenizer"/feature extractor FROM the supplied
 //! queries, with zero hand-coded vocabulary — so we never have to enumerate
-//! that "jo kep" is a player?
+//! that "north star" is an entity?
 //!
 //! Answer demonstrated here: yes for the parts that matter for candidate
 //! selectivity. We take raw query text (no Vocab, no field taxonomy), and:
@@ -13,7 +13,7 @@
 //!   4. measure the SELECTIVITY GAIN: a learned phrase's document-frequency
 //!      vs its parts' — a rarer anchor = a smaller candidate posting.
 //!
-//! Nothing here knows what a "player" or "brand" is. It only uses co-occurrence
+//! Nothing here knows what a "entity" or "brand" is. It only uses co-occurrence
 //! statistics from the query corpus.
 //!
 //! Usage: learn [num_queries] [min_count] [npmi_tau]
@@ -33,7 +33,7 @@ fn main() {
     let min_count = args.get(2).and_then(|x| x.parse().ok()).unwrap_or(50usize);
     let tau = args.get(3).and_then(|x| x.parse().ok()).unwrap_or(0.30f64);
 
-    // Generate raw query text. We deliberately ignore the hand-built normalizer
+    // Generate raw query text. We deliberately ignore the configured normalizer
     // and treat each query as an opaque string — the learner sees only text.
     let cfg = GenConfig {
         num_queries,
@@ -42,8 +42,8 @@ fn main() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xFEED,
-        num_players: (num_queries / 40).max(2_000),
-        num_sets: (num_queries / 100).max(1_000),
+        num_entities: (num_queries / 40).max(2_000),
+        num_collections: (num_queries / 100).max(1_000),
     };
     let data = generate(&cfg);
 
@@ -66,7 +66,7 @@ fn main() {
     print_top(&phrases1, 18);
 
     // surface the NAME-LIKE entities (all-alphabetic parts) — these are the
-    // "players"/"brands" the learner found without ever being told they exist.
+    // "entities"/"brands" the learner found without ever being told they exist.
     let mut name_like: Vec<&Phrase> = phrases1
         .iter()
         .filter(|p| {
@@ -75,7 +75,7 @@ fn main() {
                 .all(|t| t.chars().all(|c| c.is_ascii_alphabetic()))
         })
         .collect();
-    // sort by NPMI: tightly-bound pairs (players/brands appear ONLY together)
+    // sort by NPMI: tightly-bound pairs (entities/brands appear ONLY together)
     // float to the top, above loosely co-occurring word pairs.
     name_like.sort_by(|a, b| b.npmi.partial_cmp(&a.npmi).unwrap());
     println!(

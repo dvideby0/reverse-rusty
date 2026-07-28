@@ -10,12 +10,12 @@ fn explain_hit_returns_structured_detail_for_matched_query() {
     let mut engine = Engine::new(norm);
 
     let queries = vec![
-        (1u64, "michael jordan 1986 fleer".to_string()),
-        (2u64, "kobe bryant psa 10".to_string()),
+        (1u64, "wireless mouse 1986 vertex".to_string()),
+        (2u64, "noise cancelling headphones pro".to_string()),
     ];
     engine.build_from_queries(&queries);
 
-    let title = "michael jordan 1986 fleer rookie card";
+    let title = "wireless mouse 1986 vertex new item";
     let ids = match_ids(&engine, title);
     assert!(ids.contains(&1), "query 1 should match");
 
@@ -46,9 +46,9 @@ fn explain_hit_shows_failure_for_non_matching_title() {
     let norm = make_norm();
     let mut engine = Engine::new(norm);
 
-    engine.build_from_queries(&[(1u64, "michael jordan 1986 fleer".to_string())]);
+    engine.build_from_queries(&[(1u64, "wireless mouse 1986 vertex".to_string())]);
 
-    let title = "kobe bryant 1996 topps chrome";
+    let title = "noise cancelling headphones 1996 acme chrome";
     let ids = match_ids(&engine, title);
     assert!(!ids.contains(&1), "query 1 should not match this title");
 
@@ -74,12 +74,12 @@ fn explain_hit_uses_dual_view_for_multiword_alias() {
     // canonical N(T) (which lacks the overlap-only `term:new_york`). This fails on the pre-fix
     // single-view explain.
     let mut engine = Engine::new(reverse_rusty::normalize::Normalizer::default_vocab().unwrap());
-    engine.build_from_queries(&[(1u64, "new york yankees".to_string())]);
+    engine.build_from_queries(&[(1u64, "new york inventory".to_string())]);
     engine
         .import_alias_synonyms("ny => new york\nnyc => new york city")
         .expect("apply multi-word aliases");
 
-    let title = "new york city yankees";
+    let title = "new york city inventory";
     assert!(
         match_ids(&engine, title).contains(&1),
         "the matcher hits via the positive superset P(T)"
@@ -127,21 +127,20 @@ fn explain_hit_reports_quoted_graphs_and_adjacency_failures() {
 }
 
 #[test]
-fn explain_candidate_uses_graph_labels_only_for_main_arity_one() {
+fn explain_candidate_respects_vocabulary_canonical_labels() {
     let mut builder = reverse_rusty::Normalizer::builder();
-    builder.add_grade_word("gem");
     builder.add_synonym(
         "stone",
-        "term:gem",
-        reverse_rusty::dict::FeatureKind::Generic,
+        "entity:mineral",
+        reverse_rusty::dict::FeatureKind::Entity,
     );
     let mut engine = Engine::new(builder.build().expect("normalizer"));
     engine.build_from_queries(&[(1, "\"red shoe\" stone common".to_string())]);
 
-    let title = "red shoe gem common";
+    let title = "red shoe mineral common";
     assert!(
         match_ids(&engine, title).is_empty(),
-        "the graph-only raw label for the grade word must not enter a class-B pair probe"
+        "a literal token must not impersonate a vocabulary canonical label"
     );
     let detail = engine.explain_hit(1, title).expect("explain detail");
     assert!(
@@ -152,42 +151,10 @@ fn explain_candidate_uses_graph_labels_only_for_main_arity_one() {
         detail
             .failures
             .iter()
-            .any(|failure| failure == "missing required term:gem"),
+            .any(|failure| failure == "missing required entity:mineral"),
         "got: {:?}",
         detail.failures
     );
-}
-
-#[test]
-fn explain_hit_matches_phrase_verifier_fail_open_guards() {
-    use reverse_rusty::dict::FeatureKind;
-
-    let mut builder = reverse_rusty::normalize::Normalizer::builder();
-    builder.add_grader("psa");
-    builder.add_phrase_alias(
-        &["unused", "alias"],
-        "term:unused_alias",
-        FeatureKind::Generic,
-    );
-    let mut engine = Engine::new(builder.build().expect("normalizer"));
-    engine.build_from_queries(&[(1u64, "\"red shoe\"".to_string())]);
-
-    let graders = std::iter::repeat_n("psa", 65).collect::<Vec<_>>().join(" ");
-    let title = format!("red {graders} boot");
-    assert_eq!(
-        match_ids(&engine, &title),
-        vec![1],
-        "the bounded positive graph deliberately fails open"
-    );
-
-    let detail = engine.explain_hit(1, &title).expect("explain detail");
-    assert!(detail.candidate);
-    assert!(
-        detail.matched,
-        "explain must apply the verifier's polarity-aware fail-open rule: {:?}",
-        detail.failures
-    );
-    assert!(detail.failures.is_empty());
 }
 
 #[test]

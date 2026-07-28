@@ -9,9 +9,9 @@ fn in_memory_backward_compat() {
     let mut engine = Engine::new(norm);
     engine.build_from_queries(&queries);
 
-    let title = "1986 Fleer Michael Jordan Rookie Card #57 PSA 10";
+    let title = "1986 Vertex Wireless Mouse New Item #57 PRO";
     let ids = match_ids(&engine, title);
-    // Should find at least query 1 (michael jordan 1986 fleer)
+    // Should find at least query 1 (wireless mouse 1986 vertex)
     assert!(ids.contains(&1), "backward compat: query 1 not found");
 }
 
@@ -82,7 +82,7 @@ fn logical_index_v2_delete_after_reopen() {
         eng.build_from_queries(&queries);
     }
     let mut eng = Engine::open(make_norm(), cfg()).expect("reopen");
-    let title = "1986 Fleer Michael Jordan Rookie PSA 10";
+    let title = "1986 Vertex Wireless Mouse New PRO";
     assert!(
         match_ids(&eng, title).contains(&1),
         "query 1 should match before delete"
@@ -97,7 +97,7 @@ fn logical_index_v2_delete_after_reopen() {
         "query 1 must not match after delete"
     );
     // A different query is unaffected.
-    assert!(match_ids(&eng, "LeBron James Rookie").contains(&2));
+    assert!(match_ids(&eng, "Mechanical Keyboard New").contains(&2));
     assert_eq!(
         eng.metrics().logical_index_bytes,
         0,
@@ -120,7 +120,7 @@ fn logical_index_v1_backcompat_reconstruct() {
     };
 
     // Expected matches from a normal (v2) build.
-    let title = "1986 Fleer Michael Jordan Rookie PSA 10";
+    let title = "1986 Vertex Wireless Mouse New PRO";
     let expected = {
         let mut eng = Engine::with_config(make_norm(), cfg());
         eng.build_from_queries(&queries);
@@ -180,7 +180,7 @@ fn corrupt_req_column_fails_loud_on_open() {
     // A query with a required (non-anchor) tail feature so `req_blob` is populated
     // and `req_off`/`req_len` point into it.
     let mut eng = Engine::with_config(make_norm(), config);
-    eng.build_from_queries(&[(1u64, "michael jordan 1986 fleer".into())]);
+    eng.build_from_queries(&[(1u64, "wireless mouse 1986 vertex".into())]);
     drop(eng); // seal + flush the base segment to disk
 
     // Find the written .seg.

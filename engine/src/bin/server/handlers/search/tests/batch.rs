@@ -37,9 +37,9 @@ async fn routed_v2_mpercolate(
 async fn v2_mpercolate_per_slot_equals_v2_search_and_shares_winner_sources() {
     let state = state_with(ranked_engine(), false);
     let titles = [
-        "2020 topps chrome update",
+        "2020 acme chrome update",
         "no match at all",
-        "2020 topps chrome update",
+        "2020 acme chrome update",
     ];
     let batch = v2_mpercolate(
         State(Arc::clone(&state)),
@@ -77,7 +77,7 @@ async fn v2_mpercolate_named_unsupported_shapes_and_empty_batch() {
     let Err(error) = v2_mpercolate(
         State(Arc::clone(&state)),
         Json(v2_batch_body(serde_json::json!({
-            "documents": [{"title": "topps chrome"}],
+            "documents": [{"title": "acme chrome"}],
             "explain": true
         }))),
     )
@@ -90,7 +90,7 @@ async fn v2_mpercolate_named_unsupported_shapes_and_empty_batch() {
     let Err(error) = v2_mpercolate(
         State(Arc::clone(&state)),
         Json(v2_batch_body(serde_json::json!({
-            "document": {"title": "topps chrome"}
+            "document": {"title": "acme chrome"}
         }))),
     )
     .await
@@ -112,7 +112,7 @@ async fn v2_mpercolate_named_unsupported_shapes_and_empty_batch() {
     let Err(error) = v2_mpercolate(
         State(Arc::clone(&state)),
         Json(v2_batch_body(serde_json::json!({
-            "documents": [{"title": "topps chrome", "size": 1}]
+            "documents": [{"title": "acme chrome", "size": 1}]
         }))),
     )
     .await
@@ -139,7 +139,7 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
         &state,
         "/v2/_mpercolate",
         serde_json::json!({
-            "documents": [{"title": "topps chrome"}],
+            "documents": [{"title": "acme chrome"}],
             "_source": false,
             "timeout": "1s",
             "track_total_hits": 1,
@@ -168,13 +168,13 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
         (
             "unknown query parameter",
             "/v2/_mpercolate?size=1",
-            serde_json::json!({"documents": [{"title": "topps chrome"}]}),
+            serde_json::json!({"documents": [{"title": "acme chrome"}]}),
         ),
         (
             "unknown top-level field",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "preference": "local"
             }),
         ),
@@ -182,14 +182,14 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
             "unknown document field",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome", "sku": "ABC-1"}]
+                "documents": [{"title": "acme chrome", "sku": "ABC-1"}]
             }),
         ),
         (
             "unknown rank field",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "rank": {"priority_field": "priority", "mode": "sum"}
             }),
         ),
@@ -197,7 +197,7 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
             "unknown boost field",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "rank": {
                     "boosts": [{
                         "key": "tenant",
@@ -212,7 +212,7 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
             "duplicate source alias",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "include_source": true,
                 "_source": false
             }),
@@ -221,7 +221,7 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
             "duplicate total alias",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "track_total_hits_up_to": 1,
                 "track_total_hits": 1
             }),
@@ -230,7 +230,7 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
             "duplicate timeout alias",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "timeout_ms": 1,
                 "timeout": "1s"
             }),
@@ -239,7 +239,7 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
             "duplicate partial-result alias",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "allow_partial_results": false,
                 "allow_partial_search_results": false
             }),
@@ -248,7 +248,7 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
             "boolean total alias",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "track_total_hits": true
             }),
         ),
@@ -256,7 +256,7 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
             "invalid timeout",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "timeout": "1fortnight"
             }),
         ),
@@ -264,7 +264,7 @@ async fn v2_mpercolate_route_supports_truthful_es_controls_and_strict_input() {
             "partial results",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "allow_partial_search_results": true
             }),
         ),
@@ -290,7 +290,7 @@ async fn v2_mpercolate_route_preserves_content_type_and_body_limit_statuses() {
     use tower::ServiceExt;
 
     let state = state_with(ranked_engine(), false);
-    let body = serde_json::json!({"documents": [{"title": "topps chrome"}]});
+    let body = serde_json::json!({"documents": [{"title": "acme chrome"}]});
     let app = Router::new()
         .route(
             "/v2/_mpercolate",

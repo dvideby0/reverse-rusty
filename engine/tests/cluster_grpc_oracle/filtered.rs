@@ -140,17 +140,17 @@ fn grpc_filtered_percolation_matches_single_node_and_oracle() {
         .add_query_with_tags(
             8_800_001,
             "zzgrpclivetag",
-            &[("category".to_string(), "cards".to_string())],
+            &[("category".to_string(), "items".to_string())],
         )
         .expect("live tagged add over gRPC");
-    let cards = vec![("category".to_string(), vec!["cards".to_string()])];
+    let items = vec![("category".to_string(), vec!["items".to_string()])];
     let coins = vec![("category".to_string(), vec!["coins".to_string()])];
     assert!(
         cluster
-            .percolate_filtered("zzgrpclivetag", &cards)
+            .percolate_filtered("zzgrpclivetag", &items)
             .unwrap()
             .contains(&8_800_001),
-        "the live tagged add must pass its own (cards) filter over gRPC"
+        "the live tagged add must pass its own (items) filter over gRPC"
     );
     assert!(
         !cluster
@@ -179,7 +179,7 @@ fn grpc_ranked_percolate_matches_single_node() {
     let raw_spec = reverse_rusty::RankSpec {
         priority_key: Some("priority".to_string()),
         boosts: vec![
-            ("category".to_string(), "cards".to_string(), 1000),
+            ("category".to_string(), "items".to_string(), 1000),
             ("status".to_string(), "active".to_string(), 250),
         ],
     };

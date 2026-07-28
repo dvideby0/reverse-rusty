@@ -19,7 +19,7 @@ pub(crate) const SENTINEL_ID_BASE: u64 = 600_000_000;
 pub(crate) const LIVE_ADD_ID_BASE: u64 = 700_000_000;
 
 pub(crate) fn make_norm() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 fn env_usize(key: &str, default: usize) -> usize {

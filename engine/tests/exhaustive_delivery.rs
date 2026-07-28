@@ -50,16 +50,16 @@ impl ChunkSink for PollingCancelSink {
 fn engine_with_physical_duplicates() -> Engine {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
     engine
-        .try_insert_live("michael jordan", 7, 1)
+        .try_insert_live("wireless mouse", 7, 1)
         .expect("first version");
     engine
-        .try_insert_live("michael jordan", 8, 1)
+        .try_insert_live("wireless mouse", 8, 1)
         .expect("second id");
     engine.flush();
     // Deliberate legacy append, not upsert: logical 7 now has two live physical
     // copies in different segments with different bodies.
     engine
-        .try_insert_live("lebron james", 7, 2)
+        .try_insert_live("mechanical keyboard", 7, 2)
         .expect("duplicate logical append");
     engine
 }
@@ -70,7 +70,7 @@ fn chunked_set_equals_compatibility_and_dedups_across_segments() {
     let snapshot = engine.snapshot();
     let mut expected = Vec::new();
     snapshot.match_title(
-        "michael jordan lebron james",
+        "wireless mouse mechanical keyboard",
         &mut MatchScratch::new(),
         &mut expected,
         true,
@@ -79,7 +79,7 @@ fn chunked_set_equals_compatibility_and_dedups_across_segments() {
     let mut sink = RecordingSink::default();
     let result = snapshot
         .try_match_title_chunks(
-            "michael jordan lebron james",
+            "wireless mouse mechanical keyboard",
             ExhaustiveOptions {
                 query_scope: QueryScope::WithBroad,
                 chunk_size: 1,
@@ -123,7 +123,7 @@ fn older_matching_version_survives_when_newer_duplicate_does_not_match() {
     let mut sink = RecordingSink::default();
     let result = snapshot
         .try_match_title_chunks(
-            "michael jordan",
+            "wireless mouse",
             ExhaustiveOptions {
                 query_scope: QueryScope::Standard,
                 chunk_size: 8,
@@ -154,7 +154,7 @@ fn sink_failure_never_produces_a_terminal_summary() {
     };
     let error = snapshot
         .try_match_title_chunks(
-            "michael jordan lebron james",
+            "wireless mouse mechanical keyboard",
             ExhaustiveOptions {
                 query_scope: QueryScope::WithBroad,
                 chunk_size: 1,
@@ -390,8 +390,8 @@ fn exhaustive_equals_compatibility_across_all_cost_classes_and_scopes() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0407_7E57,
-        num_players: 2_000,
-        num_sets: 1_000,
+        num_entities: 2_000,
+        num_collections: 1_000,
     });
     let mut next = data.queries.len() as u64;
     data.queries

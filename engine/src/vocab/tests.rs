@@ -4,7 +4,7 @@ use crate::dict::Dict;
 #[test]
 fn learn_discovers_synonyms_from_anyof_groups() {
     let queries: Vec<(u64, String)> = (0..20)
-        .map(|i| (i, format!("(rookie,rc) somethingunique{i:03}")))
+        .map(|i| (i, format!("(refurbished,refurb) somethingunique{i:03}")))
         .collect();
     let vocab = learn_from_queries(&queries, 2);
     assert!(
@@ -26,11 +26,11 @@ fn learn_ignores_below_threshold() {
 #[test]
 fn equivalence_only_vocab_is_not_empty() {
     // An expansion-mode vocab carrying only equivalence groups (no synonyms/
-    // phrases/graders/grade-words) must NOT report empty: those groups are
+    // phrases) must NOT report empty: those groups are
     // recall-bearing and a "skip if empty" guard would otherwise drop them.
     let mut vocab = Vocab::new();
     assert!(vocab.is_empty(), "a fresh vocab starts empty");
-    vocab.add_equivalence(&["rc", "rookie"]);
+    vocab.add_equivalence(&["refurb", "refurbished"]);
     assert!(
         !vocab.is_empty(),
         "a vocab with only an equivalence group must not be empty"
@@ -97,30 +97,30 @@ fn learn_canonical_selection_is_deterministic_under_collision() {
 #[test]
 fn learn_discovers_phrase_synonyms() {
     let queries: Vec<(u64, String)> = (0..20)
-        .map(|i| (i, format!("(\"michael jordan\",mj) rare{i:03}")))
+        .map(|i| (i, format!("(\"wireless mouse\",cordless) rare{i:03}")))
         .collect();
     let vocab = learn_from_queries(&queries, 2);
     let has_phrase = vocab
         .phrases
         .iter()
-        .any(|p| p.tokens == vec!["michael", "jordan"]);
-    assert!(has_phrase, "should learn 'michael jordan' as a phrase");
-    let has_syn = vocab.synonyms.iter().any(|s| s.token == "mj");
-    assert!(has_syn, "should learn 'mj' as a synonym");
+        .any(|p| p.tokens == vec!["wireless", "mouse"]);
+    assert!(has_phrase, "should learn 'wireless mouse' as a phrase");
+    let has_syn = vocab.synonyms.iter().any(|s| s.token == "cordless");
+    assert!(has_syn, "should learn 'cordless' as a synonym");
 }
 
 #[test]
 fn manual_synonym_management() {
     let mut vocab = Vocab::new();
-    vocab.add_synonym("rc", "term:rookie", FeatureKind::Category);
+    vocab.add_synonym("refurb", "category:refurbished", FeatureKind::Category);
     assert_eq!(vocab.synonyms().len(), 1);
-    assert!(vocab.get_synonym("rc").is_some());
+    assert!(vocab.get_synonym("refurb").is_some());
 
     // duplicate is ignored
-    vocab.add_synonym("rc", "term:rookie", FeatureKind::Category);
+    vocab.add_synonym("refurb", "category:refurbished", FeatureKind::Category);
     assert_eq!(vocab.synonyms().len(), 1);
 
-    assert!(vocab.remove_synonym("rc"));
+    assert!(vocab.remove_synonym("refurb"));
     assert!(vocab.synonyms().is_empty());
     assert!(!vocab.remove_synonym("nonexistent"));
 }
@@ -128,66 +128,83 @@ fn manual_synonym_management() {
 #[test]
 fn manual_phrase_management() {
     let mut vocab = Vocab::new();
-    vocab.add_phrase(&["upper", "deck"], "term:upper_deck", FeatureKind::Generic);
+    vocab.add_phrase(
+        &["wireless", "mouse"],
+        "entity:wireless_mouse",
+        FeatureKind::Entity,
+    );
     assert_eq!(vocab.phrases().len(), 1);
 
     // duplicate is ignored
-    vocab.add_phrase(&["upper", "deck"], "term:upper_deck", FeatureKind::Generic);
+    vocab.add_phrase(
+        &["wireless", "mouse"],
+        "entity:wireless_mouse",
+        FeatureKind::Entity,
+    );
     assert_eq!(vocab.phrases().len(), 1);
 
-    assert!(vocab.remove_phrase(&["upper", "deck"]));
+    assert!(vocab.remove_phrase(&["wireless", "mouse"]));
     assert!(vocab.phrases().is_empty());
 }
 
 #[test]
 fn json_round_trip() {
     let mut vocab = Vocab::new();
-    vocab.add_synonym("rc", "term:rookie", FeatureKind::Category);
+    vocab.add_synonym("refurb", "category:refurbished", FeatureKind::Category);
     vocab.add_phrase(
-        &["michael", "jordan"],
-        "term:michael_jordan",
-        FeatureKind::Generic,
+        &["wireless", "mouse"],
+        "entity:wireless_mouse",
+        FeatureKind::Entity,
     );
-    vocab.add_grader("psa");
-    vocab.add_grade_word("gem");
+    vocab.set_number_context_words(&["model"]);
 
     let json = vocab.to_json().unwrap();
     let restored = Vocab::from_json(&json).unwrap();
     assert_eq!(restored.synonyms().len(), 1);
     assert_eq!(restored.phrases().len(), 1);
-    assert_eq!(restored.graders().len(), 1);
-    assert_eq!(restored.grade_words().len(), 1);
+    assert_eq!(restored.number_context_words(), &["model".to_string()]);
+}
+
+#[test]
+fn json_rejects_unknown_fields() {
+    let error = Vocab::from_json(r#"{"synonyms":[],"unsupported":[]}"#)
+        .expect_err("unknown vocabulary fields must fail loud");
+    assert!(error.to_string().contains("unknown field"));
 }
 
 #[test]
 fn to_normalizer_produces_valid_normalizer() {
     let mut vocab = Vocab::new();
-    vocab.add_synonym("rc", "term:rookie", FeatureKind::Category);
-    vocab.add_phrase(&["upper", "deck"], "term:upper_deck", FeatureKind::Generic);
+    vocab.add_synonym("refurb", "category:refurbished", FeatureKind::Category);
+    vocab.add_phrase(
+        &["wireless", "mouse"],
+        "entity:wireless_mouse",
+        FeatureKind::Entity,
+    );
     let norm = vocab.to_normalizer().expect("should build normalizer");
 
     let mut dict = crate::dict::Dict::new();
     let mut lc = String::new();
-    let feats = norm.compile_features("upper deck rc", &mut dict, &mut lc);
+    let feats = norm.compile_features("wireless mouse refurb", &mut dict, &mut lc);
     assert!(feats.len() >= 2, "should produce features for known vocab");
 }
 
 #[test]
 fn merge_combines_vocabs() {
     let mut v1 = Vocab::new();
-    v1.add_synonym("rc", "term:rookie", FeatureKind::Category);
-    v1.add_grader("psa");
+    v1.add_synonym("refurb", "category:refurbished", FeatureKind::Category);
 
     let mut v2 = Vocab::new();
-    v2.add_synonym("ud", "term:upper_deck", FeatureKind::Generic);
-    v2.add_synonym("rc", "term:different", FeatureKind::Generic); // duplicate token
-    v2.add_grader("bgs");
+    v2.add_synonym("cordless", "entity:wireless", FeatureKind::Entity);
+    v2.add_synonym("refurb", "term:different", FeatureKind::Generic); // duplicate token
 
     v1.merge(&v2);
-    assert_eq!(v1.synonyms().len(), 2); // rc + ud
-    assert_eq!(v1.graders().len(), 2); // psa + bgs
-                                       // rc should keep original mapping (first wins)
-    assert_eq!(v1.get_synonym("rc").unwrap().canonical, "term:rookie");
+    assert_eq!(v1.synonyms().len(), 2);
+    // The duplicate token keeps its original mapping (first wins).
+    assert_eq!(
+        v1.get_synonym("refurb").unwrap().canonical,
+        "category:refurbished"
+    );
 }
 
 // ---- punctuation rules (ADR-058) ----
@@ -221,7 +238,7 @@ fn punctuation_rules_round_trip_and_drive_folding() {
 fn vocab_without_punctuation_field_is_default_behavior() {
     // Old vocab JSON predating ADR-058 has no `punctuation` key; it must deserialize
     // to an empty rule set => the historical (split) behavior, byte-identical.
-    let json = r#"{ "synonyms": [], "phrases": [], "graders": [], "grade_words": [] }"#;
+    let json = r#"{ "synonyms": [], "phrases": [] }"#;
     let vocab = Vocab::from_json(json).unwrap();
     assert!(vocab.punctuation().is_empty());
 
@@ -258,69 +275,66 @@ fn merge_combines_punctuation_rules_first_wins() {
 #[test]
 fn number_context_words_round_trip_and_drive_typing() {
     let mut vocab = Vocab::new();
-    vocab.set_number_context_words(&[]); // parity mode: disable the demotion
+    vocab.set_number_context_words(&["model"]);
 
-    // JSON round-trip preserves the explicit empty list (it must NOT collapse back to
-    // the `["pop"]` default — `Some([])` and `None` are different knob states) ...
+    // JSON round-trip preserves the caller-supplied list.
     let json = vocab.to_json().unwrap();
     let restored = Vocab::from_json(&json).unwrap();
-    assert_eq!(restored.number_context_words(), Some(&[][..]));
+    assert_eq!(restored.number_context_words(), &["model".to_string()]);
 
     // ... and the restored vocab's normalizer types position-insensitively.
     let norm = restored.to_normalizer().expect("normalizer");
     let mut dict = crate::dict::Dict::new();
     let mut lc = String::new();
-    let feats = norm.compile_features("pop 1995", &mut dict, &mut lc);
+    let feats = norm.compile_features("model 1995", &mut dict, &mut lc);
     let mut names: Vec<String> = feats.iter().map(|&id| dict.name(id).to_string()).collect();
     names.sort();
     assert_eq!(
         names,
-        vec!["term:pop".to_string(), "year:1995".to_string()],
-        "parity mode: the pop-adjacent year stays a year"
+        vec!["term:1995".to_string(), "term:model".to_string()],
+        "the declared context keeps its adjacent number generic"
     );
 }
 
 #[test]
-fn vocab_without_number_context_field_is_default_behavior() {
-    // Old vocab JSON predating ADR-069 has no `number_context` key; it must deserialize
-    // to `None` => the historical `["pop"]` demotion, byte-identical.
-    let json = r#"{ "synonyms": [], "phrases": [], "graders": [], "grade_words": [] }"#;
+fn vocab_without_number_context_field_uses_empty_default() {
+    let json = r#"{ "synonyms": [], "phrases": [] }"#;
     let vocab = Vocab::from_json(json).unwrap();
-    assert!(vocab.number_context_words().is_none());
+    assert!(vocab.number_context_words().is_empty());
 
     let norm = vocab.to_normalizer().expect("normalizer");
     let mut dict = crate::dict::Dict::new();
     let mut lc = String::new();
-    let feats = norm.compile_features("pop 1995", &mut dict, &mut lc);
+    let feats = norm.compile_features("model 1995", &mut dict, &mut lc);
     let mut names: Vec<String> = feats.iter().map(|&id| dict.name(id).to_string()).collect();
     names.sort();
     assert_eq!(
         names,
-        vec!["term:1995".to_string(), "term:pop".to_string()],
-        "default demotes the pop-adjacent year"
+        vec!["term:model".to_string(), "year:1995".to_string()],
+        "the empty default types a four-digit year position-independently"
     );
 }
 
 #[test]
 fn merge_number_context_first_wins() {
     let mut v1 = Vocab::new();
-    v1.set_number_context_words(&[]);
+    v1.set_number_context_words(&["model"]);
     let mut v2 = Vocab::new();
     v2.set_number_context_words(&["qty"]);
 
     v1.merge(&v2);
     assert_eq!(
         v1.number_context_words(),
-        Some(&[][..]),
-        "an explicitly-set list survives a merge"
+        &["model".to_string()],
+        "the first non-empty list survives a merge"
     );
 
     let mut v3 = Vocab::new();
     v3.merge(&v2);
     assert_eq!(
         v3.number_context_words(),
-        Some(&["qty".to_string()][..]),
-        "an unset vocab adopts the other's list"
+        &["qty".to_string()],
+        "an empty vocab adopts the other's list"
     );
 }
 
@@ -337,7 +351,7 @@ fn empty_vocab_builds_valid_normalizer() {
 #[test]
 fn engine_with_vocab() {
     let mut vocab = Vocab::new();
-    vocab.add_synonym("rc", "term:rookie", FeatureKind::Category);
+    vocab.add_synonym("refurb", "category:refurbished", FeatureKind::Category);
 
     let eng = crate::segment::Engine::with_vocab(vocab, crate::config::EngineConfig::default())
         .expect("should build engine from vocab");
@@ -353,7 +367,7 @@ fn snapshot_carries_vocab_for_lock_free_reads() {
     // time, and that a published snapshot is immutable across a later
     // set_vocab (an older snapshot keeps its own view).
     let mut vocab = Vocab::new();
-    vocab.add_synonym("rc", "term:rookie", FeatureKind::Category);
+    vocab.add_synonym("pkg", "term:new", FeatureKind::Category);
     let mut eng = crate::segment::Engine::with_vocab(vocab, crate::config::EngineConfig::default())
         .expect("should build engine from vocab");
 
@@ -367,8 +381,8 @@ fn snapshot_carries_vocab_for_lock_free_reads() {
 
     // Swap in a larger vocab on the engine.
     let mut vocab2 = Vocab::new();
-    vocab2.add_synonym("rc", "term:rookie", FeatureKind::Category);
-    vocab2.add_synonym("ud", "term:upper_deck", FeatureKind::Generic);
+    vocab2.add_synonym("pkg", "term:new", FeatureKind::Category);
+    vocab2.add_synonym("ns", "term:north_star", FeatureKind::Generic);
     eng.set_vocab(vocab2).expect("set_vocab should succeed");
 
     // A fresh snapshot reflects the update; the old snapshot is unchanged.
@@ -396,7 +410,7 @@ fn corpus_learn_default_off_equals_anyof_only() {
     // The default CorpusLearnConfig disables NPMI, so the composer must be
     // byte-identical to any-of learning alone (the back-compat guarantee, ADR-053).
     let queries: Vec<(u64, String)> = (0..30)
-        .map(|i| (i, format!("(rookie,rc) upper deck unique{i:03}")))
+        .map(|i| (i, format!("(new,pkg) north star unique{i:03}")))
         .collect();
     let cfg = CorpusLearnConfig {
         anyof_min_count: 2,
@@ -414,9 +428,9 @@ fn corpus_learn_default_off_equals_anyof_only() {
 #[test]
 fn corpus_learn_on_adds_npmi_phrases() {
     // No any-of groups -> any-of learning finds nothing; turning on NPMI induces the
-    // repeated adjacent "upper deck" entity as a phrase.
+    // repeated adjacent "north star" entity as a phrase.
     let queries: Vec<(u64, String)> = (0..30)
-        .map(|i| (i, format!("upper deck unique{i:03}")))
+        .map(|i| (i, format!("north star unique{i:03}")))
         .collect();
     let off = learn_vocab_from_corpus(
         &queries,
@@ -441,21 +455,21 @@ fn corpus_learn_on_adds_npmi_phrases() {
     assert!(
         on.phrases()
             .iter()
-            .any(|p| p.tokens == vec!["upper".to_string(), "deck".to_string()]),
-        "NPMI on must induce the upper/deck phrase"
+            .any(|p| p.tokens == vec!["north".to_string(), "star".to_string()]),
+        "NPMI on must induce the north/star phrase"
     );
 }
 
 #[test]
 fn learns_equivalences_from_anyof_groups() {
     let queries: Vec<(u64, String)> = (0..10)
-        .map(|i| (i, format!("(rookie,rc) card{i:03}")))
+        .map(|i| (i, format!("(new,pkg) item{i:03}")))
         .collect();
     let groups = learn_equivalences_from_queries(&queries, 2);
     assert!(
         groups
             .iter()
-            .any(|g| g.contains(&"rc".to_string()) && g.contains(&"rookie".to_string())),
+            .any(|g| g.contains(&"pkg".to_string()) && g.contains(&"new".to_string())),
         "an any-of group seen >= min_count must be learned as an equivalence group"
     );
     // Below threshold -> nothing learned.
@@ -465,7 +479,7 @@ fn learns_equivalences_from_anyof_groups() {
 #[test]
 fn corpus_learn_equivalences_mode_emits_groups_not_synonyms() {
     let queries: Vec<(u64, String)> = (0..10)
-        .map(|i| (i, format!("(rookie,rc) card{i:03}")))
+        .map(|i| (i, format!("(new,pkg) item{i:03}")))
         .collect();
     let cfg = CorpusLearnConfig {
         anyof_min_count: 2,
@@ -485,19 +499,19 @@ fn corpus_learn_equivalences_mode_emits_groups_not_synonyms() {
 
 #[test]
 fn learn_equivalences_reinforces_pairs_across_group_sizes() {
-    // (rc,rookie) once + (rc,rookie,rcfull) once: pair-level counting reinforces rc≡rookie
+    // (pkg,new) once + (pkg,new,rcfull) once: pair-level counting reinforces pkg≡new
     // (count 2), so it survives min_count=2 — exact-group counting would see two distinct
     // groups (count 1 each) and learn nothing.
     let queries = vec![
-        (1u64, "(rc,rookie)".to_string()),
-        (2u64, "(rc,rookie,rcfull)".to_string()),
+        (1u64, "(pkg,new)".to_string()),
+        (2u64, "(pkg,new,rcfull)".to_string()),
     ];
     let groups = learn_equivalences_from_queries(&queries, 2);
     assert!(
         groups
             .iter()
-            .any(|g| g.contains(&"rc".to_string()) && g.contains(&"rookie".to_string())),
-        "rc≡rookie must reinforce across the two differently-sized any-of groups"
+            .any(|g| g.contains(&"pkg".to_string()) && g.contains(&"new".to_string())),
+        "pkg≡new must reinforce across the two differently-sized any-of groups"
     );
 }
 

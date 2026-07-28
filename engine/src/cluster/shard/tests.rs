@@ -82,7 +82,7 @@ mod content_fingerprint_tests {
     /// Compile `(id, DSL)` into a shared frozen dict + finalized tag space + per-query
     /// `Extracted`.
     fn compile(dsls: &[(u64, &str)]) -> Compiled {
-        let norm = Arc::new(Normalizer::default_vocab().expect("built-in vocab"));
+        let norm = Arc::new(Normalizer::default_vocab().expect("default vocabulary"));
         let mut dict = Dict::new();
         let mut lc = String::new();
         let mut out = Vec::new();
@@ -167,7 +167,7 @@ mod content_fingerprint_tests {
         for (id, ex, dsl) in &compiled {
             a.insert_extracted_with_tags(ex, *id, 1, dsl, &[])
                 .expect("insert a");
-            let tagged = [("team".to_string(), "alpha".to_string())];
+            let tagged = [("group".to_string(), "alpha".to_string())];
             let bt: &[(String, String)] = if *id == 1 { &tagged } else { &[] };
             b.insert_extracted_with_tags(ex, *id, 1, dsl, bt)
                 .expect("insert b");
@@ -226,7 +226,7 @@ mod content_fingerprint_guard_tests {
     #[test]
     fn refuses_a_partial_source_store() {
         use crate::cluster::shard::Shard;
-        let norm = Arc::new(Normalizer::default_vocab().expect("built-in vocab"));
+        let norm = Arc::new(Normalizer::default_vocab().expect("default vocabulary"));
         let mut dict = Dict::new();
         let mut lc = String::new();
         let dsl = "+nike +shoe";

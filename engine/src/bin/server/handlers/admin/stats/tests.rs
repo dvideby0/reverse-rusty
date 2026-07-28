@@ -53,10 +53,10 @@ fn state_with_engine(engine: Engine) -> Arc<AppState> {
 fn state_with_tombstone() -> Arc<AppState> {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
     engine
-        .try_insert_live("1994 topps", 7, 1)
+        .try_insert_live("1994 acme", 7, 1)
         .expect("first insert");
     engine
-        .try_insert_live("1986 fleer", 8, 1)
+        .try_insert_live("1986 vertex", 8, 1)
         .expect("second insert");
     assert_eq!(
         engine.delete_by_logical_id(8).expect("delete"),
@@ -234,7 +234,7 @@ async fn stats_projects_the_durable_wal_as_translog() {
     };
     let mut engine = Engine::with_config(Normalizer::default_vocab().expect("normalizer"), config);
     engine
-        .try_insert_live("1994 topps", 7, 1)
+        .try_insert_live("1994 acme", 7, 1)
         .expect("durable insert");
     let state = state_with_engine(engine);
 

@@ -25,7 +25,7 @@ impl RefOracle {
     /// Build both sides with the empty default vocabulary (`Normalizer::default_vocab` /
     /// `RefVocab::default_vocab`).
     pub fn build_default(queries: &[(u64, String)]) -> Self {
-        let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+        let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
         eng.build_from_queries(queries);
         let reference = RefMatcher::build(queries, RefVocab::default_vocab());
         Self::from_parts(eng, reference, queries)
@@ -39,8 +39,10 @@ impl RefOracle {
         queries: &[(u64, String)],
         cfg: reverse_rusty::config::EngineConfig,
     ) -> Self {
-        let mut eng =
-            Engine::with_config(Normalizer::default_vocab().expect("built-in vocab"), cfg);
+        let mut eng = Engine::with_config(
+            Normalizer::default_vocab().expect("default vocabulary"),
+            cfg,
+        );
         eng.build_from_queries(queries);
         let reference = RefMatcher::build(queries, RefVocab::default_vocab());
         Self::from_parts(eng, reference, queries)
@@ -48,7 +50,7 @@ impl RefOracle {
 
     /// Build both sides from a paired `(engine Normalizer, RefVocab)` description — the caller is
     /// responsible for the two expressing the SAME vocabulary in each side's own type. Used for the
-    /// grader / phrase / synonym pass (no equivalence map needed).
+    /// phrase / synonym pass (no equivalence map needed).
     pub fn build_with_normalizer(
         queries: &[(u64, String)],
         norm: Normalizer,
@@ -68,7 +70,7 @@ impl RefOracle {
         solr: &str,
         ref_vocab: RefVocab,
     ) -> Self {
-        let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+        let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
         eng.build_from_queries(queries);
         eng.import_alias_synonyms(solr)
             .expect("import + apply aliases");

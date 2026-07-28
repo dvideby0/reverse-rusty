@@ -149,7 +149,7 @@ fn metadata_v1_footer_remains_readable_as_generation_zero() {
         std::process::id(),
         NEXT_PATH.fetch_add(1, Ordering::Relaxed)
     ));
-    let query = "topps chrome";
+    let query = "acme chrome";
     let tags = vec![("tenant".to_string(), "acme".to_string())];
     let mut encoded_tags = Vec::new();
     super::encode_tags(&tags, &mut encoded_tags).expect("encode tags");
@@ -201,7 +201,7 @@ fn metadata_footer_round_trip_preserves_version_and_canonical_tags() {
     let resident = SourceStore::new_resident();
     resident.insert_document_with_generation(
         7,
-        "topps chrome".to_string(),
+        "acme chrome".to_string(),
         42,
         99,
         &[
@@ -226,16 +226,16 @@ fn metadata_footer_round_trip_preserves_version_and_canonical_tags() {
             &bytes[old_blob_off + old_query_off..old_blob_off + old_query_off + old_query_len]
         )
         .expect("old-reader query"),
-        "topps chrome"
+        "acme chrome"
     );
 
     let lazy = SourceStore::open(&path, false).expect("mmap extended v2 sources");
     assert_eq!(
         lazy.get_bounded(7, 12).expect("query fits").as_deref(),
-        Some("topps chrome")
+        Some("acme chrome")
     );
     let document = lazy.get_document(7).expect("stored document");
-    assert_eq!(document.query(), "topps chrome");
+    assert_eq!(document.query(), "acme chrome");
     assert_eq!(document.version(), 42);
     assert_eq!(document.source_generation(), 99);
     assert!(document.tags_known());

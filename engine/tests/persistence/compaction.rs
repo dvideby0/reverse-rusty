@@ -22,22 +22,22 @@ fn compaction_with_mmap_segments() {
 
     // Build base segment
     let q1: Vec<(u64, String)> = vec![
-        (1, "michael jordan 1986 fleer".into()),
-        (2, "lebron james rookie".into()),
+        (1, "wireless mouse 1986 vertex".into()),
+        (2, "mechanical keyboard new".into()),
     ];
     engine.build_from_queries(&q1);
 
     // Bulk ingest a second segment
     let q2: Vec<(u64, String)> = vec![
-        (3, "kobe bryant psa 10".into()),
-        (4, "mike trout 2011 topps update".into()),
+        (3, "noise cancelling headphones pro".into()),
+        (4, "air purifier 2011 acme update".into()),
     ];
     engine.bulk_ingest(&q2);
 
     assert_eq!(engine.num_segments(), 3); // 2 base + memtable
 
     // Record matches before compaction
-    let title = "1986 Fleer Michael Jordan Rookie Card PSA 10";
+    let title = "1986 Vertex Wireless Mouse New Item PRO";
     let before = match_ids(&engine, title);
 
     // Compact. Assert the result instead of discarding it: with two base segments
@@ -72,8 +72,8 @@ fn flush_creates_mmap_segment() {
     };
 
     let mut engine = Engine::with_config(norm, config);
-    engine.insert_live("michael jordan 1986 fleer", 1, 1);
-    engine.insert_live("lebron james rookie", 2, 1);
+    engine.insert_live("wireless mouse 1986 vertex", 1, 1);
+    engine.insert_live("mechanical keyboard new", 2, 1);
 
     // Manually flush
     engine.flush();
@@ -89,7 +89,7 @@ fn flush_creates_mmap_segment() {
     assert!(!seg_files.is_empty(), "no .seg file created after flush");
 
     // Verify matching still works
-    let title = "1986 Fleer Michael Jordan Rookie Card";
+    let title = "1986 Vertex Wireless Mouse New Item";
     let ids = match_ids(&engine, title);
     assert!(!ids.is_empty(), "no matches after flush to mmap");
 

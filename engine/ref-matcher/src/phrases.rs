@@ -33,7 +33,7 @@ fn boundary_ok(bytes: &[u8], s: usize, e: usize) -> bool {
     (s == 0 || bytes[s - 1] == b' ') && (e == bytes.len() || bytes[e] == b' ')
 }
 
-/// The cleaned, space-joined match string for a phrase (`["upper","deck"]` -> `"upper deck"`).
+/// The cleaned, space-joined match string for a phrase (`["north","star"]` -> `"north star"`).
 fn joined(p: &RefPhrase) -> String {
     p.tokens.join(" ")
 }
