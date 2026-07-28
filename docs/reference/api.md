@@ -166,7 +166,9 @@ Endpoints are grouped by concern — open the one you need:
 - **[Ingest & lifecycle](api/ingest.md)** — bulk ingest + segment lifecycle (`POST /_bulk`,
   `/_flush`, native `/_compact`, and ES/OS `/_forcemerge`).
 - **[Observability](api/observability.md)** — metrics, cat tables, health (`/_stats`, `/_cat/stats`, `/_cat/segments`, `/_health`, `/_metrics`).
-- **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary (`GET`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias registry (`/_vocab/aliases*`, ADR-060).
+- **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary
+  (`GET`/`HEAD`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias
+  registry (`/_vocab/aliases*`, ADR-060).
 - **[Settings](api/settings.md)** — read + runtime-update engine settings (`GET`/`PUT /_settings`).
 - **[Backup & restore](../operations/backup-restore.md)** — strictly snapshot a durable local
   engine or in-process cluster (`POST /_backup`); remote clusters use quiesced node-volume
@@ -201,7 +203,7 @@ The full method/path matrix is below.
 | `/_cat/segments` | GET | Strict native per-segment LSM table with ES/OS-familiar `format`, `v`, `h`, `help`, `s`, and `bytes` controls (ADR-142) |
 | `/_health` | GET/HEAD | Strict native no-store readiness with familiar status waiting and fail-loud green/yellow/red results (ADR-144) |
 | `/_metrics` | GET/HEAD | Strict native, no-store Prometheus text 0.0.4 scrape; fail-loud coordinator collection and complete per-position replacement (ADR-145) |
-| `/_vocab` | GET | Current vocabulary as JSON |
+| `/_vocab` | GET/HEAD | Strict native no-store, round-trippable vocabulary JSON / bodyless metadata check (ADR-146) |
 | `/_vocab` | PUT | Replace vocabulary |
 | `/_vocab/learn` | POST | Learn synonyms (+ opt-in NPMI phrases, `corpus_phrases=true`) from raw query text |
 | `/_vocab/learn_and_apply` | POST | Learn from stored queries + apply (`?min_count=N`; opt-in NPMI phrases `?corpus_phrases=true`) |

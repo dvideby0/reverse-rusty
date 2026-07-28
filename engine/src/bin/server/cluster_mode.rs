@@ -46,8 +46,9 @@ use crate::handlers::{
     cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback, cluster_resize,
     cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
     cluster_v2_mpercolate_route, cluster_v2_search_route, cluster_validate_and_apply_feedback,
-    BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT,
-    HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT,
+    vocab_method_not_allowed, BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT,
+    EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT,
+    STATS_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -424,7 +425,13 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             "/_metrics",
             any(cluster_metrics).layer(DefaultBodyLimit::max(METRICS_BODY_LIMIT)),
         )
-        .route("/_vocab", get(cluster_get_vocab).put(cluster_put_vocab))
+        .route(
+            "/_vocab",
+            get(cluster_get_vocab)
+                .layer(DefaultBodyLimit::max(VOCAB_READ_BODY_LIMIT))
+                .put(cluster_put_vocab)
+                .fallback(vocab_method_not_allowed::<ClusterAppState>),
+        )
         .route("/_vocab/learn", post(cluster_learn_vocab))
         .route(
             "/_vocab/learn_and_apply",

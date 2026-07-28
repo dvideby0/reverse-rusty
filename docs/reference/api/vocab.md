@@ -2,10 +2,11 @@
 
 > Part of the [REST API reference](../api.md). Query language: [`dsl.md`](../dsl.md).
 
-## `GET /_vocab` — Current vocabulary
+## `GET` / `HEAD /_vocab` — Current vocabulary
 
 ```bash
 curl localhost:9200/_vocab
+curl -I localhost:9200/_vocab
 ```
 
 ```json
@@ -23,6 +24,31 @@ curl localhost:9200/_vocab
   "aliases": {"entries": []}
 }
 ```
+
+The GET response is the one complete installed `Vocab` document. It can be saved as the
+single-node `--vocab-file` or sent back to `PUT /_vocab` without projection or reconstruction.
+`HEAD` performs the same snapshot capture and serialization but returns no body. Every outcome
+reached through the read route includes `Cache-Control: no-store`; success is
+`Content-Type: application/json`.
+
+The read is strict: it accepts no query parameters or request body. GET/HEAD body extraction has a
+64 KiB ceiling and a 250 ms read deadline, without changing the larger allowance for `PUT /_vocab`.
+Errors use the standard JSON envelope: invalid query/body is 400, a stalled body is 408, oversized
+input is 413, closed read admission is 503, and serialization/worker failure is 500. Other methods
+are 405 with `Allow: GET, HEAD, PUT`.
+
+Standalone mode captures one immutable lock-free engine snapshot. Coordinator mode clones the
+installed vocabulary while briefly holding the cluster read guard on a blocking worker, releases
+the guard, and serializes afterward. Both share the server's single bounded administrative-read
+slot, so concurrent large documents cannot multiply clone/serialization work; waiting for that
+slot is asynchronous.
+
+This is deliberately a native API. Elasticsearch
+[`GET /_synonyms/{id}`](https://www.elastic.co/guide/en/elasticsearch/reference/current/get-synonyms-set.html)
+returns one named, pageable Solr-rule set, while OpenSearch exposes synonyms through
+[analyzer token-filter configuration](https://docs.opensearch.org/latest/analyzers/token-filters/synonym/).
+Reverse Rusty's document also owns phrases, equivalences, punctuation, numeric context, and the
+governed alias registry, so neither the standard path nor its response shape is an honest alias.
 
 ## `PUT /_vocab` — Replace vocabulary
 
