@@ -21,8 +21,9 @@ use reverse_rusty::vocab::{AliasRegistry, AliasSummary};
 
 use crate::handlers::vocab::{
     acquire_vocab_read_permit, acquire_vocab_write_permit, build_corpus_config, default_min_count,
-    finish_vocab_worker, finish_vocab_write_response, serialize_vocab, vocab_write_error_response,
-    vocab_write_success, LearnApplyQuery, VocabReadTransport, VocabWriteTransport,
+    execute_vocab_learn, finish_vocab_worker, finish_vocab_write_response, serialize_vocab,
+    vocab_write_error_response, vocab_write_success, LearnApplyQuery, VocabLearnTransport,
+    VocabReadTransport, VocabWriteTransport,
 };
 use crate::state::ClusterAppState;
 
@@ -104,56 +105,14 @@ struct VocabApplyResponse {
     rebuilt: usize,
 }
 
-#[derive(Deserialize)]
-pub(crate) struct ClusterLearnRequest {
-    /// Corpus to learn from. Absent ⇒ learn from the CLUSTER's own live queries
-    /// (a strict superset of the single-node shape, which requires `queries`).
-    #[serde(default)]
-    queries: Option<Vec<(u64, String)>>,
-    #[serde(default = "default_min_count")]
-    min_count: usize,
-    #[serde(default)]
-    corpus_phrases: bool,
-    #[serde(default)]
-    npmi_tau: Option<f64>,
-    #[serde(default)]
-    npmi_min_count: Option<usize>,
-    #[serde(default)]
-    npmi_iterations: Option<usize>,
-    #[serde(default)]
-    learn_equivalences: bool,
-}
-
 /// POST /_vocab/learn — compute-only dry run: learn vocabulary rules from the
-/// supplied corpus (or, when `queries` is absent, the cluster's own live corpus)
-/// and return them WITHOUT applying. Review, then `PUT /_vocab`.
+/// supplied corpus and return them WITHOUT applying. Review, then `PUT /_vocab`.
 #[instrument(skip_all)]
 pub(crate) async fn cluster_learn_vocab(
     State(state): State<Arc<ClusterAppState>>,
-    Json(req): Json<ClusterLearnRequest>,
+    transport: VocabLearnTransport,
 ) -> Response {
-    let cfg = build_corpus_config(
-        req.min_count,
-        req.corpus_phrases,
-        req.npmi_tau,
-        req.npmi_min_count,
-        req.npmi_iterations,
-        req.learn_equivalences,
-    );
-    if let Some(queries) = req.queries {
-        return Json(reverse_rusty::vocab::learn_vocab_from_corpus(
-            &queries, &cfg,
-        ))
-        .into_response();
-    }
-    let result = {
-        let cluster = state.cluster.read();
-        cluster.learn_vocab(&cfg)
-    };
-    match result {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => shard_error_response("corpus gather failed", &e),
-    }
+    execute_vocab_learn(&state.stats_permits, &state.prom, transport).await
 }
 
 /// POST /_vocab/learn_and_apply — learn from the cluster's own live corpus and

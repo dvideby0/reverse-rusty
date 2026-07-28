@@ -24,6 +24,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [145](../adr-145-metrics-api-contract.md) | Metrics REST API contract | Makes Prometheus scrapes strict and coordinator collection complete, bounded, and fail-loud. | Accepted |
 | [146](../adr-146-get-vocab-api-contract.md) | Vocabulary read REST API contract | Makes the native vocabulary document strict, round-trippable, cache-safe, and bounded off async workers. | Accepted |
 | [147](../adr-147-put-vocab-api-contract.md) | Vocabulary replacement REST API contract | Makes full vocabulary replacement strict, bounded, off-runtime, mode-consistent, and durably fail-loud. | Accepted |
+| [148](../adr-148-vocab-learn-api-contract.md) | Vocabulary learning REST API contract | Makes review-first learning strict, bounded, mode-consistent, and explicit about its native scope. | Accepted |
 
 ---
 

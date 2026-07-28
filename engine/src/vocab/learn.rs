@@ -3,7 +3,7 @@
 //!
 //! These are admin/build-time only — never on the match hot path.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{FeatureKindSer, PhraseEntry, SynonymEntry, Vocab};
 use crate::dsl::{self, Atom};
@@ -25,6 +25,7 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
         let Ok(ast) = dsl::parse(text) else {
             continue;
         };
+        let mut query_pairs = HashSet::new();
         for clause in &ast.clauses {
             if clause.negated {
                 continue;
@@ -46,11 +47,13 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
 
                 for member in &normalized {
                     if member != &canonical {
-                        let key = (canonical.clone(), member.clone());
-                        *pair_counts.entry(key).or_insert(0) += 1;
+                        query_pairs.insert((canonical.clone(), member.clone()));
                     }
                 }
             }
+        }
+        for pair in query_pairs {
+            *pair_counts.entry(pair).or_insert(0) += 1;
         }
     }
 
@@ -231,8 +234,9 @@ impl Default for CorpusLearnConfig {
 /// `(a, b, c)` declares its members interchangeable. Each unordered **pair** within a group is
 /// counted — so `(pkg,new)` and `(pkg,new,new item)` both reinforce `pkg≡new`, matching
 /// the pair-level [`learn_from_queries`] synonym learner rather than keying on the exact group.
-/// A pair seen in at least `min_count` any-of groups is emitted as a 2-element equivalence
-/// group; overlapping pairs are unioned transitively at apply time
+/// A pair seen in at least `min_count` distinct queries is emitted as a 2-element
+/// equivalence group; repeated groups inside one query count once. Overlapping
+/// pairs are unioned transitively at apply time
 /// ([`Vocab::resolve_equivalences`]). Forms are kept raw — resolved through the normalizer when
 /// applied.
 pub fn learn_equivalences_from_queries(
@@ -244,6 +248,7 @@ pub fn learn_equivalences_from_queries(
         let Ok(ast) = dsl::parse(text) else {
             continue;
         };
+        let mut query_pairs = HashSet::new();
         for clause in &ast.clauses {
             if clause.negated {
                 continue;
@@ -256,12 +261,13 @@ pub fn learn_equivalences_from_queries(
                 // Every unordered pair (forms is sorted, so i<j yields a<=b — a stable key).
                 for i in 0..forms.len() {
                     for j in (i + 1)..forms.len() {
-                        *pair_counts
-                            .entry((forms[i].clone(), forms[j].clone()))
-                            .or_insert(0) += 1;
+                        query_pairs.insert((forms[i].clone(), forms[j].clone()));
                     }
                 }
             }
+        }
+        for pair in query_pairs {
+            *pair_counts.entry(pair).or_insert(0) += 1;
         }
     }
     let mut groups: Vec<Vec<String>> = pair_counts
