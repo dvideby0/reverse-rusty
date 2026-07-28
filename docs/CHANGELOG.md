@@ -123,6 +123,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   `from`/`size` review paging, total `count`, whole-registry summaries, shared blocking-work
   admission, lock-free standalone snapshot capture, and brief off-runtime coordinator locking
   ([ADR-150](decisions/adr-150-alias-registry-read-api-contract.md)).
+- Split the unchanged core and distributed release/LTO code-gate commands across independent CI
+  runners, retained the complete local `check.sh` entry point and one required aggregate result,
+  and stopped producing empty test harnesses for binary targets without binary-local tests
+  ([ADR-151](decisions/adr-151-parallel-ci-code-gate-lanes.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
