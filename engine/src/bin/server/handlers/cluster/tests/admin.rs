@@ -90,6 +90,45 @@ async fn cluster_stats_transport_is_strict() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cluster_cat_segments_is_strict_and_fails_with_an_alternative() {
+    let state = test_state(&seed());
+
+    let (status, body) = send(&state, req_empty("GET", "/_cat/segments?format=json")).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert_eq!(
+        body["error"]["type"], "not_supported_in_cluster_mode",
+        "{body}"
+    );
+    assert!(
+        body["error"]["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("/_cat/shards"),
+        "{body}"
+    );
+
+    let (status, body) = send(
+        &state,
+        Request::builder()
+            .method("GET")
+            .uri("/_cat/segments")
+            .body(Body::from("not empty"))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["type"], "validation_error");
+
+    let (status, body) = send(&state, req_empty("GET", "/_cat/segments?unknown=true")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["type"], "validation_error");
+
+    let (status, body) = send(&state, req_empty("POST", "/_cat/segments")).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert_eq!(body["error"]["type"], "method_not_allowed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vocab_alias_makes_both_forms_match() {
     let state = test_state(&seed());
     // Declare an equivalence (ADR-054 expansion): ud ≡ upperdeck.

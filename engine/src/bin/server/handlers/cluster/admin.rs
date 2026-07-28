@@ -35,9 +35,10 @@ use tracing::{error, info, instrument};
 
 use crate::dto::ApiVersion;
 use crate::handlers::admin::{
-    acquire_flush, finish_stats_response, stats_rejection, validate_flush_method,
-    validate_flush_request, validate_stats_method, validate_stats_request, FlushParams,
-    FlushResponse, StatsShards,
+    acquire_flush, finish_cat_segments_response, finish_stats_response, stats_rejection,
+    validate_cat_segments_method, validate_cat_segments_request, validate_flush_method,
+    validate_flush_request, validate_stats_method, validate_stats_request, CatSegmentsParams,
+    FlushParams, FlushResponse, StatsShards,
 };
 use crate::handlers::backup::{
     acquire_backup_permit, backup_error_response, backup_rejection, validate_backup_method,
@@ -559,11 +560,31 @@ pub(crate) async fn cluster_cat_stats() -> Response {
 }
 
 /// GET /_cat/segments — single-node only (per-shard LSM detail is shard-internal).
-pub(crate) async fn cluster_cat_segments() -> Response {
-    not_in_cluster_mode(
-        "GET /_cat/segments",
-        "per-shard segment detail is shard-internal; use GET /_cat/shards for \
-         per-shard counts",
+#[instrument(skip_all)]
+pub(crate) async fn cluster_cat_segments(
+    State(state): State<Arc<ClusterAppState>>,
+    method: Method,
+    params: Result<Query<CatSegmentsParams>, QueryRejection>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["cat_segments"])
+        .start_timer();
+    if let Err(response) = validate_cat_segments_method(&state.prom, &method) {
+        return *response;
+    }
+    if let Err(response) = validate_cat_segments_request(&state.prom, params, body) {
+        return *response;
+    }
+    finish_cat_segments_response(
+        &state.prom,
+        not_in_cluster_mode(
+            "GET /_cat/segments",
+            "per-shard segment detail is shard-internal; use GET /_cat/shards for \
+             per-shard counts",
+        ),
     )
 }
 

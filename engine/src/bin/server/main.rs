@@ -83,7 +83,7 @@ use handlers::{
     learn_and_apply_vocab, learn_vocab, mpercolate_route, open_pit_route, prometheus_metrics,
     put_doc, put_settings, put_vocab, reset_alias_feedback, search_route, stats,
     v2_mpercolate_route, v2_search_route, validate_and_apply_feedback, BACKUP_BODY_LIMIT,
-    EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT,
+    CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -460,7 +460,10 @@ async fn main() {
             "/_cat/stats",
             any(cat_stats).layer(DefaultBodyLimit::max(STATS_BODY_LIMIT)),
         )
-        .route("/_cat/segments", get(cat_segments))
+        .route(
+            "/_cat/segments",
+            any(cat_segments).layer(DefaultBodyLimit::max(CAT_SEGMENTS_BODY_LIMIT)),
+        )
         .route("/_health", get(health))
         .route("/_metrics", get(prometheus_metrics))
         .route("/_vocab", get(get_vocab).put(put_vocab))

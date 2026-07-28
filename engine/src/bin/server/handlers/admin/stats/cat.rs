@@ -16,6 +16,7 @@ use axum::{
     http::{header, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
 };
+use serde::Deserialize;
 use tracing::{error, instrument};
 
 use reverse_rusty::segment::EngineSnapshot;
@@ -24,17 +25,53 @@ use crate::dto::ApiError;
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 
+use super::super::cat_table::{self, CatAlignment, CatCell, CatColumn, CatRequest, CatRow};
 use super::collect_engine_stats;
-
-mod table;
-
-use table::{CatRequest, CatRow, CatStatsParams};
 
 const ENDPOINT: &str = "cat_stats";
 
+const COLUMNS: [CatColumn; 2] = [
+    CatColumn::new(
+        "metric",
+        &["m"],
+        "native Reverse Rusty statistic name",
+        CatAlignment::Left,
+    ),
+    CatColumn::new(
+        "value",
+        &["v"],
+        "statistic value (byte fields use raw bytes)",
+        CatAlignment::Left,
+    ),
+];
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CatStatsParams {
+    format: Option<String>,
+    v: Option<String>,
+    h: Option<String>,
+    help: Option<String>,
+    s: Option<String>,
+}
+
+impl CatStatsParams {
+    fn resolve(self) -> Result<CatRequest, String> {
+        cat_table::resolve_request(
+            "CAT stats",
+            &COLUMNS,
+            self.format.as_deref(),
+            self.v.as_deref(),
+            self.h.as_deref(),
+            self.help.as_deref(),
+            self.s.as_deref(),
+        )
+    }
+}
+
 macro_rules! cat_row {
     ($metric:expr, $value:expr $(,)?) => {
-        CatRow::new($metric, $value.to_string())
+        CatRow::new([CatCell::text($metric), CatCell::text($value.to_string())])
     };
 }
 
@@ -63,7 +100,7 @@ pub(crate) async fn cat_stats(
         Err(response) => return *response,
     };
     if request.is_help() {
-        return finish_response(&state.prom, table::render_help(&request));
+        return finish_response(&state.prom, cat_table::render_help(&request, &COLUMNS));
     }
 
     let Ok(permit) = Arc::clone(&state.stats_permits).acquire_owned().await else {
@@ -88,7 +125,7 @@ pub(crate) async fn cat_stats(
                     format!("{:.3}", started.elapsed().as_secs_f64() * 1_000.0),
                 ),
             );
-            let response = table::render_rows(&mut rows, &request);
+            let response = cat_table::render_rows(&mut rows, &request, &COLUMNS);
             finish_response(&state.prom, response)
         }
         Err(join_error) => {

@@ -18,6 +18,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [052](../adr-052-external-review-hardening.md) | External-review hardening | Collects parser, signature, request-limit, storage-bound, timeout, and bind-default fixes. | Accepted |
 | [140](../adr-140-stats-api-contract.md) | Stats REST API contract | Makes native stats strict, truthful about physical rows, and bounded off async workers. | Accepted |
 | [141](../adr-141-cat-stats-api-contract.md) | CAT stats API contract | Gives native stats a strict bounded table with familiar CAT controls. | Accepted |
+| [142](../adr-142-cat-segments-api-contract.md) | CAT segments API contract | Gives native LSM rows strict familiar CAT controls without fabricating Lucene fields. | Accepted |
 
 ---
 
