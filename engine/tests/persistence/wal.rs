@@ -164,21 +164,21 @@ fn wal_recovery_inserts() {
     engine.insert_live("product omega preview", 100, 1);
     engine.insert_live("portable monitor new", 101, 1);
 
-    let title_wander = "Product Omega 2019 Summit Chrome Preview";
+    let title_omega = "Product Omega 2019 Summit Chrome Preview";
     let title_monitor = "Portable Monitor 2019 Acme Chrome New";
-    let expected_wander = match_ids(&engine, title_wander);
+    let expected_omega = match_ids(&engine, title_omega);
     let expected_monitor = match_ids(&engine, title_monitor);
 
     drop(engine); // simulate crash
 
     // 2) Recover
     let engine2 = Engine::open(make_norm(), config).unwrap();
-    let actual_wander = match_ids(&engine2, title_wander);
+    let actual_omega = match_ids(&engine2, title_omega);
     let actual_monitor = match_ids(&engine2, title_monitor);
 
     assert_eq!(
-        expected_wander, actual_wander,
-        "WAL recovery lost wander insert"
+        expected_omega, actual_omega,
+        "WAL recovery lost omega insert"
     );
     assert_eq!(
         expected_monitor, actual_monitor,
