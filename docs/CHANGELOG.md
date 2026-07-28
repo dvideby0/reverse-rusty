@@ -95,7 +95,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Hardened native `GET`/`HEAD /_health` with strict bounded transport, familiar status waiting,
   fail-loud HTTP readiness, complete coordinator serving/control-plane attestation, blocking-worker
   admission, independently bounded pre-body unauthenticated requests and body-read deadlines,
-  sanitized failures, and no-store route telemetry
+  sanitized failures, deadline-checked observations, and whole-route no-store telemetry
   ([ADR-144](decisions/adr-144-health-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates

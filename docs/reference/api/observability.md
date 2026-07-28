@@ -381,7 +381,9 @@ not need bearer credentials. Admission occurs before body buffering and allows a
 concurrent health requests; additional work fails immediately with 429, `Retry-After: 1`, and a
 structured `rejected_execution_exception`. The cap therefore also covers slow request bodies, and
 body buffering has an independent 250 ms deadline. A body that does not complete by then returns
-408 with a structured `request_timeout`, releasing its health permit.
+408 with a structured `request_timeout`, releasing its health permit. Health duration telemetry
+starts before method validation, admission, and body extraction, so it includes all transport work
+and rejections as well as successful probes and status waits.
 
 Supported query controls:
 
@@ -395,9 +397,10 @@ Green and yellow return HTTP 200. Red returns 503. If coordinator collection can
 deadline, or `wait_for_status` is not reached, the latest response returns 408 with
 `"timed_out":true`. The response preserves the last completed observation rather than replacing it
 with a synthetic failure at the deadline, and a status first seen after the deadline remains timed
-out. Explicit status waits and dependency-probe deadlines have distinct stable reasons. A
-coordinator request that times out cannot forcibly stop already-running blocking/network work; that
-work retains its single shared stats permit until its own transport bounds complete.
+out. The coordinator rechecks the wall clock after each blocking result rather than relying only on
+the async timeout race. Explicit status waits and dependency-probe deadlines have distinct stable
+reasons. A coordinator request that times out cannot forcibly stop already-running blocking/network
+work; that work retains its single shared stats permit until its own transport bounds complete.
 
 Coordinator green requires a successful committed control-state read, a count from every logical
 serving position, matching committed/ring shard counts, and exactly one in-range committed

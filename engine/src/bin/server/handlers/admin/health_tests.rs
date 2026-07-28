@@ -1,4 +1,4 @@
-use super::{health, HEALTH_BODY_LIMIT};
+use super::health::{health, HEALTH_BODY_LIMIT, HEALTH_BODY_READ_TIMEOUT};
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -178,6 +178,14 @@ async fn admission_precedes_buffering_an_untrusted_request_body() {
     assert_eq!(headers.get(header::RETRY_AFTER).expect("retry"), "1");
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
     assert_eq!(body["error"]["type"], "rejected_execution_exception");
+    assert_eq!(
+        state
+            .prom
+            .http_request_duration
+            .with_label_values(&["health"])
+            .get_sample_count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -205,6 +213,15 @@ async fn slow_body_times_out_and_releases_health_admission() {
     );
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
     assert_eq!(body["error"]["type"], "request_timeout");
+    let durations = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["health"]);
+    assert_eq!(durations.get_sample_count(), 1);
+    assert!(
+        durations.get_sample_sum() >= HEALTH_BODY_READ_TIMEOUT.as_secs_f64() * 0.8,
+        "body buffering must be included in the health duration metric"
+    );
     assert_eq!(
         state.health_permits.available_permits(),
         crate::state::MAX_CONCURRENT_HEALTH_REQUESTS
@@ -320,4 +337,13 @@ async fn transport_and_controls_fail_loud() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
     assert_eq!(body["error"]["type"], "payload_too_large");
+    assert_eq!(
+        state
+            .prom
+            .http_request_duration
+            .with_label_values(&["health"])
+            .get_sample_count(),
+        7,
+        "method, validation, and extractor rejections all record duration"
+    );
 }

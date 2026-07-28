@@ -1,6 +1,7 @@
 use super::*;
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use axum::http::{header, Method};
@@ -241,4 +242,89 @@ async fn unmet_wait_for_status_returns_request_timeout() {
         body["reason"],
         "requested health status was not reached before timeout"
     );
+}
+
+struct DelayedControlPlane {
+    state: Arc<ClusterState>,
+    started: Arc<AtomicBool>,
+    release: Arc<Barrier>,
+}
+
+impl ControlPlane for DelayedControlPlane {
+    fn cluster_state(&self) -> Result<Arc<ClusterState>, ControlError> {
+        self.started.store(true, Ordering::Release);
+        self.release.wait();
+        Ok(Arc::clone(&self.state))
+    }
+
+    fn version(&self) -> Result<StateVersion, ControlError> {
+        Ok(StateVersion(self.state.epoch))
+    }
+
+    fn propose(&self, _: ClusterStateChange) -> Result<StateVersion, ControlError> {
+        Err(ControlError::Backend("not used by health".to_string()))
+    }
+
+    fn change_membership(&self, _: Vec<NodeId>) -> Result<StateVersion, ControlError> {
+        Err(ControlError::Backend("not used by health".to_string()))
+    }
+
+    fn leader(&self) -> Result<Option<NodeId>, ControlError> {
+        Ok(None)
+    }
+}
+
+fn delayed_control_state() -> (Arc<ClusterAppState>, Arc<AtomicBool>, Arc<Barrier>) {
+    let config = reverse_rusty::cluster::ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..Default::default()
+    };
+    let cluster = reverse_rusty::cluster::ClusterEngine::build(
+        Normalizer::default_vocab().expect("vocab"),
+        &config,
+        &seed(),
+    )
+    .expect("cluster");
+    let control_state = Arc::new(cluster.control_state().expect("seed control state"));
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(Barrier::new(2));
+    let cluster = cluster.with_control_plane(Box::new(DelayedControlPlane {
+        state: control_state,
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    }));
+    (state_from_cluster(cluster), started, release)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn probe_completed_after_deadline_is_still_timed_out() {
+    let (state, started, release) = delayed_control_state();
+    let request_state = Arc::clone(&state);
+    let request = tokio::spawn(async move {
+        send_raw(
+            &request_state,
+            req_empty("GET", "/_health?wait_for_status=green&timeout=10ms"),
+        )
+        .await
+    });
+    while !started.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+
+    // Complete the blocking probe after its deadline while starving the
+    // current-thread runtime. Tokio polls a ready worker before its elapsed
+    // timer, so the handler's explicit wall-clock check must win.
+    let release_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        release.wait();
+    });
+    std::thread::sleep(Duration::from_millis(30));
+
+    let (status, _, bytes) = request.await.expect("health task");
+    release_thread.join().expect("release thread");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON health");
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{body}");
+    assert_eq!(body["status"], "green");
+    assert_eq!(body["timed_out"], true);
 }

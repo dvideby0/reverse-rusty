@@ -18,6 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use prometheus::HistogramTimer;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -157,13 +158,21 @@ struct HealthResponse {
 /// indefinitely. The permit then remains held until the response is complete.
 pub(crate) struct HealthTransport {
     permit: OwnedSemaphorePermit,
+    duration: HistogramTimer,
     head: bool,
     body: Result<Bytes, BytesRejection>,
 }
 
 impl HealthTransport {
-    pub(crate) fn into_parts(self) -> (OwnedSemaphorePermit, bool, Result<Bytes, BytesRejection>) {
-        (self.permit, self.head, self.body)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        OwnedSemaphorePermit,
+        HistogramTimer,
+        bool,
+        Result<Bytes, BytesRejection>,
+    ) {
+        (self.permit, self.duration, self.head, self.body)
     }
 }
 
@@ -174,6 +183,14 @@ where
     type Rejection = Response;
 
     async fn from_request(request: Request, state: &Arc<S>) -> Result<Self, Self::Rejection> {
+        // Start before method/admission/body extraction. Rejection drops the
+        // timer here; success moves it into the handler for whole-request
+        // latency, including any coordinator probe or status wait.
+        let duration = state
+            .prom()
+            .http_request_duration
+            .with_label_values(&[HEALTH_ENDPOINT])
+            .start_timer();
         let head =
             validate_health_method(state.prom(), request.method()).map_err(|response| *response)?;
         let permit = try_acquire_health_work(state.health_permits(), state.prom(), head)
@@ -192,7 +209,12 @@ where
                 head,
             )
         })?;
-        Ok(Self { permit, head, body })
+        Ok(Self {
+            permit,
+            duration,
+            head,
+            body,
+        })
     }
 }
 
@@ -206,12 +228,7 @@ pub(crate) async fn health(
     params: Result<Query<HealthParams>, QueryRejection>,
     transport: HealthTransport,
 ) -> Response {
-    let _duration = state
-        .prom
-        .http_request_duration
-        .with_label_values(&[HEALTH_ENDPOINT])
-        .start_timer();
-    let (_permit, head, body) = transport.into_parts();
+    let (_permit, _duration, head, body) = transport.into_parts();
     let request = match validate_health_request(&state.prom, params, body, head) {
         Ok(request) => request,
         Err(response) => return *response,

@@ -28,7 +28,9 @@ engine does not have.
   unsupported values, non-empty bodies, and methods other than GET/HEAD.
 - Give the route a 64 KiB extraction ceiling, structured 400/405/413 errors, `Allow: GET, HEAD`,
   bodyless HEAD responses, `Cache-Control: no-store`, and the low-cardinality `health` request and
-  duration metric labels. GET and HEAD remain the intentionally unauthenticated readiness surface.
+  duration metric labels. Duration starts before method validation, admission, and body extraction,
+  so successful and rejected requests record their whole route latency. GET and HEAD remain the
+  intentionally unauthenticated readiness surface.
 - Admit at most eight concurrent health requests before buffering their bodies. Additional work
   fails immediately with 429 and `Retry-After: 1`, independently bounding the open health
   surface's share of the server-wide request and stats limits even when a client streams a body
@@ -38,8 +40,9 @@ engine does not have.
 - Return `mode` and `timed_out` in both payloads. Green and yellow return 200, native red returns
   503, and an expired coordinator observation or unmet `wait_for_status` returns 408 with
   `timed_out=true`. Preserve the last completed observation when a later coordinator probe reaches
-  its deadline, and never accept a standalone status first reached after the deadline. Health
-  colors are ordered, so waiting for yellow accepts yellow or green.
+  its deadline, and recheck the wall clock after every standalone observation and coordinator
+  blocking result so a status first completed after the deadline is never accepted. Health colors
+  are ordered, so waiting for yellow accepts yellow or green.
 - Standalone red means WAL or persistence failure. Yellow means one or more skipped or stale
   segments while durability remains healthy. Green means those serving and durability indicators
   are healthy. The lock-free engine snapshot remains the observation source.

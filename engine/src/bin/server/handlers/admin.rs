@@ -16,7 +16,7 @@ pub(crate) use flush::{
 };
 pub(crate) use health::{
     finish_health_response, health, health_rejection, validate_health_request, wait_delay,
-    HealthParams, HealthStatus, HealthTransport, HEALTH_BODY_LIMIT, HEALTH_ENDPOINT,
+    HealthParams, HealthStatus, HealthTransport, HEALTH_BODY_LIMIT,
 };
 pub(crate) use segments::{
     cat_segments, finish_cat_segments_response, validate_cat_segments_method,

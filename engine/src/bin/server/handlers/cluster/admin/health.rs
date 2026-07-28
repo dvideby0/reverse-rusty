@@ -17,7 +17,7 @@ use reverse_rusty::cluster::{ClusterEngine, ShardError};
 
 use crate::handlers::admin::{
     finish_health_response, validate_health_request, wait_delay, HealthParams, HealthStatus,
-    HealthTransport, HEALTH_ENDPOINT,
+    HealthTransport,
 };
 use crate::state::ClusterAppState;
 
@@ -51,12 +51,7 @@ pub(crate) async fn cluster_health(
     params: Result<Query<HealthParams>, QueryRejection>,
     transport: HealthTransport,
 ) -> Response {
-    let _duration = state
-        .prom
-        .http_request_duration
-        .with_label_values(&[HEALTH_ENDPOINT])
-        .start_timer();
-    let (_permit, head, body) = transport.into_parts();
+    let (_permit, _duration, head, body) = transport.into_parts();
     let request = match validate_health_request(&state.prom, params, body, head) {
         Ok(request) => request,
         Err(response) => return *response,
@@ -87,7 +82,10 @@ pub(crate) async fn cluster_health(
             }
         }
         let current = collect_once(&state, deadline).await;
-        if current.deadline_expired {
+        // Tokio's timeout polls the worker before its timer. A worker result
+        // that became ready while this task was starved can therefore arrive
+        // after the deadline without `deadline_expired`; the wall clock wins.
+        if current.deadline_expired || Instant::now() >= deadline {
             let reported = timeout_observation(&current, last_observation.as_ref());
             return finish_health_response(
                 &state.prom,
@@ -118,11 +116,7 @@ fn timeout_observation<'a>(
     current: &'a ClusterHealth,
     last: Option<&'a ClusterHealth>,
 ) -> &'a ClusterHealth {
-    if current.deadline_expired {
-        last.unwrap_or(current)
-    } else {
-        current
-    }
+    last.unwrap_or(current)
 }
 
 async fn collect_once(state: &Arc<ClusterAppState>, deadline: Instant) -> ClusterHealth {
