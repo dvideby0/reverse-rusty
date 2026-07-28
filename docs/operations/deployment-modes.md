@@ -43,7 +43,7 @@ GET/HEAD /_doc/{id}            (source read/existence check in local modes; remo
 POST /_bulk                    (NDJSON, ES-shaped)
 GET/POST /_search              (single-document percolation; `include_broad` per request)
 POST /_mpercolate              (batch percolation, ES _msearch-shaped responses[])
-GET/HEAD /_health; GET /_stats /_metrics (open under default read policy; Prometheus text on /_metrics)
+GET/HEAD /_health; GET/HEAD /_metrics; GET /_stats (open by default; Prometheus text on /_metrics)
 + restart-reopen               (every acknowledged write survives an operational restart)
 ```
 

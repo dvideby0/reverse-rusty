@@ -10,11 +10,13 @@
 mod cat_shards;
 mod gc;
 mod health;
+mod metrics;
 mod ops;
 
 pub(crate) use cat_shards::{cluster_cat_shards, CAT_SHARDS_BODY_LIMIT};
 pub(crate) use gc::cluster_gc;
 pub(crate) use health::cluster_health;
+pub(crate) use metrics::cluster_metrics;
 pub(crate) use ops::{
     cluster_deregister_node, cluster_handoff, cluster_reassign, cluster_rebalance,
     cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync, cluster_state,
@@ -33,7 +35,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use prometheus::{Encoder, TextEncoder};
 use serde::Serialize;
 use tracing::{error, info, instrument};
 
@@ -209,44 +210,6 @@ pub(crate) async fn cluster_stats(
             )
         }
     }
-}
-
-/// GET /_metrics — Prometheus text exposition. The HTTP/event counters are wired
-/// through the observer bridge exactly as in single-node mode; the engine gauges
-/// that exist at the cluster level (total queries) refresh on scrape.
-#[instrument(skip_all)]
-pub(crate) async fn cluster_metrics(State(state): State<Arc<ClusterAppState>>) -> Response {
-    {
-        let cluster = state.cluster.read();
-        if let Ok(n) = cluster.num_queries() {
-            state.prom.total_queries.set(n as i64);
-        }
-        // Cluster gRPC transport metrics (ADR-085) — all-zero for an in-process cluster.
-        state.prom.observe_transport(&cluster.transport_metrics());
-        // Per-shard stored-query distribution (ADR-091) — best-effort; a transient shard error
-        // (e.g. a remote shard mid-handoff) just leaves the prior gauge values in place.
-        if let Ok(counts) = cluster.shard_query_counts() {
-            state.prom.observe_shard_queries(&counts);
-        }
-    }
-    let encoder = TextEncoder::new();
-    let metric_families = state.prom.registry.gather();
-    let mut buffer = Vec::new();
-    if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
-        error!(error = %e, "failed to encode prometheus metrics");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [("content-type", "text/plain; charset=utf-8")],
-            Vec::new(),
-        )
-            .into_response();
-    }
-    (
-        StatusCode::OK,
-        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
-        buffer,
-    )
-        .into_response()
 }
 
 /// GET/POST `/_flush` — seal every shard's memtable into an immutable segment.

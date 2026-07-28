@@ -411,22 +411,47 @@ This is deliberately not Elasticsearch/OpenSearch `/_cluster/health`. Those APIs
 index-shard allocation; Reverse Rusty has no honest equivalent for their index, active-primary,
 relocating, or unassigned-shard fields, so no `/_cluster/health` alias is exposed (ADR-144).
 
-## `GET /_metrics` — Prometheus metrics
+## `GET` / `HEAD /_metrics` — Prometheus metrics
 
 ```bash
 curl localhost:9200/_metrics
+curl --head localhost:9200/_metrics
 ```
 
-Returns metrics in Prometheus text exposition format for scraping by Prometheus, Grafana Agent, or
-compatible collectors — engine gauges, event counters, per-endpoint HTTP latency, an in-flight-request
-gauge, WAL size/pending gauges, cumulative flush/compaction-time counters, a
+This is a native Prometheus scrape route, not an Elasticsearch/OpenSearch node-stats alias. Both
+those products expose JSON node statistics under `/_nodes/stats`; Reverse Rusty keeps `/_metrics`
+because its registry is already Prometheus-shaped and its engine, LSM, percolation, and transport
+families do not honestly map to Lucene node-stat groups (ADR-145). GET returns Prometheus text
+exposition 0.0.4 with
+`Content-Type: text/plain; version=0.0.4; charset=utf-8`; HEAD performs the same collection and
+returns the same status and headers without a body. Successes and structured errors carry
+`Cache-Control: no-store`.
+
+The transport is deliberately strict. Query parameters and non-empty bodies return 400; methods
+other than GET/HEAD return 405 with `Allow: GET, HEAD`; a body over the route's 64 KiB ceiling
+returns 413; and a body that does not complete within 250 ms returns 408. The `metrics` HTTP request
+counter and duration histogram include both success and every rejection, including a 401 produced
+by `--auth-protect-reads` before collection begins. Since the registry is gathered before the
+current response is finalized, a scrape reports completed earlier scrapes, not itself.
+
+The exposition includes engine gauges, event counters, per-endpoint HTTP latency, an
+in-flight-request gauge, WAL size/pending gauges, cumulative flush/compaction-time counters, a
 `durability_failures_total{op}` counter (ADR-021), and — when bearer-token auth is enabled — an
 `auth_failures_total{reason="missing"|"invalid"}` counter for rejected requests (ADR-062).
 
-In cluster-coordinator mode this same route refreshes cluster-wide query, per-position, and gRPC
-transport series. A standalone `shardserver` or `controlserver` exposes its lean node metrics on the
-separate address configured with `--metrics-addr`; that is not the coordinator's REST
-`/_metrics` route.
+Standalone collection refreshes engine gauges from one lock-free snapshot. In
+cluster-coordinator mode the route shares the single stats-admission slot with `/_stats` and CAT
+stats, runs all potentially remote shard probes on a blocking worker, and derives the aggregate
+from one complete per-position count pass. Any required-position failure returns a sanitized
+`503 metrics_unavailable`; no partial or previously collected shard values are presented as a
+successful fresh scrape. A successful refresh replaces the whole
+`cluster_shard_queries{shard="N"}` label set, so positions removed by a shrink disappear from the
+next scrape. Unsigned values that exceed Prometheus's signed integer gauge range saturate at
+`i64::MAX` instead of wrapping negative.
+
+A standalone `shardserver` or `controlserver` exposes its lean node metrics on the separate address
+configured with `--metrics-addr`; that endpoint is distinct from the coordinator REST contract
+audited here.
 
 ADR-108 adds low-cardinality local bounded-ranking telemetry:
 `ranked_requests_total{outcome,scope}`, `rank_total_relation_total{relation}`,
