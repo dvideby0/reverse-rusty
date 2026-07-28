@@ -116,6 +116,9 @@ impl ClusterEngine {
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
             source_files: durable.source_files,
+            pending_alias_import_predecessor: None,
+            pending_alias_import_manifest: Mutex::new(None),
+            committed_manifest: Mutex::new(durable.manifest),
             control: durable.control,
             // A fresh transport-metrics collector (ADR-085); the gRPC builders REPLACE it with
             // the shared one they also hand to each `RemoteShard` (via `with_transport_metrics`),
@@ -368,6 +371,7 @@ impl ClusterEngine {
             epoch: manifest.epoch,
             placement_generation: manifest.placement_generation,
             source_files: manifest.source_files.clone(),
+            manifest: Some(manifest.clone()),
             vnodes: manifest.vnodes,
             control: Box::new(InMemoryControlPlane::single_node_with_generation(
                 manifest.num_shards,

@@ -374,7 +374,12 @@ impl Vocab {
 
     /// Import a Solr/Lucene synonym file into the registry as declared groups (ADR-060 item 3).
     /// Returns the number of newly-active groups. See [`AliasRegistry::import_solr`].
-    pub fn import_solr_aliases(&mut self, text: &str, norm: &Normalizer, dict: &Dict) -> usize {
+    pub fn import_solr_aliases(
+        &mut self,
+        text: &str,
+        norm: &Normalizer,
+        dict: &Dict,
+    ) -> Result<usize, super::AliasImportError> {
         self.aliases.import_solr(text, norm, dict)
     }
 

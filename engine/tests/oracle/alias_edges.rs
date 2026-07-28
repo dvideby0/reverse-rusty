@@ -25,11 +25,13 @@ fn matched(eng: &mut Engine, s: &mut MatchScratch, title: &str) -> HashSet<u64> 
 #[test]
 fn multiword_alias_survives_future_insert_on_fresh_index() {
     let mut v = Vocab::new();
-    let activated = v.import_solr_aliases(
-        "ny => new york",
-        &Normalizer::default_vocab().expect("vocab"),
-        &Dict::new(),
-    );
+    let activated = v
+        .import_solr_aliases(
+            "ny => new york",
+            &Normalizer::default_vocab().expect("vocab"),
+            &Dict::new(),
+        )
+        .expect("valid aliases");
     assert_eq!(activated, 1, "the declared multi-word alias must activate");
 
     // Fresh engine: empty dict ⇒ `new york`'s entity is NOT yet interned when the alias installs.
@@ -55,11 +57,13 @@ fn multiword_alias_survives_future_insert_on_fresh_index() {
 #[test]
 fn query_alias_with_whitespace_run_still_reaches_the_group() {
     let mut v = Vocab::new();
-    let activated = v.import_solr_aliases(
-        "ny => new york",
-        &Normalizer::default_vocab().expect("vocab"),
-        &Dict::new(),
-    );
+    let activated = v
+        .import_solr_aliases(
+            "ny => new york",
+            &Normalizer::default_vocab().expect("vocab"),
+            &Dict::new(),
+        )
+        .expect("valid aliases");
     assert_eq!(activated, 1, "the declared multi-word alias must activate");
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
@@ -89,7 +93,11 @@ fn active_alias_survives_punctuation_reclassification() {
     let mut v = Vocab::new();
     v.fold_punctuation('-');
     let norm = v.to_normalizer().expect("normalizer with - folded");
-    assert_eq!(v.import_solr_aliases("ab => a-b", &norm, &Dict::new()), 1);
+    assert_eq!(
+        v.import_solr_aliases("ab => a-b", &norm, &Dict::new())
+            .expect("valid aliases"),
+        1
+    );
     v.set_punct_class('-', PunctClass::Split);
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
@@ -111,11 +119,13 @@ fn active_alias_survives_punctuation_reclassification() {
 #[test]
 fn boundary_overlap_alias_query_still_matches() {
     let mut v = Vocab::new();
-    let activated = v.import_solr_aliases(
-        "ab => a b\nbc => b c",
-        &Normalizer::default_vocab().expect("vocab"),
-        &Dict::new(),
-    );
+    let activated = v
+        .import_solr_aliases(
+            "ab => a b\nbc => b c",
+            &Normalizer::default_vocab().expect("vocab"),
+            &Dict::new(),
+        )
+        .expect("valid aliases");
     assert_eq!(activated, 2, "both declared multi-word aliases activate");
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));

@@ -32,10 +32,34 @@ impl Engine {
         solr_text: &str,
     ) -> Result<AliasApplyReport, crate::error::NormalizerError> {
         let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
-        let activated = vocab.import_solr_aliases(solr_text, &self.norm, &self.dict);
+        let before = vocab.aliases().clone();
+        let activated = vocab
+            .import_solr_aliases(solr_text, &self.norm, &self.dict)
+            .map_err(|error| crate::error::NormalizerError::new(error.to_string()))?;
+        let changed = vocab.aliases() != &before;
+        if !changed {
+            // Embedded callers may have used the public split apply seam
+            // (`set_vocab` then `recompile_stale_segments`) and stopped between
+            // its two steps. An identical import must finish that pending
+            // rebuild before it can honestly report a no-op.
+            let pending_rebuild = self.has_stale_segments();
+            let recompiled = self.recompile_stale_segments();
+            if self.has_stale_segments() {
+                return Err(crate::error::NormalizerError::new(
+                    "alias import could not complete the pending query rebuild",
+                ));
+            }
+            return Ok(AliasApplyReport {
+                applied: pending_rebuild,
+                activated,
+                recompiled,
+                summary: self.alias_summary(),
+            });
+        }
         self.set_vocab(vocab)?;
         let recompiled = self.recompile_stale_segments();
         Ok(AliasApplyReport {
+            applied: true,
             activated,
             recompiled,
             summary: self.alias_summary(),
@@ -57,6 +81,7 @@ impl Engine {
         self.set_vocab(vocab)?;
         let recompiled = self.recompile_stale_segments();
         Ok(AliasApplyReport {
+            applied: true,
             activated,
             recompiled,
             summary: self.alias_summary(),

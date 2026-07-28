@@ -285,6 +285,9 @@ pub(crate) struct ClusterDurable {
     /// Per-shard source-sidecar basename selected by the same commit as the
     /// segment registry.
     pub source_files: Vec<String>,
+    /// Exact coordinator manifest known to have committed successfully. `None`
+    /// for an in-memory cluster.
+    pub manifest: Option<crate::storage::ClusterManifest>,
     /// Ring vnode count, captured so the manifest can re-derive a byte-identical ring.
     pub vnodes: u32,
     /// The cluster-state control plane (membership + shard→node map + ring params + model
@@ -304,6 +307,7 @@ impl ClusterDurable {
             epoch: 0,
             placement_generation: crate::ownership::PlacementGeneration::INITIAL,
             source_files: vec!["sources.dat".to_string(); num_shards as usize],
+            manifest: None,
             vnodes,
             control: Box::new(InMemoryControlPlane::single_node(
                 num_shards,
@@ -371,6 +375,20 @@ pub struct ClusterEngine {
     /// Per-shard source-sidecar basenames selected by the current coordinator
     /// manifest. Index-aligned with `shards`.
     source_files: Vec<String>,
+    /// Exact durable predecessor captured before an alias import swaps the live
+    /// model. Retained only while that import's control/manifest commit is
+    /// incomplete, so an identical retry can overwrite precisely that commit
+    /// point and no other CRC-valid manifest.
+    pending_alias_import_predecessor: Option<crate::storage::ClusterManifest>,
+    /// Exact manifest a pending alias-import checkpoint attempted to publish.
+    /// This is populated before the atomic write so a retry can distinguish a
+    /// completed rename whose parent-directory sync failed from any divergent
+    /// same-generation commit point.
+    pending_alias_import_manifest: Mutex<Option<crate::storage::ClusterManifest>>,
+    /// Exact coordinator manifest whose publish completed successfully. Alias
+    /// no-op retries compare the on-disk document to this identity rather than
+    /// accepting matching epochs/model fields with different recovery state.
+    committed_manifest: Mutex<Option<crate::storage::ClusterManifest>>,
     /// Optional observer for durability events (recovery torn-tail, append failures).
     /// Buffered until set, mirroring the engine's `set_observer` pattern.
     observer: Mutex<Option<ClusterObserver>>,

@@ -247,7 +247,9 @@ fn legacy_tail_is_folded_before_current_placement_validation() {
         ..Default::default()
     };
     let mut alias_vocab = crate::vocab::Vocab::new();
-    alias_vocab.import_solr_aliases("ny => new york", &vocab(), &Dict::new());
+    alias_vocab
+        .import_solr_aliases("ny => new york", &vocab(), &Dict::new())
+        .expect("valid aliases");
     let cluster =
         ClusterEngine::build_with_vocab(alias_vocab, &cfg, &[]).expect("empty durable cluster");
 

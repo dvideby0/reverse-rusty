@@ -27,8 +27,9 @@ mod methods;
 mod tests;
 
 pub use alias::{
-    AliasEntry, AliasFeedback, AliasKind, AliasProvenance, AliasRegistry, AliasStatus,
-    AliasSummary, FeedbackEvidence, PairFeedback,
+    validate_solr_aliases, AliasEntry, AliasFeedback, AliasImportError, AliasKind, AliasProvenance,
+    AliasRegistry, AliasStatus, AliasSummary, FeedbackEvidence, PairFeedback,
+    MAX_ALIAS_FORMS_PER_RULE, MAX_ALIAS_IMPORT_RULES,
 };
 pub use distributional::{discover_pairs, DiscoveredPair, DistributionalConfig};
 pub use learn::{

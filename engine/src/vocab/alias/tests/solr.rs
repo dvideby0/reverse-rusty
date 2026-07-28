@@ -10,7 +10,7 @@ ipod, i-pod, i pod
 foozball => foosball
 sea biscuit, sea biscit => seabiscuit
 ";
-    let groups = parse_solr_synonyms(text);
+    let groups = parse_solr_synonyms(text).expect("valid Solr aliases");
     // premium/premiums
     assert!(groups.iter().any(|g| g == &forms(&["premium", "premiums"])));
     // ipod list (sorted): "i pod", "i-pod", "ipod"
@@ -31,7 +31,7 @@ sea biscuit, sea biscit => seabiscuit
 
 #[test]
 fn solr_escaped_comma_is_literal() {
-    let groups = parse_solr_synonyms(r"a\,b, c");
+    let groups = parse_solr_synonyms(r"a\,b, c").expect("valid escaped comma");
     assert_eq!(groups, vec![forms(&["a,b", "c"])]);
 }
 
@@ -131,7 +131,8 @@ fn declared_import_upgrades_a_learned_candidate() {
     );
     assert!(reg.active_groups().is_empty());
     // An operator then declares the same pair → upgraded to active.
-    reg.import_solr("alpha, beta", &n, &dict);
+    reg.import_solr("alpha, beta", &n, &dict)
+        .expect("valid aliases");
     assert_eq!(reg.active_groups(), vec![forms(&["alpha", "beta"])]);
 }
 
@@ -141,9 +142,17 @@ fn reimport_reports_zero_newly_active() {
     let dict = Dict::new();
     let mut reg = AliasRegistry::new();
     // First import activates the variant pair.
-    assert_eq!(reg.import_solr("premium, premiums", &n, &dict), 1);
+    assert_eq!(
+        reg.import_solr("premium, premiums", &n, &dict)
+            .expect("valid aliases"),
+        1
+    );
     // Re-importing the same (already-active) group activates nothing new — idempotent.
-    assert_eq!(reg.import_solr("premium, premiums", &n, &dict), 0);
+    assert_eq!(
+        reg.import_solr("premium, premiums", &n, &dict)
+            .expect("valid aliases"),
+        0
+    );
     assert_eq!(reg.len(), 1, "a re-import must not duplicate the entry");
 }
 

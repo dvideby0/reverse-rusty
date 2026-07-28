@@ -449,6 +449,7 @@ impl ClusterEngine {
             epoch: 0,
             placement_generation: PlacementGeneration::INITIAL,
             source_files: vec!["sources.dat".to_string(); ring.num_shards()],
+            manifest: Some(manifest),
             vnodes: config.vnodes,
             control: Box::new(InMemoryControlPlane::single_node(
                 ring.num_shards() as u32,

@@ -1,0 +1,217 @@
+use super::*;
+
+use crate::cluster::control::{
+    ClusterState, ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane, NodeId,
+    StateVersion,
+};
+
+struct FailFirstProposal {
+    inner: InMemoryControlPlane,
+    fail_next: AtomicBool,
+}
+
+impl FailFirstProposal {
+    fn new(state: ClusterState) -> Self {
+        Self {
+            inner: InMemoryControlPlane::new(state),
+            fail_next: AtomicBool::new(true),
+        }
+    }
+}
+
+impl ControlPlane for FailFirstProposal {
+    fn cluster_state(&self) -> Result<Arc<ClusterState>, ControlError> {
+        self.inner.cluster_state()
+    }
+
+    fn version(&self) -> Result<StateVersion, ControlError> {
+        self.inner.version()
+    }
+
+    fn propose(&self, change: ClusterStateChange) -> Result<StateVersion, ControlError> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(ControlError::Backend(
+                "injected first proposal failure".into(),
+            ));
+        }
+        self.inner.propose(change)
+    }
+
+    fn change_membership(&self, voters: Vec<NodeId>) -> Result<StateVersion, ControlError> {
+        self.inner.change_membership(voters)
+    }
+
+    fn leader(&self) -> Result<Option<NodeId>, ControlError> {
+        self.inner.leader()
+    }
+}
+
+#[test]
+fn identical_alias_retry_repairs_a_failed_control_transition() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("in-memory cluster");
+    let initial = cluster.control_state().expect("initial control state");
+    cluster = cluster.with_control_plane(Box::new(FailFirstProposal::new(initial)));
+
+    let first = cluster.import_alias_synonyms("package, pkg");
+    assert!(
+        matches!(first, Err(ShardError::ControlPlane(_))),
+        "first proposal must fail after the live rebuild: {first:?}"
+    );
+    assert!(cluster.percolate("pkg adapter").unwrap().contains(&1));
+
+    let retry = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("identical retry must repair the model transition");
+    assert!(!retry.applied, "the live registry was already installed");
+    assert_eq!(retry.recompiled, 0);
+
+    let repaired = cluster.control_state().expect("repaired control state");
+    assert_eq!(
+        repaired.placement_generation,
+        cluster.placement_generation().0
+    );
+    assert_eq!(repaired.dict_fingerprint, cluster.dict.fingerprint());
+}
+
+#[test]
+fn identical_alias_retry_refuses_to_misrepair_a_failed_resize_transition() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("in-memory cluster");
+    cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("install alias before resize");
+    let initial = cluster.control_state().expect("pre-resize control state");
+    cluster = cluster.with_control_plane(Box::new(FailFirstProposal::new(initial)));
+
+    let resize = cluster.resize(4);
+    assert!(
+        matches!(resize, Err(ShardError::ControlPlane(_))),
+        "resize proposal must fail after the live topology swap: {resize:?}"
+    );
+    assert_eq!(cluster.num_shards(), 4, "the live resize already swapped");
+    let stale = cluster.control_state().expect("stale control topology");
+    assert_eq!(stale.num_shards, 3);
+
+    let error = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect_err("alias retry must not disguise a pending resize as a model bump");
+    assert!(
+        matches!(error, ShardError::ControlPlane(_)),
+        "unexpected retry error: {error:?}"
+    );
+    assert_eq!(
+        cluster.control_state().expect("control state after retry"),
+        stale,
+        "the refused alias retry must not mutate the stale topology"
+    );
+}
+
+#[test]
+fn identical_alias_retry_accepts_an_exact_just_published_manifest() {
+    let dir = scratch_dir("alias_retry_published_manifest");
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("durable cluster");
+    let initial = cluster.control_state().expect("initial control state");
+    cluster = cluster.with_control_plane(Box::new(FailFirstProposal::new(initial)));
+
+    let first = cluster.import_alias_synonyms("package, pkg");
+    assert!(
+        matches!(first, Err(ShardError::ControlPlane(_))),
+        "first control transition must fail after the live rebuild: {first:?}"
+    );
+    cluster
+        .checkpoint()
+        .expect("publish the current-generation manifest");
+    let published_epoch = cluster.epoch();
+    cluster.epoch.store(published_epoch - 1, Ordering::Relaxed);
+    // Model `write_cluster_manifest` returning after rename but before the
+    // parent directory sync: the attempted manifest is visible, while the
+    // process still remembers only the predecessor as committed.
+    let predecessor = cluster.pending_alias_import_predecessor.clone();
+    *cluster
+        .committed_manifest
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = predecessor;
+
+    let retry = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("retry must finish a manifest visible after rename");
+    assert!(!retry.applied);
+    assert_eq!(retry.recompiled, 0);
+    assert_eq!(
+        cluster.epoch(),
+        published_epoch,
+        "retry must adopt the exact published manifest epoch"
+    );
+    assert!(
+        cluster.pending_alias_import_predecessor.is_none(),
+        "successful repair clears the retained predecessor identity"
+    );
+    let later = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("the adopted manifest must become the committed identity");
+    assert!(!later.applied);
+    assert_eq!(later.recompiled, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn identical_alias_retry_rejects_a_divergent_just_published_manifest() {
+    let dir = scratch_dir("alias_retry_divergent_published_manifest");
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let manifest_path = dir.join(CLUSTER_MANIFEST_FILE);
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("durable cluster");
+    let initial = cluster.control_state().expect("initial control state");
+    cluster = cluster.with_control_plane(Box::new(FailFirstProposal::new(initial)));
+
+    let first = cluster.import_alias_synonyms("package, pkg");
+    assert!(
+        matches!(first, Err(ShardError::ControlPlane(_))),
+        "first control transition must fail after the live rebuild: {first:?}"
+    );
+    cluster
+        .checkpoint()
+        .expect("publish the current-generation manifest");
+    let published_epoch = cluster.epoch();
+    cluster.epoch.store(published_epoch - 1, Ordering::Relaxed);
+
+    let mut divergent =
+        crate::storage::read_cluster_manifest(&manifest_path).expect("published manifest");
+    divergent.snapshot_pos = divergent.snapshot_pos.saturating_add(1);
+    crate::storage::write_cluster_manifest(&divergent, &manifest_path)
+        .expect("write divergent published manifest");
+    let divergent_bytes = std::fs::read(&manifest_path).expect("divergent manifest bytes");
+
+    let error = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect_err("retry must attest the full published commit identity");
+    assert!(
+        matches!(error, ShardError::Log(_)),
+        "unexpected retry error: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("manifest after retry"),
+        divergent_bytes,
+        "a retry must not overwrite a divergent published manifest"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -317,3 +317,4 @@ mod directory;
 mod exhaustive;
 mod repair;
 mod upsert;
+mod vocab_retry;

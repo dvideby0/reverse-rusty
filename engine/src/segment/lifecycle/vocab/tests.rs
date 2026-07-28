@@ -148,3 +148,37 @@ mod metadata_only_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod alias_import_tests {
+    use crate::normalize::Normalizer;
+    use crate::segment::{Engine, MatchScratch};
+    use crate::vocab::Vocab;
+
+    #[test]
+    fn identical_import_completes_a_pending_split_apply() {
+        let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        engine.build_from_queries(&[(1, "package adapter".to_string())]);
+
+        let mut vocab = Vocab::new();
+        vocab
+            .import_solr_aliases("package, pkg", &engine.norm, &engine.dict)
+            .expect("valid aliases");
+        engine
+            .set_vocab(vocab)
+            .expect("install vocabulary without recompiling");
+        assert!(engine.has_stale_segments(), "split apply is pending");
+
+        let report = engine
+            .import_alias_synonyms("package, pkg")
+            .expect("identical import must finish the rebuild");
+        assert!(report.applied, "the pending rebuild changed live state");
+        assert_eq!(report.recompiled, 1);
+        assert!(!engine.has_stale_segments());
+
+        let mut scratch = MatchScratch::new();
+        let mut matches = Vec::new();
+        engine.match_title("pkg adapter", &mut scratch, &mut matches, true);
+        assert_eq!(matches, vec![1]);
+    }
+}

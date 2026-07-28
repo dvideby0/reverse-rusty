@@ -26,11 +26,11 @@
 //! `Engine::recompile_stale_segments`.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{atomic::Ordering, Arc};
 
 use crate::vocab::{CorpusLearnConfig, Vocab};
 
-use super::ClusterEngine;
+use super::{ClusterEngine, CLUSTER_MANIFEST_FILE};
 use crate::cluster::control::ClusterStateChange;
 use crate::cluster::shard::ShardError;
 
@@ -43,6 +43,12 @@ type LiveTaggedMetadata = (
     crate::rank::RankValues,
     crate::ownership::QueryPlacement,
 );
+
+enum AliasImportManifestState {
+    Committed,
+    PublishedCurrent(crate::storage::ClusterManifest),
+    ImmediatePredecessor,
+}
 
 impl ClusterEngine {
     /// Change the cluster's vocabulary (ADR-046 mechanism 2) — e.g. declare an
@@ -235,9 +241,34 @@ impl ClusterEngine {
         solr_text: &str,
     ) -> Result<crate::segment::AliasApplyReport, ShardError> {
         let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
-        let activated = vocab.import_solr_aliases(solr_text, &self.norm, &self.dict);
+        let before = vocab.aliases().clone();
+        let activated = vocab
+            .import_solr_aliases(solr_text, &self.norm, &self.dict)
+            .map_err(|error| ShardError::Config(error.to_string()))?;
+        let changed = vocab.aliases() != &before;
+        if !changed {
+            self.finish_pending_alias_import_commit()?;
+            return Ok(crate::segment::AliasApplyReport {
+                applied: false,
+                activated,
+                recompiled: 0,
+                summary: self
+                    .vocab
+                    .as_deref()
+                    .map(Vocab::alias_summary)
+                    .unwrap_or_default(),
+            });
+        }
+        let predecessor = self.capture_alias_import_predecessor()?;
+        self.pending_alias_import_predecessor = predecessor;
+        *self
+            .pending_alias_import_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let rebuilt = self.set_vocab(vocab)?;
+        self.clear_pending_alias_import_identity();
         Ok(crate::segment::AliasApplyReport {
+            applied: true,
             activated,
             recompiled: rebuilt,
             summary: self
@@ -246,6 +277,272 @@ impl ClusterEngine {
                 .map(Vocab::alias_summary)
                 .unwrap_or_default(),
         })
+    }
+
+    /// Complete the post-swap commits a prior `set_vocab` attempt may have
+    /// failed before publishing. A fully committed import remains a read-only
+    /// no-op; incompatibility and attestation failures stay fail-loud.
+    fn finish_pending_alias_import_commit(&mut self) -> Result<(), ShardError> {
+        let generation = self.placement_generation();
+        let dict_fingerprint = self.dict.fingerprint();
+        let manifest_state = self.alias_import_manifest_state(generation)?;
+        let state = self.control.cluster_state()?;
+        let live_shards = u32::try_from(self.ring.num_shards()).map_err(|_| {
+            ShardError::ControlPlane(
+                "live shard count exceeds the control-plane representation".into(),
+            )
+        })?;
+        let assignments_match = state.assignments.len() == self.ring.num_shards()
+            && state
+                .assignments
+                .iter()
+                .enumerate()
+                .all(|(position, assignment)| assignment.position as usize == position);
+        if state.num_shards != live_shards || state.vnodes != self.vnodes || !assignments_match {
+            return Err(ShardError::ControlPlane(format!(
+                "alias-import retry found control topology with {} shards, {} vnodes, and {} \
+                 assignment(s); live topology has {} shards and {} vnodes",
+                state.num_shards,
+                state.vnodes,
+                state.assignments.len(),
+                self.ring.num_shards(),
+                self.vnodes
+            )));
+        }
+        if state.placement_generation != generation.0 || state.dict_fingerprint != dict_fingerprint
+        {
+            let prior_generation = generation.0.checked_sub(1).ok_or_else(|| {
+                ShardError::ControlPlane(
+                    "cannot repair alias-import model state at placement generation zero".into(),
+                )
+            })?;
+            if state.placement_generation != prior_generation {
+                return Err(ShardError::ControlPlane(format!(
+                    "alias-import retry found control placement generation {}, expected {} or {}",
+                    state.placement_generation, prior_generation, generation.0
+                )));
+            }
+            self.control
+                .propose(ClusterStateChange::BumpModelVersion { dict_fingerprint })?;
+            let repaired = self.control.cluster_state()?;
+            if repaired.placement_generation != generation.0
+                || repaired.dict_fingerprint != dict_fingerprint
+            {
+                return Err(ShardError::ControlPlane(
+                    "alias-import model-state repair was not committed".into(),
+                ));
+            }
+        }
+
+        match manifest_state {
+            AliasImportManifestState::Committed => {}
+            AliasImportManifestState::PublishedCurrent(manifest) => {
+                let dir = self.data_dir.as_ref().ok_or_else(|| {
+                    ShardError::Log(
+                        "alias-import retry lost its durable directory before sync".into(),
+                    )
+                })?;
+                std::fs::File::open(dir)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|error| {
+                        ShardError::Log(format!(
+                            "syncing the published alias-import manifest directory: {error}"
+                        ))
+                    })?;
+                self.epoch.store(manifest.epoch, Ordering::Relaxed);
+                *self
+                    .committed_manifest
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(manifest);
+            }
+            AliasImportManifestState::ImmediatePredecessor => self.checkpoint()?,
+        }
+        self.clear_pending_alias_import_identity();
+        Ok(())
+    }
+
+    fn clear_pending_alias_import_identity(&mut self) {
+        self.pending_alias_import_predecessor = None;
+        *self
+            .pending_alias_import_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Capture and attest the exact durable state an alias import is allowed to
+    /// supersede. Retaining the parsed document makes a later retry compare every
+    /// commit-identity field, including vocabulary and segment registry.
+    fn capture_alias_import_predecessor(
+        &self,
+    ) -> Result<Option<crate::storage::ClusterManifest>, ShardError> {
+        let Some(dir) = &self.data_dir else {
+            return Ok(None);
+        };
+        let manifest = crate::storage::read_cluster_manifest(&dir.join(CLUSTER_MANIFEST_FILE))
+            .map_err(|error| {
+                ShardError::Log(format!(
+                    "reading cluster manifest before alias import: {error}"
+                ))
+            })?;
+        self.attest_alias_import_manifest_common(&manifest)?;
+        let committed_matches = self
+            .committed_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            == Some(&manifest);
+        let vocab_data = self.alias_import_vocab_data()?;
+        if !committed_matches
+            || manifest.epoch != self.epoch()
+            || manifest.placement_generation != self.placement_generation()
+            || manifest.dict_fingerprint != self.dict.fingerprint()
+            || manifest.dict_data != crate::storage::serialize_dict(&self.dict)
+            || manifest.vocab_data != vocab_data
+        {
+            return Err(ShardError::Log(
+                "cluster manifest diverged before alias import".into(),
+            ));
+        }
+        Ok(Some(manifest))
+    }
+
+    /// Classify the durable commit point before an identical alias-import retry
+    /// mutates the control plane or checkpoints. Only the live commit itself or
+    /// its exact epoch/generation predecessor is admissible; every other readable
+    /// manifest is divergent and must remain untouched.
+    fn alias_import_manifest_state(
+        &self,
+        generation: crate::ownership::PlacementGeneration,
+    ) -> Result<AliasImportManifestState, ShardError> {
+        let Some(dir) = &self.data_dir else {
+            return Ok(AliasImportManifestState::Committed);
+        };
+        let manifest = crate::storage::read_cluster_manifest(&dir.join(CLUSTER_MANIFEST_FILE))
+            .map_err(|error| {
+                ShardError::Log(format!(
+                    "reading cluster manifest before alias-import retry: {error}"
+                ))
+            })?;
+        self.attest_alias_import_manifest_common(&manifest)?;
+        let committed_manifest = self
+            .committed_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let pending_manifest = self
+            .pending_alias_import_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+
+        if manifest.placement_generation == generation {
+            if self.pending_alias_import_predecessor.is_some()
+                && self
+                    .epoch()
+                    .checked_add(1)
+                    .is_some_and(|next| manifest.epoch == next)
+                && (pending_manifest.as_ref() == Some(&manifest)
+                    || committed_manifest.as_ref() == Some(&manifest))
+            {
+                return Ok(AliasImportManifestState::PublishedCurrent(manifest));
+            }
+            if manifest.epoch == self.epoch() && committed_manifest.as_ref() == Some(&manifest) {
+                return Ok(AliasImportManifestState::Committed);
+            }
+            return Err(ShardError::Log(format!(
+                "current alias-import manifest epoch {} or recovery identity diverges from live \
+                 epoch {}",
+                manifest.epoch,
+                self.epoch()
+            )));
+        }
+
+        let prior_generation = generation.0.checked_sub(1).ok_or_else(|| {
+            ShardError::Log(
+                "cannot attest an alias-import predecessor at placement generation zero".into(),
+            )
+        })?;
+        if manifest.placement_generation.0 != prior_generation
+            || manifest.epoch != self.epoch()
+            || self.pending_alias_import_predecessor.as_ref() != Some(&manifest)
+            || committed_manifest.as_ref() != Some(&manifest)
+        {
+            return Err(ShardError::Log(format!(
+                "cluster manifest placement generation {} is not the alias-import predecessor {}",
+                manifest.placement_generation.0, prior_generation
+            )));
+        }
+        Ok(AliasImportManifestState::ImmediatePredecessor)
+    }
+
+    fn alias_import_vocab_data(&self) -> Result<Vec<u8>, ShardError> {
+        match &self.vocab {
+            Some(vocab) => vocab.to_json().map(String::into_bytes).map_err(|error| {
+                ShardError::Log(format!("serializing cluster vocab for retry: {error}"))
+            }),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn attest_alias_import_manifest_common(
+        &self,
+        manifest: &crate::storage::ClusterManifest,
+    ) -> Result<(), ShardError> {
+        let topology_matches = manifest.num_shards as usize == self.ring.num_shards()
+            && manifest.vnodes == self.vnodes
+            && manifest.include_broad == self.include_broad
+            && manifest.broad_replicate_all
+            && manifest.segment_registry.len() == self.ring.num_shards()
+            && manifest.next_seg_ids.len() == self.ring.num_shards()
+            && manifest.source_files.len() == self.ring.num_shards();
+        if !topology_matches
+            || manifest.compiler_semantics_version
+                != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION
+            || manifest.tag_dict_data != crate::storage::serialize_tagdict(&self.tag_dict)
+        {
+            return Err(ShardError::Log(format!(
+                "cluster manifest diverged before alias-import retry: epoch {}, placement \
+                 generation {}, {} shards, {} vnodes",
+                manifest.epoch,
+                manifest.placement_generation.0,
+                manifest.num_shards,
+                manifest.vnodes
+            )));
+        }
+
+        let persisted_dict =
+            crate::storage::deserialize_dict(&manifest.dict_data).map_err(|error| {
+                ShardError::Log(format!(
+                    "validating persisted cluster dict before alias-import retry: {error}"
+                ))
+            })?;
+        if persisted_dict.fingerprint() != manifest.dict_fingerprint {
+            return Err(ShardError::Log(format!(
+                "persisted cluster dict fingerprint diverged before alias-import retry: manifest \
+                 {:#018x}, actual {:#018x}",
+                manifest.dict_fingerprint,
+                persisted_dict.fingerprint()
+            )));
+        }
+
+        if !manifest.vocab_data.is_empty() {
+            let persisted = std::str::from_utf8(&manifest.vocab_data).map_err(|error| {
+                ShardError::Log(format!(
+                    "validating persisted cluster vocab before alias-import retry: {error}"
+                ))
+            })?;
+            let persisted_vocab = Vocab::from_json(persisted).map_err(|error| {
+                ShardError::Log(format!(
+                    "validating persisted cluster vocab before alias-import retry: {error}"
+                ))
+            })?;
+            persisted_vocab.to_normalizer().map_err(|error| {
+                ShardError::Log(format!(
+                    "validating persisted cluster vocab before alias-import retry: {error}"
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     /// Learn alias candidates from the cluster's OWN stored queries (any-of
@@ -262,6 +559,7 @@ impl ClusterEngine {
             vocab.learn_aliases_from_queries(&corpus, min_count, &self.norm, &self.dict);
         let rebuilt = self.set_vocab(vocab)?;
         Ok(crate::segment::AliasApplyReport {
+            applied: true,
             activated,
             recompiled: rebuilt,
             summary: self

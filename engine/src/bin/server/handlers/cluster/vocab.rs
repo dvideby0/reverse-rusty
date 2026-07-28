@@ -20,7 +20,9 @@ use reverse_rusty::config::EngineConfig;
 use reverse_rusty::vocab::AliasSummary;
 
 use crate::handlers::alias::{
-    acquire_alias_read_permit, finish_alias_read_worker, serialize_aliases, AliasReadTransport,
+    acquire_alias_import_permit, acquire_alias_read_permit, alias_import_error_response,
+    alias_import_success, finish_alias_import_response, finish_alias_read_worker,
+    serialize_aliases, AliasImportTransport, AliasReadTransport,
 };
 use crate::handlers::vocab::{
     acquire_vocab_learn_apply_permit, acquire_vocab_read_permit, acquire_vocab_write_permit,
@@ -178,12 +180,6 @@ pub(crate) async fn cluster_get_aliases(
     finish_alias_read_worker(&state.prom, worker.await)
 }
 
-#[derive(Deserialize)]
-pub(crate) struct ClusterImportAliasesRequest {
-    /// Raw Solr/Lucene synonym-file text.
-    synonyms: String,
-}
-
 #[derive(Serialize)]
 struct ClusterAliasApplyResponse {
     acknowledged: bool,
@@ -198,30 +194,47 @@ struct ClusterAliasApplyResponse {
 #[instrument(skip_all)]
 pub(crate) async fn cluster_import_aliases(
     State(state): State<Arc<ClusterAppState>>,
-    Json(req): Json<ClusterImportAliasesRequest>,
+    transport: AliasImportTransport,
 ) -> Response {
-    let result = {
-        let _w = state.write_serial.lock();
-        let mut cluster = state.cluster.write();
-        cluster.import_alias_synonyms(&req.synonyms)
+    let (_duration, started, payload) = transport.into_parts();
+    let permit = match acquire_alias_import_permit(&state.stats_permits, &state.prom).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
     };
-    match result {
-        Ok(report) => {
+    let work_state = Arc::clone(&state);
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let (synonyms, rules) = payload.validate()?;
+        let _w = work_state.write_serial.lock();
+        let mut cluster = work_state.cluster.write();
+        Ok::<_, String>((rules, cluster.import_alias_synonyms(&synonyms)))
+    });
+    let response = match worker.await {
+        Ok(Ok((rules, Ok(report)))) => {
             info!(
+                result = if report.applied { "updated" } else { "noop" },
                 activated = report.activated,
-                rebuilt = report.recompiled,
-                "cluster alias import applied"
+                recompiled = report.recompiled,
+                "cluster alias import complete"
             );
-            Json(ClusterAliasApplyResponse {
-                acknowledged: true,
-                activated: report.activated,
-                rebuilt: report.recompiled,
-                summary: report.summary,
-            })
-            .into_response()
+            alias_import_success(started, rules, report)
         }
-        Err(e) => shard_error_response("alias import refused", &e),
-    }
+        Ok(Ok((_, Err(error)))) => shard_error_response("alias import not acknowledged", &error),
+        Ok(Err(reason)) => alias_import_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "validation_error",
+            reason,
+        ),
+        Err(join_error) => {
+            tracing::error!(error = %join_error, "cluster alias-import worker failed");
+            alias_import_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "aliases_unavailable",
+                "cluster alias-import worker failed",
+            )
+        }
+    };
+    finish_alias_import_response(&state.prom, response)
 }
 
 #[derive(Deserialize, Default)]
