@@ -206,7 +206,7 @@ The full method/path matrix is below.
 | `/_vocab` | GET/HEAD | Strict native no-store, round-trippable vocabulary JSON / bodyless metadata check (ADR-146) |
 | `/_vocab` | PUT | Replace vocabulary |
 | `/_vocab/learn` | POST | Learn synonyms (+ opt-in NPMI phrases, `corpus_phrases=true`) from raw query text |
-| `/_vocab/learn_and_apply` | POST | Learn from stored queries + apply (`?min_count=N`; opt-in NPMI phrases `?corpus_phrases=true`) |
+| `/_vocab/learn_and_apply` | POST | Strict native stored-corpus learn + synchronous apply with timing, one bounded blocking slot, and fail-loud durability (ADR-149) |
 | `/_vocab/aliases` | GET | The governed alias registry + status summary (ADR-060) |
 | `/_vocab/aliases/import` | POST | Import a Solr/Lucene synonym file + apply (body `{"synonyms":"..."}`) |
 | `/_vocab/aliases/learn_and_apply` | POST | Learn alias candidates from stored queries + apply (`?min_count=N`) |

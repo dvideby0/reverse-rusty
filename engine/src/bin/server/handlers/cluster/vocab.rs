@@ -20,10 +20,11 @@ use reverse_rusty::config::EngineConfig;
 use reverse_rusty::vocab::{AliasRegistry, AliasSummary};
 
 use crate::handlers::vocab::{
-    acquire_vocab_read_permit, acquire_vocab_write_permit, build_corpus_config, default_min_count,
-    execute_vocab_learn, finish_vocab_worker, finish_vocab_write_response, serialize_vocab,
-    vocab_write_error_response, vocab_write_success, LearnApplyQuery, VocabLearnTransport,
-    VocabReadTransport, VocabWriteTransport,
+    acquire_vocab_learn_apply_permit, acquire_vocab_read_permit, acquire_vocab_write_permit,
+    default_min_count, execute_vocab_learn, finish_vocab_learn_apply_response, finish_vocab_worker,
+    finish_vocab_write_response, serialize_vocab, vocab_learn_apply_error_response,
+    vocab_learn_apply_success, vocab_write_error_response, vocab_write_success,
+    VocabLearnApplyTransport, VocabLearnTransport, VocabReadTransport, VocabWriteTransport,
 };
 use crate::state::ClusterAppState;
 
@@ -98,13 +99,6 @@ pub(crate) async fn cluster_put_vocab(
     }
 }
 
-#[derive(Serialize)]
-struct VocabApplyResponse {
-    acknowledged: bool,
-    /// Live queries rebuilt under the new normalizer (the blue/green re-place).
-    rebuilt: usize,
-}
-
 /// POST /_vocab/learn — compute-only dry run: learn vocabulary rules from the
 /// supplied corpus and return them WITHOUT applying. Review, then `PUT /_vocab`.
 #[instrument(skip_all)]
@@ -120,32 +114,39 @@ pub(crate) async fn cluster_learn_vocab(
 #[instrument(skip_all)]
 pub(crate) async fn cluster_learn_and_apply_vocab(
     State(state): State<Arc<ClusterAppState>>,
-    Query(q): Query<LearnApplyQuery>,
+    transport: VocabLearnApplyTransport,
 ) -> Response {
-    let cfg = build_corpus_config(
-        q.min_count,
-        q.corpus_phrases,
-        q.npmi_tau,
-        q.npmi_min_count,
-        q.npmi_iterations,
-        q.learn_equivalences,
-    );
-    let result = {
-        let _w = state.write_serial.lock();
-        let mut cluster = state.cluster.write();
-        cluster.learn_and_apply_with(&cfg)
+    let (_duration, started, config) = transport.into_parts();
+    let permit = match acquire_vocab_learn_apply_permit(&state.stats_permits, &state.prom).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
     };
-    match result {
-        Ok(rebuilt) => {
-            info!(rebuilt, "cluster learn-and-apply complete");
-            Json(VocabApplyResponse {
-                acknowledged: true,
-                rebuilt,
-            })
-            .into_response()
+    let work_state = Arc::clone(&state);
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _w = work_state.write_serial.lock();
+        let mut cluster = work_state.cluster.write();
+        cluster.learn_and_apply_with(&config)
+    });
+    let response = match worker.await {
+        Ok(Ok(recompiled)) => {
+            info!(
+                recompiled,
+                "cluster stored-corpus vocabulary learned and applied"
+            );
+            vocab_learn_apply_success(started, recompiled)
         }
-        Err(e) => shard_error_response("learn-and-apply refused", &e),
-    }
+        Ok(Err(error)) => shard_error_response("learn-and-apply not acknowledged", &error),
+        Err(join_error) => {
+            tracing::error!(error = %join_error, "cluster vocabulary learn-and-apply worker failed");
+            vocab_learn_apply_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "vocab_unavailable",
+                "cluster vocabulary learn-and-apply worker failed",
+            )
+        }
+    };
+    finish_vocab_learn_apply_response(&state.prom, response)
 }
 
 #[derive(Serialize)]

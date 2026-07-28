@@ -195,6 +195,11 @@ The current system has two concrete mechanisms:
   explicitly. The in-process cluster builds replacement shards from live source and swaps the rebuilt
   state only after success. Remote shard servers run the stock normalizer; the current transport does
   not ship normalizers, so custom vocabulary and live vocabulary changes are refused there.
+- REST replacement and stored-corpus learning serialize through one administrative slot and execute
+  lock acquisition plus the complete O(corpus) rebuild off async workers. Both verify or atomically
+  produce the complete live-source replacement before acknowledging. Standalone storage degradation
+  after a coherent swap is published for matching consistency but returned as an unacknowledged 503;
+  durable cluster checkpoint failure is likewise fail-loud.
 
 `vocab_epoch` is process-local stale-state bookkeeping, not a persisted universal feature-model
 version. Durable format versions and compiler semantic fences make incompatible binaries fail loud,

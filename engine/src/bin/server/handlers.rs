@@ -52,6 +52,7 @@ pub(crate) use search::{
 };
 pub(crate) use vocab::{
     get_settings, get_vocab, learn_and_apply_vocab, learn_vocab, put_settings, put_vocab,
-    vocab_learn_method_not_allowed, vocab_method_not_allowed, VOCAB_LEARN_BODY_LIMIT,
-    VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
+    vocab_learn_apply_method_not_allowed, vocab_learn_method_not_allowed, vocab_method_not_allowed,
+    VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
+    VOCAB_WRITE_BODY_LIMIT,
 };

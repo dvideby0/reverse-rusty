@@ -60,35 +60,13 @@ impl LearnRequest {
                 self.queries.len()
             ));
         }
-        if self.min_count == 0 {
-            return Err("min_count must be at least 1".to_string());
-        }
-        if !self.corpus_phrases
-            && (self.npmi_tau.is_some()
-                || self.npmi_min_count.is_some()
-                || self.npmi_iterations.is_some())
-        {
-            return Err(
-                "npmi_tau, npmi_min_count, and npmi_iterations require corpus_phrases=true"
-                    .to_string(),
-            );
-        }
-        if let Some(tau) = self.npmi_tau {
-            if !tau.is_finite() || !(-1.0..=1.0).contains(&tau) {
-                return Err("npmi_tau must be finite and between -1 and 1".to_string());
-            }
-        }
-        if self.npmi_min_count == Some(0) {
-            return Err("npmi_min_count must be at least 1".to_string());
-        }
-        if let Some(iterations) = self.npmi_iterations {
-            if !(1..=VOCAB_LEARN_MAX_NPMI_ITERATIONS).contains(&iterations) {
-                return Err(format!(
-                    "npmi_iterations must be between 1 and \
-                     {VOCAB_LEARN_MAX_NPMI_ITERATIONS}"
-                ));
-            }
-        }
+        validate_learn_controls(
+            self.min_count,
+            self.corpus_phrases,
+            self.npmi_tau,
+            self.npmi_min_count,
+            self.npmi_iterations,
+        )?;
 
         let mut ids = HashSet::with_capacity(self.queries.len());
         let mut relationship_observations = 0usize;
@@ -148,6 +126,41 @@ impl LearnRequest {
         );
         (self.queries, config)
     }
+}
+
+pub(crate) fn validate_learn_controls(
+    min_count: usize,
+    corpus_phrases: bool,
+    npmi_tau: Option<f64>,
+    npmi_min_count: Option<usize>,
+    npmi_iterations: Option<usize>,
+) -> Result<(), String> {
+    if min_count == 0 {
+        return Err("min_count must be at least 1".to_string());
+    }
+    if !corpus_phrases
+        && (npmi_tau.is_some() || npmi_min_count.is_some() || npmi_iterations.is_some())
+    {
+        return Err(
+            "npmi_tau, npmi_min_count, and npmi_iterations require corpus_phrases=true".to_string(),
+        );
+    }
+    if let Some(tau) = npmi_tau {
+        if !tau.is_finite() || !(-1.0..=1.0).contains(&tau) {
+            return Err("npmi_tau must be finite and between -1 and 1".to_string());
+        }
+    }
+    if npmi_min_count == Some(0) {
+        return Err("npmi_min_count must be at least 1".to_string());
+    }
+    if let Some(iterations) = npmi_iterations {
+        if !(1..=VOCAB_LEARN_MAX_NPMI_ITERATIONS).contains(&iterations) {
+            return Err(format!(
+                "npmi_iterations must be between 1 and {VOCAB_LEARN_MAX_NPMI_ITERATIONS}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Strict request transport shared by standalone and coordinator dry runs.

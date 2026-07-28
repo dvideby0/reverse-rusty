@@ -162,13 +162,15 @@ relationship expansion, phrase tokens and growth passes, body/result size, and b
 validation, learning, and serialization on the shared administrative blocking slot. It does not
 inspect stored queries or apply its result.
 
-The REST and cluster replacement paths perform the O(corpus) rebuild on bounded blocking work and
-recompile stored queries before publishing the new normalizer. A successful durable response means
-the rebuilt query state committed; a coherent live rebuild whose storage commit fails is published
-but explicitly not acknowledged. Embedded callers use the deliberately split `set_vocab()` then
-`recompile_stale_segments()` sequence and must not publish a snapshot between those calls.
-Single-node durable deployments must persist the same vocabulary file used on reopen; clusters
-checkpoint the vocabulary in coordinator state. See
+The REST replacement and stored-corpus learn-and-apply paths perform the O(corpus) rebuild through
+the same one-slot blocking-work boundary and recompile stored queries before publishing the new
+normalizer. The mutating learner accepts only bounded, bodyless, validated query controls; it merges
+new rules under the installed vocabulary and returns the same timed `recompiled` result in standalone
+and coordinator modes. A successful durable response means the rebuilt query state committed; a
+coherent live rebuild whose storage commit fails is published but explicitly not acknowledged.
+Embedded callers use the deliberately split `set_vocab()` then `recompile_stale_segments()` sequence
+and must not publish a snapshot between those calls. Single-node durable deployments must persist
+the same vocabulary file used on reopen; clusters checkpoint the vocabulary in coordinator state. See
 [`../reference/api/vocab.md`](../reference/api/vocab.md).
 
 Compiler semantics version 5 removed earlier special-purpose feature categories. This project has

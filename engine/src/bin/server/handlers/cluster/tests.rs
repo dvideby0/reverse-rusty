@@ -168,7 +168,11 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         )
         .route(
             "/_vocab/learn_and_apply",
-            post(cluster_learn_and_apply_vocab),
+            post(cluster_learn_and_apply_vocab)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::handlers::VOCAB_LEARN_APPLY_BODY_LIMIT,
+                ))
+                .fallback(crate::handlers::vocab_learn_apply_method_not_allowed::<ClusterAppState>),
         )
         .route("/_vocab/aliases", get(cluster_get_aliases))
         .route(
