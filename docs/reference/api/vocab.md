@@ -32,7 +32,7 @@ reached through the read route includes `Cache-Control: no-store`; success is
 `Content-Type: application/json`.
 
 The read is strict: it accepts no query parameters or request body. GET/HEAD body extraction has a
-64 KiB ceiling and a 250 ms read deadline, without changing the larger allowance for `PUT /_vocab`.
+64 KiB ceiling and a 250 ms read deadline, independent of the write operation's 16 MiB allowance.
 Errors use the standard JSON envelope: invalid query/body is 400, a stalled body is 408, oversized
 input is 413, closed read admission is 503, and serialization/worker failure is 500. Other methods
 are 405 with `Allow: GET, HEAD, PUT`.
@@ -45,7 +45,9 @@ slot is asynchronous.
 
 This is deliberately a native API. Elasticsearch
 [`GET /_synonyms/{id}`](https://www.elastic.co/guide/en/elasticsearch/reference/current/get-synonyms-set.html)
-returns one named, pageable Solr-rule set, while OpenSearch exposes synonyms through
+and
+[`PUT /_synonyms/{id}`](https://www.elastic.co/guide/en/elasticsearch/reference/current/put-synonyms-set.html)
+operate on one named, pageable Solr-rule set, while OpenSearch exposes synonyms through
 [analyzer token-filter configuration](https://docs.opensearch.org/latest/analyzers/token-filters/synonym/).
 Reverse Rusty's document also owns phrases, equivalences, punctuation, numeric context, and the
 governed alias registry, so neither the standard path nor its response shape is an honest alias.
@@ -53,16 +55,38 @@ governed alias registry, so neither the standard path nor its response shape is 
 ## `PUT /_vocab` — Replace vocabulary
 
 Replace the engine's vocabulary. Existing stored queries are **automatically recompiled** under the
-new normalizer — under the same lock, before the new snapshot is published — so the change takes
-effect immediately with zero false negatives. `recompiled` reports how many queries were rebuilt.
+new normalizer before the new snapshot is published, so the change takes effect immediately with
+zero false negatives. Standalone mode performs the replacement and recompile under its engine writer
+lock. Coordinator mode performs one blue/green re-placement under the cluster write lock and
+checkpoints a durable cluster before success. Both return the same response shape;
+`recompiled` reports how many live queries were rebuilt.
 
-> **Durability:** the recompiled queries persist (the recompile commits like a flush), but the
-> vocabulary **object** itself lives in memory — single-node vocab persistence is the `--vocab-file`
-> the server loads at startup (ADR-015). After changing the vocabulary over REST on a durable
-> server, save the same JSON to your `--vocab-file` (e.g. capture `GET /_vocab`) so a restart
-> reopens under the matching normalizer; restarting with a stale/absent vocab file desyncs title
-> normalization from the persisted queries. (A cluster persists its vocab in the coordinator
-> manifest and does not have this caveat.)
+The request is strict and synchronous:
+
+- only query-free `PUT` is accepted;
+- a body and `Content-Type: application/json` (or an `application/*+json` vendor media type) are
+  required;
+- the complete `Vocab` object rejects malformed JSON and unknown top-level fields;
+- body extraction is capped at 16 MiB and must complete within 5 seconds; and
+- every response includes `Cache-Control: no-store` and uses the standard JSON error envelope.
+
+The decoded request waits asynchronously for the server's single administrative-work slot. The
+O(corpus) replacement then runs on a blocking worker, so lock acquisition and compilation do not
+occupy a Tokio request worker. The operation has no cancellable execution timeout: after admission,
+it runs to a terminal result and publishes a coherent snapshot even if the client disconnects.
+Concurrent stats and vocabulary read/write operations serialize through the same bounded slot.
+
+> **Durability:** on a successful response, the recompiled queries have committed like a flush.
+> The single-node vocabulary **object** itself still lives in memory: `--vocab-file` is the restart
+> source (ADR-015). Save the same JSON there (for example, capture `GET /_vocab`) after a successful
+> REST replacement; reopening with a stale or absent file would desynchronize title normalization
+> from the persisted queries. A cluster persists its vocabulary in the coordinator manifest and
+> does not have this file caveat. If a standalone recompile becomes live but its durable commit
+> fails, the process publishes that coherent live state but returns
+> `503 persistence_unavailable` instead of `acknowledged: true`; the old manifest remains
+> authoritative for restart. A durable coordinator checkpoint failure is likewise not
+> acknowledged even though the blue/green state may already be live; inspect `GET /_vocab` before
+> deciding how to recover.
 
 ```bash
 curl -X PUT localhost:9200/_vocab \
@@ -72,10 +96,18 @@ curl -X PUT localhost:9200/_vocab \
 
 ```json
 {
+  "took": 37,
+  "took_ms": 37.428,
   "acknowledged": true,
   "recompiled": 1280
 }
 ```
+
+`took` is the whole-route elapsed time in integer milliseconds and `took_ms` preserves fractional
+milliseconds. Invalid transport or JSON is 400/408/413/415 as applicable, an invalid vocabulary is
+400 `vocab_error`, closed admission or unhealthy/degraded persistence is 503, and a blocking-worker
+or impossible incomplete rebuild failure is 500. A non-local coordinator still returns 400 because
+the current remote shard protocol does not ship the replacement normalizer.
 
 **Declaring equivalences (ADR-054).** The optional `equivalences` block is a list of groups of
 surface forms treated as the same entity (e.g. `[["ns", "north star"], ["pkg", "package"]]`). Unlike

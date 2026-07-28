@@ -156,8 +156,10 @@ Semantics can be supplied through:
 - opt-in NPMI phrase induction; and
 - review-first distributional alias discovery.
 
-The REST and cluster replacement paths recompile stored queries before publishing the new
-normalizer. Embedded callers use the deliberately split `set_vocab()` then
+The REST and cluster replacement paths perform the O(corpus) rebuild on bounded blocking work and
+recompile stored queries before publishing the new normalizer. A successful durable response means
+the rebuilt query state committed; a coherent live rebuild whose storage commit fails is published
+but explicitly not acknowledged. Embedded callers use the deliberately split `set_vocab()` then
 `recompile_stale_segments()` sequence and must not publish a snapshot between those calls.
 Single-node durable deployments must persist the same vocabulary file used on reopen; clusters
 checkpoint the vocabulary in coordinator state. See

@@ -18,6 +18,11 @@ async fn vocabulary_read_is_complete_uncacheable_and_bodyless_for_head() {
     });
     let (status, put) = send(&state, req("PUT", "/_vocab", &vocab)).await;
     assert_eq!(status, StatusCode::OK, "{put}");
+    assert_eq!(put["acknowledged"], true, "{put}");
+    assert_eq!(put["recompiled"], 3, "{put}");
+    assert!(put["rebuilt"].is_null(), "{put}");
+    assert!(put["took"].is_u64(), "{put}");
+    assert!(put["took_ms"].is_number(), "{put}");
 
     let (status, headers, bytes) = send_raw(&state, req_empty("GET", "/_vocab")).await;
     assert_eq!(status, StatusCode::OK);
@@ -105,4 +110,110 @@ async fn vocabulary_read_waits_asynchronously_for_shared_admission() {
     assert_eq!(headers.get(header::ALLOW).expect("allow"), "GET, HEAD, PUT");
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
     assert_eq!(body["error"]["type"], "method_not_allowed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vocabulary_write_is_strict_bounded_and_shares_async_admission() {
+    let state = test_state(&seed());
+    let vocab = serde_json::json!({
+        "synonyms": [
+            {"token": "pkg", "canonical": "term:package", "kind": "generic"}
+        ]
+    });
+
+    let (status, headers, bytes) = send_raw(
+        &state,
+        Request::builder()
+            .method("PUT")
+            .uri("/_vocab?refresh=true")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(vocab.to_string()))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+    assert_eq!(body["error"]["type"], "validation_error", "{body}");
+
+    let (status, headers, bytes) = send_raw(
+        &state,
+        Request::builder()
+            .method("PUT")
+            .uri("/_vocab")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{"))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+    assert_eq!(body["error"]["type"], "validation_error", "{body}");
+
+    let held = Arc::clone(&state.stats_permits)
+        .acquire_owned()
+        .await
+        .expect("admin permit");
+    let request_state = Arc::clone(&state);
+    let mut request = tokio::spawn(async move {
+        send_raw(
+            &request_state,
+            Request::builder()
+                .method("PUT")
+                .uri("/_vocab")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(vocab.to_string()))
+                .expect("request"),
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut request)
+            .await
+            .is_err(),
+        "coordinator vocabulary write must wait asynchronously for administrative admission"
+    );
+    drop(held);
+
+    let (status, headers, bytes) = request.await.expect("request task");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON response");
+    assert_eq!(body["recompiled"], 3, "{body}");
+    assert!(body["rebuilt"].is_null(), "{body}");
+
+    assert_eq!(
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["vocab_put", "400"])
+            .get(),
+        2
+    );
+    assert_eq!(
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["vocab_put", "200"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        state
+            .prom
+            .http_request_duration
+            .with_label_values(&["vocab_put"])
+            .get_sample_count(),
+        3
+    );
 }

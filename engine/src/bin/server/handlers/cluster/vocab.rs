@@ -17,11 +17,12 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
 
 use reverse_rusty::config::EngineConfig;
-use reverse_rusty::vocab::{AliasRegistry, AliasSummary, Vocab};
+use reverse_rusty::vocab::{AliasRegistry, AliasSummary};
 
 use crate::handlers::vocab::{
-    acquire_vocab_read_permit, build_corpus_config, default_min_count, finish_vocab_worker,
-    serialize_vocab, LearnApplyQuery, VocabReadTransport,
+    acquire_vocab_read_permit, acquire_vocab_write_permit, build_corpus_config, default_min_count,
+    finish_vocab_worker, finish_vocab_write_response, serialize_vocab, vocab_write_error_response,
+    vocab_write_success, LearnApplyQuery, VocabReadTransport, VocabWriteTransport,
 };
 use crate::state::ClusterAppState;
 
@@ -51,37 +52,56 @@ pub(crate) async fn cluster_get_vocab(
     finish_vocab_worker(&state.prom, worker.await)
 }
 
-#[derive(Serialize)]
-struct VocabApplyResponse {
-    acknowledged: bool,
-    /// Live queries rebuilt under the new normalizer (the blue/green re-place).
-    rebuilt: usize,
-}
-
 /// PUT /_vocab — replace the cluster vocabulary (ADR-046 mechanism 2): re-mint the
 /// dict, re-place every query, atomic swap; durable clusters checkpoint the new
 /// state. The non-local refusal comes back as a 400 (tags + multi-word activate, ADR-074/076).
 #[instrument(skip_all)]
 pub(crate) async fn cluster_put_vocab(
     State(state): State<Arc<ClusterAppState>>,
-    Json(vocab): Json<Vocab>,
+    transport: VocabWriteTransport,
 ) -> Response {
-    let result = {
-        let _w = state.write_serial.lock();
-        let mut cluster = state.cluster.write();
-        cluster.set_vocab(vocab)
+    let (_duration, started, vocab) = transport.into_parts();
+    let permit = match acquire_vocab_write_permit(&state.stats_permits, &state.prom).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
     };
-    match result {
+    let work_state = Arc::clone(&state);
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _w = work_state.write_serial.lock();
+        let mut cluster = work_state.cluster.write();
+        cluster.set_vocab(vocab)
+    });
+    match worker.await {
         Ok(rebuilt) => {
-            info!(rebuilt, "cluster vocabulary replaced");
-            Json(VocabApplyResponse {
-                acknowledged: true,
-                rebuilt,
-            })
-            .into_response()
+            let response = match rebuilt {
+                Ok(recompiled) => {
+                    info!(recompiled, "cluster vocabulary replaced");
+                    vocab_write_success(started, recompiled)
+                }
+                Err(error) => shard_error_response("vocabulary change not acknowledged", &error),
+            };
+            finish_vocab_write_response(&state.prom, response)
         }
-        Err(e) => shard_error_response("vocabulary change refused", &e),
+        Err(join_error) => {
+            tracing::error!(error = %join_error, "cluster vocabulary write worker failed");
+            finish_vocab_write_response(
+                &state.prom,
+                vocab_write_error_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "vocab_unavailable",
+                    "vocabulary write worker failed",
+                ),
+            )
+        }
     }
+}
+
+#[derive(Serialize)]
+struct VocabApplyResponse {
+    acknowledged: bool,
+    /// Live queries rebuilt under the new normalizer (the blue/green re-place).
+    rebuilt: usize,
 }
 
 #[derive(Deserialize)]

@@ -18,52 +18,18 @@ use crate::dto::ApiError;
 use crate::state::AppState;
 
 mod read;
+mod write;
 pub(crate) use read::{
     acquire_vocab_read_permit, finish_vocab_worker, get_vocab, serialize_vocab,
     vocab_method_not_allowed, VocabReadTransport, VOCAB_READ_BODY_LIMIT,
 };
+pub(crate) use write::{
+    acquire_vocab_write_permit, finish_vocab_write_response, put_vocab, vocab_write_error_response,
+    vocab_write_success, VocabWriteTransport, VOCAB_WRITE_BODY_LIMIT,
+};
 
-// -- PUT /_vocab
-#[derive(Serialize)]
-struct PutVocabResponse {
-    acknowledged: bool,
-    /// Number of stored queries recompiled under the new normalizer so the change
-    /// takes effect immediately with zero false negatives (0 if none were affected).
-    recompiled: usize,
-}
-
-/// PUT /_vocab — replace the vocabulary, then recompile every stored query
-/// under the new normalizer (same lock, before the snapshot is published) so
-/// the change takes effect immediately with zero false negatives.
-pub(crate) async fn put_vocab(
-    State(state): State<Arc<AppState>>,
-    Json(vocab): Json<reverse_rusty::vocab::Vocab>,
-) -> impl IntoResponse {
-    let result = {
-        let mut engine = state.engine.lock();
-        match engine.set_vocab(vocab) {
-            Ok(_) => {
-                // Recompile every stored query under the new normalizer so the
-                // change takes effect with zero false negatives — under the same
-                // lock and BEFORE the snapshot is published, so readers never see
-                // the new normalizer against not-yet-recompiled segments.
-                let recompiled = engine.recompile_stale_segments();
-                (
-                    StatusCode::OK,
-                    Json(PutVocabResponse {
-                        acknowledged: true,
-                        recompiled,
-                    }),
-                )
-                    .into_response()
-            }
-            Err(e) => ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
-                .into_response(),
-        }
-    };
-    state.publish_snapshot();
-    result
-}
+#[cfg(test)]
+mod write_tests;
 
 #[derive(Deserialize)]
 pub(crate) struct LearnRequest {

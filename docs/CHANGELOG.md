@@ -106,6 +106,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   round-trippable JSON, GET-only request limits, whole-route telemetry, shared blocking-work
   admission, lock-free standalone snapshot capture, and brief off-runtime coordinator locking
   ([ADR-146](decisions/adr-146-get-vocab-api-contract.md)).
+- Hardened native `PUT /_vocab` with strict bounded JSON transport, synchronous timing and
+  standalone/coordinator response parity, shared off-runtime rebuild admission, complete
+  post-recompile verification, and fail-loud durable acknowledgement
+  ([ADR-147](decisions/adr-147-put-vocab-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
