@@ -88,6 +88,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   CAT header/column/help/sort rendering, numeric byte-unit controls, consistent string-valued JSON,
   and honest LSM fields plus exact ES/OpenSearch aliases
   ([ADR-142](decisions/adr-142-cat-segments-api-contract.md)).
+- Hardened coordinator `GET /_cat/shards` with strict shared CAT controls, no-store responses,
+  bounded blocking-worker admission, string-valued JSON, and fail-loud shard/topology collection
+  that no longer disguises control-plane failure as empty node assignments
+  ([ADR-143](decisions/adr-143-cat-shards-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

@@ -399,9 +399,6 @@ change, and acceptance boundary; promotion changes its priority, not its documen
   `memory.payload`, but cannot say whether that allocation is effective. Retain inserted-key and
   block counts, expose separate filter bytes plus an estimated false-positive rate, and compare it
   with a sampled measured rate.
-- **Cluster CAT shards controls.** `/_cat/stats` and standalone `/_cat/segments` now share strict
-  table parsing/rendering (ADR-141/142). Apply the same `format`, `v`, `h`, `help`, and `s`
-  mechanics to coordinator `/_cat/shards`, with typed errors for unknown fields.
 - **Batch cursor pagination.** `/v2/_mpercolate` intentionally rejects PIT and cursor state today.
   Add per-title continuation only if a real workload needs it, with bounded aggregate cursor state
   and the same snapshot, ordering, and stale-cursor guarantees as `/v2/_search`.
