@@ -4,8 +4,77 @@ use serde::{
     de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
+use std::marker::PhantomData;
 
 use reverse_rusty::vocab::MAX_ALIAS_IMPORT_RULES;
+
+/// Distinguishes an omitted optional field from an explicit JSON `null`.
+///
+/// The alias-import contract is strict: optional controls may be omitted, but
+/// when present they must carry their documented non-null value.
+#[derive(Default)]
+pub(super) enum OptionalField<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+
+impl<T> OptionalField<T> {
+    pub(super) fn into_option(self, field: &str) -> Result<Option<T>, String> {
+        match self {
+            Self::Missing => Ok(None),
+            Self::Null => Err(format!("`{field}` may not be null")),
+            Self::Value(value) => Ok(Some(value)),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for OptionalField<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OptionalFieldVisitor<T>(PhantomData<T>);
+
+        impl<'de, T> Visitor<'de> for OptionalFieldVisitor<T>
+        where
+            T: Deserialize<'de>,
+        {
+            type Value = OptionalField<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a non-null value")
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(OptionalField::Null)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(OptionalField::Null)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                T::deserialize(deserializer).map(OptionalField::Value)
+            }
+        }
+
+        deserializer.deserialize_option(OptionalFieldVisitor(PhantomData))
+    }
+}
 
 pub(super) enum SynonymsSet {
     One(SynonymRule),
@@ -80,6 +149,6 @@ pub(super) struct SynonymRule {
     /// Accepted for Elasticsearch request familiarity. Reverse Rusty's
     /// governed registry keys canonical form groups rather than rule IDs.
     #[serde(default)]
-    pub(super) id: Option<String>,
+    pub(super) id: OptionalField<String>,
     pub(super) synonyms: String,
 }

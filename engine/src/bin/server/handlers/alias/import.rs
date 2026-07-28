@@ -25,7 +25,7 @@ use crate::metrics::PrometheusMetrics;
 use crate::state::{AppState, RequestCtx};
 
 mod document;
-use document::{SynonymRule, SynonymsSet};
+use document::{OptionalField, SynonymRule, SynonymsSet};
 
 /// Alias files are bounded independently from the server's bulk-ingest ceiling.
 pub(crate) const ALIAS_IMPORT_BODY_LIMIT: usize = 16 * 1024 * 1024;
@@ -47,28 +47,33 @@ struct AliasImportParams {
 struct AliasImportDocument {
     /// Native Solr/Lucene file text.
     #[serde(default)]
-    synonyms: Option<String>,
+    synonyms: OptionalField<String>,
     /// Elasticsearch-compatible rule object or array of rule objects.
     #[serde(default)]
-    synonyms_set: Option<SynonymsSet>,
+    synonyms_set: OptionalField<SynonymsSet>,
     /// OpenSearch synonym-filter spelling. Only `solr` is implemented.
     #[serde(default)]
-    format: Option<String>,
+    format: OptionalField<String>,
     /// OpenSearch synonym-filter spelling. Reverse Rusty equivalences expand.
     #[serde(default)]
-    expand: Option<bool>,
+    expand: OptionalField<bool>,
 }
 
 impl AliasImportDocument {
     fn into_payload(self) -> Result<AliasImportPayload, String> {
-        if self.format.as_deref().unwrap_or("solr") != "solr" {
+        let format = self.format.into_option("format")?;
+        let expand = self.expand.into_option("expand")?;
+        let synonyms = self.synonyms.into_option("synonyms")?;
+        let synonyms_set = self.synonyms_set.into_option("synonyms_set")?;
+
+        if format.as_deref().unwrap_or("solr") != "solr" {
             return Err(
                 "alias import supports only OpenSearch `format: \"solr\"`; WordNet is not \
                  implemented"
                     .to_string(),
             );
         }
-        if self.expand == Some(false) {
+        if expand == Some(false) {
             return Err(
                 "alias import requires OpenSearch `expand: true`; directional `expand: false` \
                  semantics are not implemented"
@@ -76,7 +81,7 @@ impl AliasImportDocument {
             );
         }
 
-        match (self.synonyms, self.synonyms_set) {
+        match (synonyms, synonyms_set) {
             (Some(text), None) => Ok(AliasImportPayload::Native(text)),
             (None, Some(SynonymsSet::One(rule))) => {
                 let text = validate_rule_metadata(rule, 0, &mut BTreeSet::new())?;
@@ -115,7 +120,8 @@ fn validate_rule_metadata(
     index: usize,
     ids: &mut BTreeSet<String>,
 ) -> Result<String, String> {
-    if let Some(id) = rule.id {
+    let id = rule.id.into_option(&format!("synonyms_set[{index}].id"))?;
+    if let Some(id) = id {
         if id.len() > MAX_RULE_ID_BYTES {
             return Err(format!(
                 "`synonyms_set[{index}].id` may not exceed {MAX_RULE_ID_BYTES} bytes"

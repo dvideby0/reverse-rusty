@@ -316,6 +316,18 @@ impl ClusterEngine {
                     "reading cluster manifest before alias-import retry: {error}"
                 ))
             })?;
+        if !manifest.vocab_data.is_empty() && manifest.vocab_data != vocab_data {
+            let persisted = std::str::from_utf8(&manifest.vocab_data).map_err(|error| {
+                ShardError::Log(format!(
+                    "validating persisted cluster vocab before alias-import retry: {error}"
+                ))
+            })?;
+            Vocab::from_json(persisted).map_err(|error| {
+                ShardError::Log(format!(
+                    "validating persisted cluster vocab before alias-import retry: {error}"
+                ))
+            })?;
+        }
         let committed = manifest.placement_generation == generation
             && manifest.dict_fingerprint == self.dict.fingerprint()
             && manifest.vocab_data == vocab_data;

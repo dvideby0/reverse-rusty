@@ -30,4 +30,5 @@ mod resize;
 mod torn_tail;
 mod upsert;
 mod vocab;
+mod vocab_retry;
 mod vocab_stale_sources;
