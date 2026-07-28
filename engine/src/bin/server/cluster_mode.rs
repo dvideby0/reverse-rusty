@@ -46,8 +46,8 @@ use crate::handlers::{
     cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback, cluster_resize,
     cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
     cluster_v2_mpercolate_route, cluster_v2_search_route, cluster_validate_and_apply_feedback,
-    BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT,
-    STATS_BODY_LIMIT,
+    BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT,
+    PIT_BODY_LIMIT, STATS_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -404,7 +404,10 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             "/_stats",
             any(cluster_stats).layer(DefaultBodyLimit::max(STATS_BODY_LIMIT)),
         )
-        .route("/_cat/shards", get(cluster_cat_shards))
+        .route(
+            "/_cat/shards",
+            any(cluster_cat_shards).layer(DefaultBodyLimit::max(CAT_SHARDS_BODY_LIMIT)),
+        )
         .route("/_cat/stats", get(cluster_cat_stats))
         .route(
             "/_cat/segments",

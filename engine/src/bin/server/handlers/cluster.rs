@@ -36,7 +36,7 @@ pub(crate) use admin::{
     cluster_checkpoint, cluster_compact, cluster_deregister_node, cluster_flush_route, cluster_gc,
     cluster_handoff, cluster_health, cluster_metrics, cluster_reassign, cluster_rebalance,
     cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync, cluster_root,
-    cluster_state, cluster_stats,
+    cluster_state, cluster_stats, CAT_SHARDS_BODY_LIMIT,
 };
 pub(crate) use doc::{cluster_bulk_route, cluster_delete_doc, cluster_get_doc, cluster_put_doc};
 pub(crate) use search::{cluster_mpercolate_route, cluster_search_route};

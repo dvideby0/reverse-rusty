@@ -2,7 +2,7 @@
 //! the API root, and the Prometheus exposition. These project engine introspection
 //! ([`reverse_rusty::events`] metrics + per-segment info) into the REST surface.
 
-mod cat_table;
+pub(crate) mod cat_table;
 mod compact;
 mod flush;
 mod segments;

@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::body::{Body, Bytes};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::routing::{any, get, post};
 use axum::Router;
 use parking_lot::{Mutex, RwLock};
@@ -120,7 +120,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 crate::handlers::STATS_BODY_LIMIT,
             )),
         )
-        .route("/_cat/shards", get(cluster_cat_shards))
+        .route(
+            "/_cat/shards",
+            any(cluster_cat_shards).layer(axum::extract::DefaultBodyLimit::max(
+                crate::handlers::CAT_SHARDS_BODY_LIMIT,
+            )),
+        )
         .route(
             "/_cat/segments",
             any(cluster_cat_segments).layer(axum::extract::DefaultBodyLimit::max(
@@ -169,17 +174,26 @@ fn req_empty(method: &str, path: &str) -> Request<Body> {
 }
 
 async fn send(state: &Arc<ClusterAppState>, r: Request<Body>) -> (StatusCode, serde_json::Value) {
-    let resp = router(state).oneshot(r).await.expect("router response");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let (status, _, bytes) = send_raw(state, r).await;
     let json = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
     (status, json)
+}
+
+async fn send_raw(
+    state: &Arc<ClusterAppState>,
+    r: Request<Body>,
+) -> (StatusCode, HeaderMap, Bytes) {
+    let resp = router(state).oneshot(r).await.expect("router response");
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (status, headers, bytes)
 }
 
 fn seed() -> Vec<(u64, String)> {
@@ -193,6 +207,7 @@ fn seed() -> Vec<(u64, String)> {
 mod admin;
 mod backup;
 mod bulk;
+mod cat_shards;
 mod crud;
 mod flush;
 mod jobs;

@@ -7,9 +7,11 @@
 //! the orphan-slot GC sweep in [`gc`] (ADR-096) — and are re-exported below, so
 //! callers keep resolving them as `admin::cluster_*`.
 
+mod cat_shards;
 mod gc;
 mod ops;
 
+pub(crate) use cat_shards::{cluster_cat_shards, CAT_SHARDS_BODY_LIMIT};
 pub(crate) use gc::cluster_gc;
 pub(crate) use ops::{
     cluster_deregister_node, cluster_handoff, cluster_reassign, cluster_rebalance,
@@ -205,70 +207,6 @@ pub(crate) async fn cluster_stats(
             )
         }
     }
-}
-
-/// GET /_cat/shards — per-shard text table (`?format=json` for the JSON shape).
-#[instrument(skip_all)]
-pub(crate) async fn cluster_cat_shards(
-    State(state): State<Arc<ClusterAppState>>,
-    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Response {
-    let cluster = state.cluster.read();
-    let counts = match cluster.shard_query_counts() {
-        Ok(c) => c,
-        Err(e) => return shard_error_response("shard counts unavailable", &e),
-    };
-    let assignments = cluster
-        .control_state()
-        .map(|s| s.assignments)
-        .unwrap_or_default();
-    let node_of = |pos: usize| -> String {
-        assignments
-            .iter()
-            .find(|a| a.position as usize == pos)
-            .map_or_else(
-                || "-".to_string(),
-                |a| {
-                    let mut s = a.primary.0.to_string();
-                    if !a.replicas.is_empty() {
-                        s.push('+');
-                        s.push_str(
-                            &a.replicas
-                                .iter()
-                                .map(|r| r.0.to_string())
-                                .collect::<Vec<_>>()
-                                .join("+"),
-                        );
-                    }
-                    s
-                },
-            )
-    };
-
-    if q.get("format").map(String::as_str) == Some("json") {
-        #[derive(Serialize)]
-        struct ShardRow {
-            shard: usize,
-            queries: usize,
-            nodes: String,
-        }
-        let rows: Vec<ShardRow> = counts
-            .iter()
-            .enumerate()
-            .map(|(i, &n)| ShardRow {
-                shard: i,
-                queries: n,
-                nodes: node_of(i),
-            })
-            .collect();
-        return Json(rows).into_response();
-    }
-
-    let mut out = String::from("shard queries nodes\n");
-    for (i, n) in counts.iter().enumerate() {
-        out.push_str(&format!("{i:>5} {n:>7} {}\n", node_of(i)));
-    }
-    (StatusCode::OK, out).into_response()
 }
 
 #[derive(Serialize)]
