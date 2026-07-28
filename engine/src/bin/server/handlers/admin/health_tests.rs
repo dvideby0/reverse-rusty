@@ -1,5 +1,6 @@
 use super::{health, HEALTH_BODY_LIMIT};
 
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +37,9 @@ fn test_state() -> Arc<AppState> {
         flush_serial: Mutex::new(()),
         backup_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
+        )),
+        health_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
         )),
         stats_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_STATS,
@@ -145,6 +149,35 @@ async fn head_is_a_bodyless_readiness_probe() {
         "application/json"
     );
     assert!(bytes.is_empty());
+}
+
+#[tokio::test]
+async fn admission_precedes_buffering_an_untrusted_request_body() {
+    let state = test_state();
+    let held = Arc::clone(&state.health_permits)
+        .acquire_many_owned(crate::state::MAX_CONCURRENT_HEALTH_REQUESTS as u32)
+        .await
+        .expect("all health permits");
+    let pending_body = Body::from_stream(tokio_stream::pending::<Result<Bytes, Infallible>>());
+
+    let (status, headers, bytes) = tokio::time::timeout(
+        Duration::from_millis(100),
+        send(
+            &state,
+            HEALTH_BODY_LIMIT,
+            Method::GET,
+            "/_health",
+            pending_body,
+        ),
+    )
+    .await
+    .expect("admission rejects before polling the pending body");
+    drop(held);
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(headers.get(header::RETRY_AFTER).expect("retry"), "1");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+    assert_eq!(body["error"]["type"], "rejected_execution_exception");
 }
 
 #[tokio::test(flavor = "current_thread")]

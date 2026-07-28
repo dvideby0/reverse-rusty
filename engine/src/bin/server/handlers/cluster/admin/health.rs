@@ -20,8 +20,8 @@ use tracing::{error, instrument, warn};
 use reverse_rusty::cluster::{ClusterEngine, ShardError};
 
 use crate::handlers::admin::{
-    finish_health_response, try_acquire_health_work, validate_health_method,
-    validate_health_request, wait_delay, HealthParams, HealthStatus, HEALTH_ENDPOINT,
+    finish_health_response, validate_health_method, validate_health_request, wait_delay,
+    HealthAdmission, HealthParams, HealthStatus, HEALTH_ENDPOINT,
 };
 use crate::state::ClusterAppState;
 
@@ -54,6 +54,7 @@ pub(crate) async fn cluster_health(
     State(state): State<Arc<ClusterAppState>>,
     method: Method,
     params: Result<Query<HealthParams>, QueryRejection>,
+    _admission: HealthAdmission,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let _duration = state
@@ -69,13 +70,7 @@ pub(crate) async fn cluster_health(
         Ok(request) => request,
         Err(response) => return *response,
     };
-    // Every coordinator observation can cross the network and queue behind the
-    // shared stats permit. Cap this open endpoint before either resource is
-    // consumed; the permit remains held across any requested status wait.
-    let _health_permit = match try_acquire_health_work(&state.prom, head) {
-        Ok(permit) => permit,
-        Err(response) => return *response,
-    };
+    let waits_for_status = request.waits_for_status();
     let deadline = match request.deadline() {
         Ok(deadline) => deadline,
         Err(reason) => {
@@ -93,19 +88,35 @@ pub(crate) async fn cluster_health(
     loop {
         if let Some(last) = last_observation.as_ref() {
             if Instant::now() >= deadline {
-                return finish_health_response(&state.prom, cluster_response(last, true), head);
+                return finish_health_response(
+                    &state.prom,
+                    cluster_response(last, true, waits_for_status),
+                    head,
+                );
             }
         }
         let current = collect_once(&state, deadline).await;
         if current.deadline_expired {
             let reported = timeout_observation(&current, last_observation.as_ref());
-            return finish_health_response(&state.prom, cluster_response(reported, true), head);
+            return finish_health_response(
+                &state.prom,
+                cluster_response(reported, true, waits_for_status),
+                head,
+            );
         }
         if request.satisfied_by(current.status) {
-            return finish_health_response(&state.prom, cluster_response(&current, false), head);
+            return finish_health_response(
+                &state.prom,
+                cluster_response(&current, false, waits_for_status),
+                head,
+            );
         }
         let Some(delay) = wait_delay(deadline) else {
-            return finish_health_response(&state.prom, cluster_response(&current, true), head);
+            return finish_health_response(
+                &state.prom,
+                cluster_response(&current, true, waits_for_status),
+                head,
+            );
         };
         last_observation = Some(current);
         tokio::time::sleep(delay).await;
@@ -241,7 +252,7 @@ fn unavailable_fallback(
     }
 }
 
-fn cluster_response(current: &ClusterHealth, timed_out: bool) -> Response {
+fn cluster_response(current: &ClusterHealth, timed_out: bool, waits_for_status: bool) -> Response {
     let status = if timed_out {
         StatusCode::REQUEST_TIMEOUT
     } else if current.status == HealthStatus::Red {
@@ -257,9 +268,15 @@ fn cluster_response(current: &ClusterHealth, timed_out: bool) -> Response {
             timed_out,
             shards: current.shards,
             pending_repairs: current.pending_repairs,
-            reason: timed_out
-                .then_some("requested health status was not reached before timeout")
-                .or(current.reason),
+            reason: if timed_out {
+                Some(if waits_for_status {
+                    "requested health status was not reached before timeout"
+                } else {
+                    "health dependency probe did not complete before timeout"
+                })
+            } else {
+                current.reason
+            },
         }),
     )
         .into_response()

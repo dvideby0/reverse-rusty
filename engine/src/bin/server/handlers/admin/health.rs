@@ -5,6 +5,7 @@
 //! native path and payload, while adopting the familiar `wait_for_status` and
 //! `timeout` controls whose behavior maps exactly.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,26 +13,24 @@ use axum::{
     body::{Body, Bytes},
     extract::{
         rejection::{BytesRejection, QueryRejection},
-        Query, State,
+        FromRequestParts, Query, State,
     },
-    http::{header, HeaderValue, Method, StatusCode},
+    http::{header, request::Parts, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::dto::ApiError;
 use crate::handlers::search::parse_named_time_value;
 use crate::metrics::PrometheusMetrics;
-use crate::state::AppState;
+use crate::state::{AppState, RequestCtx};
 
 pub(crate) const HEALTH_ENDPOINT: &str = "health";
 pub(crate) const HEALTH_BODY_LIMIT: usize = 64 * 1024;
 pub(crate) const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const MAX_CONCURRENT_HEALTH_WORK: usize = 8;
 const DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
-static HEALTH_WORK_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_HEALTH_WORK);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum HealthStatus {
@@ -106,6 +105,10 @@ impl HealthRequest {
             .is_none_or(|requested| status >= requested)
     }
 
+    pub(crate) const fn waits_for_status(&self) -> bool {
+        self.wait_for_status.is_some()
+    }
+
     pub(crate) fn deadline(&self) -> Result<Instant, String> {
         Instant::now()
             .checked_add(self.timeout)
@@ -146,6 +149,34 @@ struct HealthResponse {
     stale_segments: usize,
 }
 
+/// Admission extracted before Axum buffers the request body.
+///
+/// `/_health` intentionally bypasses read authentication, so its independent
+/// cap must be held before the final `Bytes` extractor can wait on a slow body.
+/// The permit remains in the handler future until the response is complete.
+pub(crate) struct HealthAdmission {
+    _permit: OwnedSemaphorePermit,
+}
+
+impl<S> FromRequestParts<Arc<S>> for HealthAdmission
+where
+    S: RequestCtx,
+{
+    type Rejection = Response;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<S>,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        let head = parts.method == Method::HEAD;
+        std::future::ready(
+            try_acquire_health_work(state.health_permits(), state.prom(), head)
+                .map(|permit| Self { _permit: permit })
+                .map_err(|response| *response),
+        )
+    }
+}
+
 /// Native readiness and durability health.
 ///
 /// Snapshot reads are lock-free, so a waiting request polls without consuming a
@@ -155,6 +186,7 @@ pub(crate) async fn health(
     State(state): State<Arc<AppState>>,
     method: Method,
     params: Result<Query<HealthParams>, QueryRejection>,
+    _admission: HealthAdmission,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let _duration = state
@@ -184,7 +216,6 @@ pub(crate) async fn health(
     };
 
     let mut waited = false;
-    let mut wait_permit = None;
     loop {
         let current = {
             let snapshot = state.snapshot.load();
@@ -205,12 +236,6 @@ pub(crate) async fn health(
         let Some(delay) = wait_delay(deadline) else {
             return finish_health_response(&state.prom, standalone_response(current, true), head);
         };
-        if wait_permit.is_none() {
-            wait_permit = match try_acquire_health_work(&state.prom, head) {
-                Ok(permit) => Some(permit),
-                Err(response) => return *response,
-            };
-        }
         tokio::time::sleep(delay).await;
         waited = true;
     }
@@ -296,19 +321,20 @@ pub(crate) fn wait_delay(deadline: Instant) -> Option<Duration> {
         .map(|remaining| remaining.min(HEALTH_POLL_INTERVAL))
 }
 
-pub(crate) fn try_acquire_health_work(
+fn try_acquire_health_work(
+    permits: &Arc<Semaphore>,
     prom: &PrometheusMetrics,
     head: bool,
-) -> Result<SemaphorePermit<'static>, Box<Response>> {
-    try_acquire_health_work_from(&HEALTH_WORK_PERMITS, prom, head)
+) -> Result<OwnedSemaphorePermit, Box<Response>> {
+    try_acquire_health_work_from(permits, prom, head)
 }
 
-fn try_acquire_health_work_from<'a>(
-    permits: &'a Semaphore,
+fn try_acquire_health_work_from(
+    permits: &Arc<Semaphore>,
     prom: &PrometheusMetrics,
     head: bool,
-) -> Result<SemaphorePermit<'a>, Box<Response>> {
-    permits.try_acquire().map_err(|_| {
+) -> Result<OwnedSemaphorePermit, Box<Response>> {
+    Arc::clone(permits).try_acquire_owned().map_err(|_| {
         let mut response = health_rejection(
             prom,
             StatusCode::TOO_MANY_REQUESTS,
@@ -431,7 +457,7 @@ mod tests {
     #[test]
     fn unauthenticated_health_work_admission_is_independently_bounded() {
         let prom = PrometheusMetrics::new();
-        let admission = Semaphore::new(2);
+        let admission = Arc::new(Semaphore::new(2));
         let permits = (0..2)
             .map(|_| {
                 try_acquire_health_work_from(&admission, &prom, false).expect("bounded permit")

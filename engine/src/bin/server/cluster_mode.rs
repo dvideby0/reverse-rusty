@@ -340,6 +340,9 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         backup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
         )),
+        health_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
+        )),
         stats_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_STATS,
         )),

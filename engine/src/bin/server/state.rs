@@ -32,6 +32,9 @@ pub(crate) const DEFAULT_MAX_RANKED_ENRICHMENT_BYTES: usize = 16 * 1024 * 1024;
 /// Backups serialize behind the engine/cluster writer lock, so admitting more
 /// than one blocking worker would only create a detached blocking-pool queue.
 pub(crate) const MAX_CONCURRENT_BACKUPS: usize = 1;
+/// The health route stays open even when read auth is enabled. Bound all of
+/// its requests independently before their bodies are buffered.
+pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
 /// A stats snapshot scans class columns and collects/sorts posting lengths, so
 /// only one such corpus-wide blocking job is admitted per server.
 pub(crate) const MAX_CONCURRENT_STATS: usize = 1;
@@ -46,6 +49,8 @@ pub(crate) struct AppState {
     /// closure so a disconnected request cannot release admission while its
     /// backup is still waiting on or holding the engine writer lock.
     pub(crate) backup_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Per-server admission for the intentionally unauthenticated health route.
+    pub(crate) health_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Bounds the corpus-wide `GET /_stats` scan independently from search and
     /// backup work. The permit is owned by the blocking worker.
     pub(crate) stats_permits: std::sync::Arc<tokio::sync::Semaphore>,
@@ -119,6 +124,8 @@ pub(crate) struct ClusterAppState {
     pub(crate) flush_serial: Mutex<()>,
     /// Coordinator analogue of [`AppState::backup_permits`].
     pub(crate) backup_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Coordinator analogue of [`AppState::health_permits`].
+    pub(crate) health_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Coordinator analogue of [`AppState::stats_permits`].
     pub(crate) stats_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) pool: rayon::ThreadPool,
@@ -150,6 +157,7 @@ pub(crate) struct ClusterAppState {
 pub(crate) trait RequestCtx: Send + Sync + 'static {
     fn prom(&self) -> &PrometheusMetrics;
     fn auth(&self) -> Option<&AuthConfig>;
+    fn health_permits(&self) -> &std::sync::Arc<tokio::sync::Semaphore>;
 }
 
 impl RequestCtx for AppState {
@@ -159,6 +167,9 @@ impl RequestCtx for AppState {
     fn auth(&self) -> Option<&AuthConfig> {
         self.auth.as_ref()
     }
+    fn health_permits(&self) -> &std::sync::Arc<tokio::sync::Semaphore> {
+        &self.health_permits
+    }
 }
 
 impl RequestCtx for ClusterAppState {
@@ -167,6 +178,9 @@ impl RequestCtx for ClusterAppState {
     }
     fn auth(&self) -> Option<&AuthConfig> {
         self.auth.as_ref()
+    }
+    fn health_permits(&self) -> &std::sync::Arc<tokio::sync::Semaphore> {
+        &self.health_permits
     }
 }
 

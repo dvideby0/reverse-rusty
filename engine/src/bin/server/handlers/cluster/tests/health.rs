@@ -93,6 +93,10 @@ async fn wait_timeout_bounds_stats_admission() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON health");
     assert_eq!(body["status"], "red");
     assert_eq!(body["timed_out"], true);
+    assert_eq!(
+        body["reason"],
+        "requested health status was not reached before timeout"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -109,6 +113,10 @@ async fn timeout_without_a_status_wait_still_reports_probe_expiry() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON health");
     assert_eq!(body["status"], "red");
     assert_eq!(body["timed_out"], true);
+    assert_eq!(
+        body["reason"],
+        "health dependency probe did not complete before timeout"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
