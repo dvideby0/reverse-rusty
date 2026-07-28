@@ -58,7 +58,7 @@ directional replacement, or deferred activation.
   between `set_vocab` and `recompile_stale_segments`, the identical import completes that pending
   rebuild instead of reporting a no-op. A coordinator retry likewise attests or repairs its
   feature-model control transition before acknowledgement, while an unreadable or incompatible
-  manifest fails loud and is never overwritten.
+  manifest, or one with a divergent/newer commit identity, fails loud and is never overwritten.
 - Wait asynchronously for the shared one-slot administrative permit, then move the permit, engine
   or coordinator lock wait, parsing apply, rebuild, and standalone publication onto a blocking
   worker. A disconnected request cannot release admission while mutation work continues.

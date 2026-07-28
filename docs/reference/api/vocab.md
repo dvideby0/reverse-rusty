@@ -419,11 +419,11 @@ identical retry returns `result: "noop"`, `activated: 0`, and `recompiled: 0`; i
 republish an identical snapshot, or checkpoint an already committed coordinator generation. If the
 previous durable coordinator attempt rebuilt live state but failed before committing its manifest,
 the identical retry attests or repairs the feature-model control transition and finishes that
-checkpoint before acknowledging the no-op. An unreadable or incompatible manifest fails loud and is
-not overwritten. For embedded callers, an identical import encountered between the public
-`set_vocab` and `recompile_stale_segments` steps completes the pending rebuild and reports
-`result: "updated"` with its nonzero `recompiled` count. Standalone and coordinator modes return this
-same shape and always use `recompiled` (never a coordinator-only `rebuilt` alias).
+checkpoint before acknowledging the no-op. An unreadable, incompatible, divergent, or newer
+manifest fails loud and is not overwritten. For embedded callers, an identical import encountered
+between the public `set_vocab` and `recompile_stale_segments` steps completes the pending rebuild and
+reports `result: "updated"` with its nonzero `recompiled` count. Standalone and coordinator modes
+return this same shape and always use `recompiled` (never a coordinator-only `rebuilt` alias).
 
 The request is strict JSON (`application/json` or `application/*+json`), capped at 16 MiB and five
 seconds. At most 10,000 rules and 256 forms per rule are accepted. Unknown or duplicate query

@@ -9,7 +9,7 @@ fn identical_alias_retry_recommits_an_uncommitted_rebuild() {
     let manifest_path = dir.join("cluster_manifest.bin");
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
         .expect("durable cluster");
-    let old_manifest = read_cluster_manifest(&manifest_path).expect("baseline manifest");
+    let mut old_manifest = read_cluster_manifest(&manifest_path).expect("baseline manifest");
 
     let applied = cluster
         .import_alias_synonyms("package, pkg")
@@ -17,9 +17,10 @@ fn identical_alias_retry_recommits_an_uncommitted_rebuild() {
     assert!(applied.applied);
     assert!(cluster.percolate("pkg adapter").unwrap().contains(&1));
 
-    // Restore the pre-import commit point while retaining the coherent live
-    // rebuild, exactly the state left when set_vocab's checkpoint fails before
-    // publishing its manifest.
+    // Restore a pre-import commit point while retaining the coherent live
+    // rebuild. Keep the in-memory epoch to model a checkpoint that failed
+    // before publishing its manifest.
+    old_manifest.epoch = cluster.epoch();
     reverse_rusty::storage::write_cluster_manifest(&old_manifest, &manifest_path)
         .expect("restore old manifest");
 
@@ -103,6 +104,74 @@ fn identical_alias_retry_does_not_overwrite_incompatible_persisted_vocab() {
         std::fs::read(&manifest_path).expect("manifest after retry"),
         incompatible_bytes,
         "a no-op retry must not overwrite a semantically incompatible commit point"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn identical_alias_retry_does_not_overwrite_a_newer_manifest() {
+    let dir = unique_dir("alias_retry_newer_manifest");
+    let cfg = durable_cfg(3, dir.clone(), false);
+    let manifest_path = dir.join("cluster_manifest.bin");
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("durable cluster");
+    cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("initial alias import");
+
+    let mut newer = read_cluster_manifest(&manifest_path).expect("committed manifest");
+    newer.epoch += 1;
+    newer.placement_generation = newer
+        .placement_generation
+        .next()
+        .expect("newer placement generation");
+    reverse_rusty::storage::write_cluster_manifest(&newer, &manifest_path)
+        .expect("write newer manifest");
+    let newer_bytes = std::fs::read(&manifest_path).expect("newer manifest bytes");
+
+    let error = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect_err("retry must fail loud on a newer manifest");
+    assert!(
+        matches!(error, ShardError::Log(_)),
+        "unexpected retry error: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("manifest after retry"),
+        newer_bytes,
+        "a no-op retry must never roll back a newer commit point"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn identical_alias_retry_rejects_same_generation_topology_drift() {
+    let dir = unique_dir("alias_retry_topology_drift");
+    let cfg = durable_cfg(3, dir.clone(), false);
+    let manifest_path = dir.join("cluster_manifest.bin");
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("durable cluster");
+    cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("initial alias import");
+
+    let mut divergent = read_cluster_manifest(&manifest_path).expect("committed manifest");
+    divergent.vnodes += 1;
+    reverse_rusty::storage::write_cluster_manifest(&divergent, &manifest_path)
+        .expect("write divergent manifest");
+    let divergent_bytes = std::fs::read(&manifest_path).expect("divergent manifest bytes");
+
+    let error = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect_err("retry must fail loud on same-generation topology drift");
+    assert!(
+        matches!(error, ShardError::Log(_)),
+        "unexpected retry error: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("manifest after retry"),
+        divergent_bytes,
+        "a no-op retry must not acknowledge a divergent topology"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
