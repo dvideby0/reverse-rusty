@@ -7,6 +7,65 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vocabulary_learning_uses_the_strict_caller_corpus_contract_in_cluster_mode() {
+    let state = test_state(&seed());
+    let request = serde_json::json!({
+        "queries": [
+            [10, "(package,pkg) 2024"],
+            [20, "(package,pkg) 2023"]
+        ],
+        "min_count": 2
+    });
+    let (status, headers, bytes) = send_raw(&state, req("POST", "/_vocab/learn", &request)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).expect("content type"),
+        "application/json"
+    );
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("learned vocab");
+    assert_eq!(body["synonyms"].as_array().expect("synonyms").len(), 1);
+    assert_eq!(body["synonyms"][0]["token"], "pkg");
+    assert!(
+        body["synonyms"]
+            .as_array()
+            .expect("synonyms")
+            .iter()
+            .all(|entry| entry["token"] != "uniquor"),
+        "the dry run must not substitute the cluster's stored corpus"
+    );
+
+    let (status, headers, bytes) =
+        send_raw(&state, req("POST", "/_vocab/learn", &serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+    assert_eq!(body["error"]["type"], "validation_error", "{body}");
+    assert_eq!(
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["vocab_learn", "200"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["vocab_learn", "400"])
+            .get(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vocabulary_read_is_complete_uncacheable_and_bodyless_for_head() {
     let state = test_state(&seed());
     let vocab = serde_json::json!({

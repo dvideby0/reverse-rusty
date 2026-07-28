@@ -17,8 +17,13 @@ use reverse_rusty::config::EngineConfig;
 use crate::dto::ApiError;
 use crate::state::AppState;
 
+mod learn;
 mod read;
 mod write;
+pub(crate) use learn::{
+    execute_vocab_learn, learn_vocab, vocab_learn_method_not_allowed, VocabLearnTransport,
+    VOCAB_LEARN_BODY_LIMIT,
+};
 pub(crate) use read::{
     acquire_vocab_read_permit, finish_vocab_worker, get_vocab, serialize_vocab,
     vocab_method_not_allowed, VocabReadTransport, VOCAB_READ_BODY_LIMIT,
@@ -29,26 +34,9 @@ pub(crate) use write::{
 };
 
 #[cfg(test)]
+mod learn_tests;
+#[cfg(test)]
 mod write_tests;
-
-#[derive(Deserialize)]
-pub(crate) struct LearnRequest {
-    queries: Vec<(u64, String)>,
-    #[serde(default = "default_min_count")]
-    min_count: usize,
-    /// Opt-in NPMI corpus phrase induction (ADR-053); off by default.
-    #[serde(default)]
-    corpus_phrases: bool,
-    #[serde(default)]
-    npmi_tau: Option<f64>,
-    #[serde(default)]
-    npmi_min_count: Option<usize>,
-    #[serde(default)]
-    npmi_iterations: Option<usize>,
-    /// Opt-in: learn any-of groups as equivalences applied via expansion (ADR-054).
-    #[serde(default)]
-    learn_equivalences: bool,
-}
 
 pub(crate) fn default_min_count() -> usize {
     2
@@ -74,23 +62,6 @@ pub(crate) fn build_corpus_config(
         npmi_iterations: npmi_iterations.unwrap_or(d.npmi_iterations),
         learn_equivalences,
     }
-}
-
-/// POST /_vocab/learn — learn synonyms (ADR-015 any-of) and, with
-/// `corpus_phrases=true`, NPMI-induced entity phrases (ADR-053) from raw query
-/// text. Returns the learned vocabulary without applying it. The caller can
-/// review, edit, and then PUT /_vocab to apply.
-pub(crate) async fn learn_vocab(Json(req): Json<LearnRequest>) -> impl IntoResponse {
-    let cfg = build_corpus_config(
-        req.min_count,
-        req.corpus_phrases,
-        req.npmi_tau,
-        req.npmi_min_count,
-        req.npmi_iterations,
-        req.learn_equivalences,
-    );
-    let vocab = reverse_rusty::vocab::learn_vocab_from_corpus(&req.queries, &cfg);
-    Json(vocab)
 }
 
 #[derive(Deserialize, Default)]

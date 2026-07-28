@@ -158,7 +158,14 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 ))
                 .fallback(crate::handlers::vocab_method_not_allowed::<ClusterAppState>),
         )
-        .route("/_vocab/learn", post(cluster_learn_vocab))
+        .route(
+            "/_vocab/learn",
+            post(cluster_learn_vocab)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::handlers::VOCAB_LEARN_BODY_LIMIT,
+                ))
+                .fallback(crate::handlers::vocab_learn_method_not_allowed::<ClusterAppState>),
+        )
         .route(
             "/_vocab/learn_and_apply",
             post(cluster_learn_and_apply_vocab),

@@ -156,6 +156,12 @@ Semantics can be supplied through:
 - opt-in NPMI phrase induction; and
 - review-first distributional alias discovery.
 
+The review-first REST learner requires one explicit caller corpus in both local modes. It rejects
+duplicate IDs and invalid DSL before counting cross-query evidence, bounds corpus cardinality,
+relationship expansion, phrase tokens and growth passes, body/result size, and body time, and runs
+validation, learning, and serialization on the shared administrative blocking slot. It does not
+inspect stored queries or apply its result.
+
 The REST and cluster replacement paths perform the O(corpus) rebuild on bounded blocking work and
 recompile stored queries before publishing the new normalizer. A successful durable response means
 the rebuilt query state committed; a coherent live rebuild whose storage commit fails is published

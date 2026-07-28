@@ -9,7 +9,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
-## 2026-07-26 to 2026-07-27 — Documentation, module boundaries, and API parity
+## 2026-07-26 to 2026-07-28 — Documentation, module boundaries, and API parity
 
 - Replaced the monolithic ADR index with an area hub, nine compact catalogs, and one canonical
   page per ADR.
@@ -110,6 +110,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   standalone/coordinator response parity, shared off-runtime rebuild admission, complete
   post-recompile verification, and fail-loud durable acknowledgement
   ([ADR-147](decisions/adr-147-put-vocab-api-contract.md)).
+- Hardened native `POST /_vocab/learn` with one strict caller-corpus contract in standalone and
+  coordinator modes, distinct-query evidence counting, bounded DSL/config/input validation, shared
+  blocking-work admission, round-trippable no-store output, and explicit separation from
+  ES/OpenSearch synonym management
+  ([ADR-148](decisions/adr-148-vocab-learn-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

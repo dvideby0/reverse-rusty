@@ -24,6 +24,32 @@ fn learn_ignores_below_threshold() {
 }
 
 #[test]
+fn learn_counts_each_relationship_once_per_query() {
+    let repeated_in_one = vec![(1, "(package,pkg) (package,pkg) (package,pkg)".to_string())];
+    assert!(
+        learn_from_queries(&repeated_in_one, 2).is_empty(),
+        "repeated clauses in one query are only one evidence observation"
+    );
+    assert!(
+        learn_equivalences_from_queries(&repeated_in_one, 2).is_empty(),
+        "equivalence evidence is also deduplicated per query"
+    );
+
+    let two_queries = vec![
+        (1, "(package,pkg) (package,pkg)".to_string()),
+        (2, "(package,pkg)".to_string()),
+    ];
+    assert!(
+        !learn_from_queries(&two_queries, 2).is_empty(),
+        "the same relationship in two distinct queries meets the threshold"
+    );
+    assert!(
+        !learn_equivalences_from_queries(&two_queries, 2).is_empty(),
+        "two distinct queries also meet the equivalence threshold"
+    );
+}
+
+#[test]
 fn equivalence_only_vocab_is_not_empty() {
     // An expansion-mode vocab carrying only equivalence groups (no synonyms/
     // phrases) must NOT report empty: those groups are
