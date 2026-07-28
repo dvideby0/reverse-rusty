@@ -262,3 +262,38 @@ fn identical_alias_retry_rejects_same_generation_topology_drift() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn identical_alias_retry_rejects_same_generation_recovery_identity_drift() {
+    let dir = unique_dir("alias_retry_recovery_identity_drift");
+    let cfg = durable_cfg(3, dir.clone(), false);
+    let manifest_path = dir.join("cluster_manifest.bin");
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("durable cluster");
+    cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("initial alias import");
+
+    let mut divergent = read_cluster_manifest(&manifest_path).expect("committed manifest");
+    divergent.snapshot_pos = divergent.snapshot_pos.saturating_add(1);
+    divergent.segment_registry[0].clear();
+    let divergent_source = format!("divergent-{}", divergent.source_files[0]);
+    divergent.source_files[0] = divergent_source;
+    reverse_rusty::storage::write_cluster_manifest(&divergent, &manifest_path)
+        .expect("write recovery-divergent manifest");
+    let divergent_bytes = std::fs::read(&manifest_path).expect("divergent manifest bytes");
+
+    let error = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect_err("retry must attest the full committed recovery identity");
+    assert!(
+        matches!(error, ShardError::Log(_)),
+        "unexpected retry error: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("manifest after retry"),
+        divergent_bytes,
+        "a no-op retry must not acknowledge or overwrite recovery-state drift"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

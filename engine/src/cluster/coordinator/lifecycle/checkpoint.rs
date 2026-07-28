@@ -82,8 +82,23 @@ impl ClusterEngine {
             // the same `TagId`s on the next reopen. Empty + finalized for an untagged cluster.
             tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),
         };
+        // An alias import retains the exact manifest it is attempting before
+        // publication. `write_cluster_manifest` can report an error after the
+        // rename succeeds but the parent-directory sync fails; the next
+        // identical request may acknowledge that document only when every
+        // recovery-defining field matches this retained identity.
+        if self.pending_alias_import_predecessor.is_some() {
+            *self
+                .pending_alias_import_manifest
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(manifest.clone());
+        }
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
+        *self
+            .committed_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(manifest.clone());
 
         // 4. Committed. Truncate the captured log prefix + GC orphaned segment files (both
         //    best-effort: a crash here just replays an already-captured tail / leaves

@@ -260,9 +260,14 @@ impl ClusterEngine {
                     .unwrap_or_default(),
             });
         }
-        self.pending_alias_import_predecessor = self.capture_alias_import_predecessor()?;
+        let predecessor = self.capture_alias_import_predecessor()?;
+        self.pending_alias_import_predecessor = predecessor;
+        *self
+            .pending_alias_import_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let rebuilt = self.set_vocab(vocab)?;
-        self.pending_alias_import_predecessor = None;
+        self.clear_pending_alias_import_identity();
         Ok(crate::segment::AliasApplyReport {
             applied: true,
             activated,
@@ -349,8 +354,16 @@ impl ClusterEngine {
             }
             AliasImportManifestState::ImmediatePredecessor => self.checkpoint()?,
         }
-        self.pending_alias_import_predecessor = None;
+        self.clear_pending_alias_import_identity();
         Ok(())
+    }
+
+    fn clear_pending_alias_import_identity(&mut self) {
+        self.pending_alias_import_predecessor = None;
+        *self
+            .pending_alias_import_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Capture and attest the exact durable state an alias import is allowed to
@@ -369,8 +382,15 @@ impl ClusterEngine {
                 ))
             })?;
         self.attest_alias_import_manifest_common(&manifest)?;
+        let committed_matches = self
+            .committed_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            == Some(&manifest);
         let vocab_data = self.alias_import_vocab_data()?;
-        if manifest.epoch != self.epoch()
+        if !committed_matches
+            || manifest.epoch != self.epoch()
             || manifest.placement_generation != self.placement_generation()
             || manifest.dict_fingerprint != self.dict.fingerprint()
             || manifest.dict_data != crate::storage::serialize_dict(&self.dict)
@@ -394,7 +414,6 @@ impl ClusterEngine {
         let Some(dir) = &self.data_dir else {
             return Ok(AliasImportManifestState::Committed);
         };
-        let vocab_data = self.alias_import_vocab_data()?;
         let manifest = crate::storage::read_cluster_manifest(&dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|error| {
                 ShardError::Log(format!(
@@ -402,30 +421,34 @@ impl ClusterEngine {
                 ))
             })?;
         self.attest_alias_import_manifest_common(&manifest)?;
+        let committed_manifest = self
+            .committed_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let pending_manifest = self
+            .pending_alias_import_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
 
         if manifest.placement_generation == generation {
-            let current_dict_data = crate::storage::serialize_dict(&self.dict);
-            if manifest.dict_fingerprint != self.dict.fingerprint()
-                || manifest.dict_data != current_dict_data
-                || manifest.vocab_data != vocab_data
-            {
-                return Err(ShardError::Log(
-                    "current-generation cluster manifest diverged before alias-import retry".into(),
-                ));
-            }
-            if manifest.epoch == self.epoch() {
-                return Ok(AliasImportManifestState::Committed);
-            }
             if self.pending_alias_import_predecessor.is_some()
                 && self
                     .epoch()
                     .checked_add(1)
                     .is_some_and(|next| manifest.epoch == next)
+                && (pending_manifest.as_ref() == Some(&manifest)
+                    || committed_manifest.as_ref() == Some(&manifest))
             {
                 return Ok(AliasImportManifestState::PublishedCurrent(manifest.epoch));
             }
+            if manifest.epoch == self.epoch() && committed_manifest.as_ref() == Some(&manifest) {
+                return Ok(AliasImportManifestState::Committed);
+            }
             return Err(ShardError::Log(format!(
-                "current alias-import manifest epoch {} diverges from live epoch {}",
+                "current alias-import manifest epoch {} or recovery identity diverges from live \
+                 epoch {}",
                 manifest.epoch,
                 self.epoch()
             )));
@@ -439,6 +462,7 @@ impl ClusterEngine {
         if manifest.placement_generation.0 != prior_generation
             || manifest.epoch != self.epoch()
             || self.pending_alias_import_predecessor.as_ref() != Some(&manifest)
+            || committed_manifest.as_ref() != Some(&manifest)
         {
             return Err(ShardError::Log(format!(
                 "cluster manifest placement generation {} is not the alias-import predecessor {}",

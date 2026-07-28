@@ -173,7 +173,8 @@ explicitly not acknowledged. Retrying the identical coordinator import in that s
 live vocabulary generation and repairs any pending feature-model control transition before it
 returns a no-op acknowledgement. The retry may replace only the exact pre-import manifest retained
 by that attempt; if the new manifest was renamed before directory sync failed, it re-attests and
-syncs that exact next-epoch commit. Every other unreadable, divergent, or newer manifest remains a
+syncs that exact next-epoch commit, including its segment registry, next segment IDs, source
+sidecars, and log replay cursor. Every other unreadable, divergent, or newer manifest remains a
 fail-loud incompatibility.
 Embedded imports also complete any stale-plan rebuild left between the public split apply steps.
 Alias-registry review shares that administrative slot for potentially large JSON snapshots. A

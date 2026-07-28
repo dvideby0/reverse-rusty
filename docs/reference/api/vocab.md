@@ -421,12 +421,13 @@ previous durable coordinator attempt rebuilt live state but failed before commit
 the identical retry attests or repairs the feature-model control transition and finishes that
 checkpoint before acknowledging the no-op. It can replace only the exact pre-import manifest
 retained by that live attempt. If the current manifest was renamed but its directory sync failed,
-the retry re-attests and syncs that exact next-epoch commit. An unreadable, incompatible, divergent,
-or otherwise newer manifest fails loud and is not overwritten. For embedded callers, an identical
+the retry re-attests and syncs that exact next-epoch commit, including its segment registry, next
+segment IDs, source sidecars, and log replay cursor. An unreadable, incompatible, divergent, or
+otherwise newer manifest fails loud and is not overwritten. For embedded callers, an identical
 import encountered between the public `set_vocab` and `recompile_stale_segments` steps completes
-the pending rebuild and reports `result: "updated"` with its nonzero `recompiled` count. Standalone
-and coordinator modes return this same shape and always use `recompiled` (never a coordinator-only
-`rebuilt` alias).
+the pending rebuild and reports `result: "updated"` with its nonzero `recompiled` count.
+Standalone and coordinator modes return this same shape and always use `recompiled` (never a
+coordinator-only `rebuilt` alias).
 
 The request is strict JSON (`application/json` or `application/*+json`), capped at 16 MiB and five
 seconds. At most 10,000 rules and 256 forms per rule are accepted. Unknown or duplicate query

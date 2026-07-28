@@ -59,9 +59,10 @@ directional replacement, or deferred activation.
   rebuild instead of reporting a no-op. A coordinator retry likewise attests or repairs its
   feature-model control transition before acknowledgement. It may checkpoint over only the exact
   pre-import manifest retained by that attempt; a fully published next-epoch manifest is re-synced
-  and adopted if the earlier directory sync reported failure. An unreadable or incompatible
-  manifest, or one with any other divergent/newer commit identity, fails loud and is never
-  overwritten.
+  and adopted if the earlier directory sync reported failure and its complete recovery identity
+  matches the attempted commit, including the segment registry, next segment IDs, source sidecars,
+  and log replay cursor. An unreadable or incompatible manifest, or one with any other
+  divergent/newer commit identity, fails loud and is never overwritten.
 - Wait asynchronously for the shared one-slot administrative permit, then move the permit, engine
   or coordinator lock wait, parsing apply, rebuild, and standalone publication onto a blocking
   worker. A disconnected request cannot release admission while mutation work continues.
