@@ -7,7 +7,7 @@
 //!
 //! Pipeline:
 //!   clean bytes -> daachorse leftmost-longest multiword alias scan
-//!              -> tokenize non-matched spans -> grader/grade/year patterns
+//!              -> tokenize non-matched spans -> number/year patterns
 //!              -> synonyms -> generic.
 //!
 //! The multiword phase uses a daachorse double-array Aho-Corasick automaton in
@@ -255,15 +255,8 @@ pub struct NormScratch {
     phrase_emitted: Vec<bool>,
     /// Per-token "consumed by a phrase" flags, sized to `tokens.len()`.
     token_consumed: Vec<bool>,
-    /// Feature-name builder (`"term:"`/`"grade:"`/… + value) handed to the helper emitters.
+    /// Feature-name builder (`"term:"`/`"year:"` + value) handed to the helper emitters.
     scratch: String,
-    /// Positive-view (`P(T)`, ADR-061 `force_additive`) active graders. Empty on the
-    /// query/compile and single-view title paths (no allocation churn there).
-    active_graders: Vec<(String, u8, u32)>,
-    /// A positioned positive analysis had more live starts for one canonical
-    /// grader than the bounded graph representation retains. Flat `P(T)` stays
-    /// complete; quoted exact verification fails open for this title.
-    position_graph_incomplete: bool,
     /// Reused difference array for linear positioned-graph coverage. Entry `i`
     /// records how many emitted arcs begin/end at token position `i`; a prefix
     /// sum identifies analyzer holes without rescanning every arc per token.

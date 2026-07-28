@@ -1,8 +1,8 @@
 //! [`NormalizerBuilder`] — the off-hot-path construction surface for a
 //! [`Normalizer`](super::Normalizer).
 //!
-//! Assembles the four vocabulary categories (phrases / synonyms / graders / grade
-//! words) plus the byte-cleaning punctuation table (ADR-058) and the number-context
+//! Assembles phrases and synonyms plus the byte-cleaning punctuation table (ADR-058)
+//! and the number-context
 //! word list (ADR-069), then `build()`s the daachorse automaton and hands the
 //! populated fields to the `Normalizer`.
 
@@ -12,15 +12,12 @@ use daachorse::{DoubleArrayAhoCorasickBuilder, MatchKind};
 
 /// Builder for assembling a [`Normalizer`](super::Normalizer) from custom vocabulary.
 ///
-/// A normalizer needs four categories of vocabulary:
+/// A normalizer accepts two categories of vocabulary:
 ///
 /// - **Phrases** — multiword token sequences mapped to canonical features via an
-///   Aho-Corasick automaton (e.g. `["michael", "jordan"] → "player:michael_jordan"`).
+///   Aho-Corasick automaton (e.g. `["wireless", "mouse"] → "entity:wireless_mouse"`).
 /// - **Synonyms** — single-token aliases mapped to canonical features (e.g.
-///   `"topps" → "brand:topps"`).
-/// - **Graders** — tokens that trigger the grader/grade detection pipeline (e.g.
-///   `"psa"`, `"bgs"`). When a grader token is seen, adjacent numbers become grades.
-/// - **Grade words** — tokens that trigger grade-context mode (e.g. `"gem"`, `"mint"`).
+///   `"acme" → "brand:acme"`).
 ///
 /// # Example
 ///
@@ -29,10 +26,8 @@ use daachorse::{DoubleArrayAhoCorasickBuilder, MatchKind};
 /// use reverse_rusty::dict::FeatureKind;
 ///
 /// let norm = NormalizerBuilder::new()
-///     .phrase(&["michael", "jordan"], "player:michael_jordan", FeatureKind::Player)
-///     .synonym("topps", "brand:topps", FeatureKind::Brand)
-///     .grader("psa")
-///     .grade_word("gem")
+///     .phrase(&["wireless", "mouse"], "entity:wireless_mouse", FeatureKind::Entity)
+///     .synonym("acme", "brand:acme", FeatureKind::Brand)
 ///     .build()
 ///     .expect("automaton build");
 /// ```
@@ -42,17 +37,15 @@ pub struct NormalizerBuilder {
     phrase_entries: Vec<PhraseEntry>,
     synonyms: Vec<(String, String, FeatureKind)>,
     syn_index: std::collections::HashMap<String, usize>,
-    graders: Vec<String>,
-    grade_words: Vec<String>,
     /// Byte-cleaning punctuation classification (ADR-058). Defaults to the historical
     /// behavior, so a builder that never touches it yields a byte-identical normalizer.
     punct: PunctTable,
     /// Raw multi-word alias forms (ADR-061), cleaned + registered as alias-mode phrases at
     /// [`build`](Self::build) (after the punctuation table is final, so cleaning matches titles).
     alias_forms: Vec<String>,
-    /// Number-context words (ADR-069). `None` (the default) resolves to `["pop"]` at
-    /// [`build`](Self::build) — the historical hard-coded rule, byte-identical.
-    number_context: Option<Vec<String>>,
+    /// Number-context words. Empty by default; callers may declare tokens whose
+    /// following number must remain generic instead of being typed as a year.
+    number_context: Vec<String>,
 }
 
 impl NormalizerBuilder {
@@ -162,31 +155,6 @@ impl NormalizerBuilder {
         self
     }
 
-    /// Register a grader keyword (e.g. `"psa"`, `"bgs"`). Grader tokens trigger
-    /// grade detection: adjacent numbers become `grade:N` and `grader_grade:psaN`.
-    pub fn add_grader(&mut self, name: &str) {
-        self.graders.push(name.to_string());
-    }
-
-    /// Fluent version of [`add_grader`](Self::add_grader).
-    pub fn grader(mut self, name: &str) -> Self {
-        self.add_grader(name);
-        self
-    }
-
-    /// Register a grade-context word (e.g. `"gem"`, `"mint"`). These tokens activate
-    /// a short-lived grade-context window so that a following number is treated as a
-    /// grade even without an explicit grader prefix.
-    pub fn add_grade_word(&mut self, word: &str) {
-        self.grade_words.push(word.to_string());
-    }
-
-    /// Fluent version of [`add_grade_word`](Self::add_grade_word).
-    pub fn grade_word(mut self, word: &str) -> Self {
-        self.add_grade_word(word);
-        self
-    }
-
     /// Classify a punctuation character for byte-cleaning (ADR-058). By default `.` is
     /// kept in place, `#`/`/` are standalone markers, and every other non-alphanumeric
     /// character becomes a word boundary ([`PunctClass::Split`]); override any of them
@@ -220,15 +188,12 @@ impl NormalizerBuilder {
     }
 
     /// Replace the **number-context word list** (ADR-069): a number token immediately after
-    /// one of these words is demoted to a generic term (`pop 1995` -> `term:1995`), never
-    /// typed as a year or grade. The default — when this is never called — is `["pop"]`,
-    /// the historical hard-coded population rule, byte-identical. Passing an **empty** list
-    /// disables the rule entirely (the percolator-parity mode, ADR-064 item 3): number
-    /// typing becomes position-insensitive, so a 4-digit year is `year:N` everywhere.
+    /// one of these words is demoted to a generic term (`model 1995` -> `term:1995`), rather
+    /// than typed as a year. The default is empty, so number typing is position-insensitive.
     /// Entries are matched against single cleaned tokens (lowercased at build); the same
     /// list runs over queries and titles, so the feature spaces stay aligned (§2).
     pub fn set_number_context_words(&mut self, words: &[&str]) {
-        self.number_context = Some(words.iter().map(|w| w.to_ascii_lowercase()).collect());
+        self.number_context = words.iter().map(|w| w.to_ascii_lowercase()).collect();
     }
 
     /// Fluent version of [`set_number_context_words`](Self::set_number_context_words).
@@ -266,15 +231,10 @@ impl NormalizerBuilder {
             phrase_entries: self.phrase_entries,
             phrase_overlap,
             has_multiword_aliases,
-            graders: self.graders,
             synonyms: self.synonyms,
             syn_index: self.syn_index,
-            grade_words: self.grade_words,
             punct: self.punct,
-            // ADR-069: unset resolves to the historical `pop` rule, byte-identical.
-            number_context: self
-                .number_context
-                .unwrap_or_else(|| vec!["pop".to_string()]),
+            number_context: self.number_context,
         })
     }
 }

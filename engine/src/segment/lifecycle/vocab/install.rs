@@ -9,7 +9,7 @@ impl Engine {
     ///
     /// 1. **Everything outside the alias registry is byte-identical** — compared over the
     ///    serialized vocab documents with the registries blanked, so synonyms, phrases,
-    ///    graders, punctuation, number-context, declared equivalences, AND any future `Vocab`
+    ///    punctuation, number-context, declared equivalences, AND any future `Vocab`
     ///    field automatically participate (a field-list comparison would silently rot; codex
     ///    review). A vocab differing anywhere there affects the normalizer and must go through
     ///    the genuine-change path.
@@ -91,7 +91,7 @@ impl Engine {
         // this set_vocab triggers). Build the candidate dict off to the side so a rejected
         // vocabulary cannot partially mutate the live feature space.
         let mut proposed_dict = self.dict.as_ref().clone();
-        // Self-heal first (codex R13): a vocabulary mutation (punct refold, new grader, …) can
+        // Self-heal first (codex R13): a vocabulary mutation such as a punctuation refold can
         // make an Active alias form unexpressible under the NEW normalizer; demote those back
         // to review candidates rather than leaving an alias that reports active and silently
         // never matches. Demotion can shrink the registered phrase set, so rebuild on change.

@@ -89,8 +89,8 @@ fn flush_positive_run_readonly(
 }
 
 /// Preserve one negated bare term as one complete predicate. A query-side term
-/// can analyze to several features (for example `psa10` under a grader vocab);
-/// the DSL negates that whole analyzed term, not each feature independently.
+/// can analyze to several features under a caller-defined vocabulary; the DSL
+/// negates that whole analyzed term, not each feature independently.
 /// Single-feature terms retain the flat forbidden fast path.
 fn push_forbidden_term(
     mut features: Vec<FeatureId>,

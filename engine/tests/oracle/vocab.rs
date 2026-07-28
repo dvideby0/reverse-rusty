@@ -17,12 +17,12 @@ use std::collections::HashSet;
 /// check covers that machinery end-to-end. Both the engine and the brute reference use
 /// it, so they still agree by construction unless the engine's index/verify diverges.
 fn gen_vocab() -> Normalizer {
-    use reverse_rusty::gen::{BRANDS, BRAND_ALT, CARD_TERMS, GRADERS, PLAYERS};
+    use reverse_rusty::gen::{BRANDS, BRAND_ALT, CARD_TERMS, PLAYERS};
     let mut b = NormalizerBuilder::new();
     for p in PLAYERS {
         let canon = format!("player:{}", p.replace(' ', "_"));
         let toks: Vec<&str> = p.split(' ').collect();
-        b.add_phrase(&toks, &canon, FeatureKind::Player);
+        b.add_phrase(&toks, &canon, FeatureKind::Entity);
     }
     for brand in BRANDS {
         let canon = format!("brand:{}", brand.replace(' ', "_"));
@@ -42,17 +42,12 @@ fn gen_vocab() -> Normalizer {
     for ct in CARD_TERMS {
         b.add_synonym(ct, &format!("card_term:{ct}"), FeatureKind::Category);
     }
-    for g in GRADERS {
-        b.add_grader(g);
-    }
-    b.add_grade_word("gem");
-    b.add_grade_word("mint");
     b.build().expect("gen vocab automaton")
 }
 
 /// Same contract as `zero_false_negatives_against_oracle`, but engine AND brute are
 /// built with a POPULATED vocab (`gen_vocab`) instead of the empty `default_vocab`.
-/// This exercises the multiword-phrase / synonym / grader normalization paths the
+/// This exercises the multiword-phrase and synonym normalization paths the
 /// default oracle never reaches (ADR-050). Still a coherence check (shared front-end),
 /// so it complements — does not replace — the spec-authored golden tests in
 /// `src/{dsl,normalize,compile}.rs`.
@@ -194,16 +189,11 @@ fn zero_false_negatives_with_punctuation_folding() {
     );
 }
 
-/// The parity-mode number-context knob (ADR-069, ADR-064 item 3). Disabling the `pop`
-/// number-context demotion is just a *different* shared normalizer — number typing becomes
-/// position-insensitive (a 4-digit year is `year:N` everywhere) — so the lossless cover
-/// still holds: engine and an independent brute oracle agree exactly (zero FN/FP),
-/// including the forbidden-year and any-of paths. The payoff: the audit's one residual
-/// false-negative class closes in BOTH directions — a query-side year now matches a
-/// title-side `pop`-adjacent year, and a query-side `pop`-adjacent year now matches a
-/// title-side year in any position.
+/// An empty number-context list makes four-digit year typing position-independent.
+/// That is just one shared-normalizer configuration, so the engine and independent
+/// brute oracle must still agree exactly across positive, forbidden, and any-of paths.
 #[test]
-fn zero_false_negatives_with_number_context_disabled() {
+fn zero_false_negatives_with_empty_number_context() {
     fn parity_norm() -> Normalizer {
         NormalizerBuilder::new()
             .number_context_words(&[])
@@ -212,17 +202,17 @@ fn zero_false_negatives_with_number_context_disabled() {
     }
 
     let queries = vec![
-        (1u64, "1995 topps".to_string()), // year-position year (audit direction 1)
-        (2u64, "pop 1995 refractor".to_string()), // pop-adjacent year (audit direction 2)
-        (3u64, "topps -1995".to_string()), // forbidden year
-        (4u64, "(1995|1996) topps".to_string()), // any-of over years
+        (1u64, "1995 acme".to_string()),
+        (2u64, "model 1995 textured".to_string()),
+        (3u64, "acme -1995".to_string()),
+        (4u64, "(1995|1996) acme".to_string()),
     ];
     let titles = vec![
-        "topps pop 1995".to_string(), // -> q1, q4 (NOT q3: its 1995 is a year now)
-        "1995 topps".to_string(),     // -> q1, q4
-        "refractor pop list 1995".to_string(), // -> q2
-        "topps 2001".to_string(),     // -> q3
-        "nothing here".to_string(),   // -> {}
+        "acme model 1995".to_string(),
+        "1995 acme".to_string(),
+        "textured model series 1995".to_string(),
+        "acme 2001".to_string(),
+        "nothing here".to_string(),
     ];
 
     let mut eng = Engine::new(parity_norm());
@@ -250,67 +240,60 @@ fn zero_false_negatives_with_number_context_disabled() {
         "degenerate: parity mode produced no matches"
     );
 
-    // Audit direction 1 closed: the year-position query matches the pop-adjacent title year.
-    eng.match_title("topps pop 1995", &mut s, &mut out, true);
+    eng.match_title("acme model 1995", &mut s, &mut out, true);
     assert!(
         out.contains(&1),
-        "parity mode: `1995 topps` must match a `pop`-adjacent title year"
+        "empty number-context: a year must keep the same type in every position"
     );
-    // Audit direction 2 closed: the pop-adjacent query year matches a title year elsewhere.
-    eng.match_title("refractor pop list 1995", &mut s, &mut out, true);
+    eng.match_title("textured model series 1995", &mut s, &mut out, true);
     assert!(
         out.contains(&2),
-        "parity mode: a `pop`-adjacent query year must match a title year in any position"
+        "empty number-context: query and title year typing must remain symmetric"
     );
 
-    // Contrast: the DEFAULT normalizer misses both directions (proves the knob does the
-    // work — `pop 1995` demotes to `term:1995` on whichever side carries it).
-    let mut def = Engine::new(Normalizer::default_vocab().expect("default vocab"));
-    def.build_from_queries(&queries);
-    def.match_title("topps pop 1995", &mut s, &mut out, true);
+    // Contrast with an explicitly configured numeric identifier context.
+    let contextual = NormalizerBuilder::new()
+        .number_context_words(&["model"])
+        .build()
+        .expect("contextual normalizer");
+    let mut contextual_engine = Engine::new(contextual);
+    contextual_engine.build_from_queries(&queries);
+    contextual_engine.match_title("acme model 1995", &mut s, &mut out, true);
     assert!(
         !out.contains(&1),
-        "default: the demoted title year must NOT satisfy the query-side year"
-    );
-    def.match_title("refractor pop list 1995", &mut s, &mut out, true);
-    assert!(
-        !out.contains(&2),
-        "default: the demoted query year must NOT be satisfied by a title-side year"
+        "configured context must keep the adjacent number generic"
     );
 }
 
-/// The knob applies LIVE through the vocab machinery (ADR-069): `set_vocab` with an
-/// explicit empty number-context list recompiles already-stored queries under the new
-/// normalizer (the ADR-046 mech-2 path), so a query stored under the default demotion
-/// starts matching `pop`-adjacent title years — no restart, no rebuild. This is what
-/// "vocab-persisted knob" buys over a construction-time-only flag.
+/// Number-context changes apply live through the vocabulary machinery: `set_vocab`
+/// recompiles stored queries under the replacement shared normalizer.
 #[test]
 fn number_context_knob_applies_live_via_set_vocab() {
     let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocab"));
-    eng.try_insert_live("1995 topps", 1, 1).expect("insert");
+    eng.try_insert_live("1995 acme", 1, 1).expect("insert");
 
     let mut s = MatchScratch::new();
     let mut out = Vec::new();
-    eng.match_title("topps pop 1995", &mut s, &mut out, true);
+    eng.match_title("acme model 1995", &mut s, &mut out, true);
     assert!(
-        !out.contains(&1),
-        "before the flip: the demoted title year must not match"
+        out.contains(&1),
+        "empty default context must preserve year typing"
     );
 
     let mut v = Vocab::new();
-    v.set_number_context_words(&[]);
-    eng.set_vocab(v).expect("set_vocab with the parity knob");
+    v.set_number_context_words(&["model"]);
+    eng.set_vocab(v).expect("set_vocab with a number context");
 
-    eng.match_title("topps pop 1995", &mut s, &mut out, true);
-    assert!(
-        out.contains(&1),
-        "after the flip: the stored query must be recompiled and match"
-    );
-    // And the flip is reversible: restoring a default vocab re-demotes.
-    eng.set_vocab(Vocab::new()).expect("restore default vocab");
-    eng.match_title("topps pop 1995", &mut s, &mut out, true);
+    eng.match_title("acme model 1995", &mut s, &mut out, true);
     assert!(
         !out.contains(&1),
-        "after restoring the default: the demotion is back"
+        "configured context must keep the adjacent number generic"
+    );
+
+    eng.set_vocab(Vocab::new()).expect("restore default vocab");
+    eng.match_title("acme model 1995", &mut s, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "restoring the empty default context must restore year typing"
     );
 }

@@ -83,10 +83,11 @@ const FORMAT_VERSION_PHRASE_PREDICATE: u32 = 10;
 /// exact verification. Version 3 preserves quoted analyzer adjacency rather
 /// than lowering a quoted clause to unordered feature membership. Version 4
 /// preserves a multi-feature negated bare term as one complete predicate
-/// instead of rejecting each emitted feature independently. This lives in the
-/// format's old reserved header word so
+/// instead of rejecting each emitted feature independently. Version 5 removes
+/// built-in domain analysis and makes numeric contexts entirely caller-defined.
+/// This lives in the format's old reserved header word so
 /// recovery can source-rebuild every older materialization before serving it.
-pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 4;
+pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 5;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).

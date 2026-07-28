@@ -418,7 +418,7 @@ fn durable_cluster_rebuilds_a_legacy_tail_even_when_the_base_is_empty() {
     let current = reverse_rusty::storage::read_cluster_manifest(&manifest_path)
         .expect("migrated v7 manifest");
     assert_eq!(
-        current.compiler_semantics_version, 4,
+        current.compiler_semantics_version, 5,
         "successful migration commits the current compiler marker"
     );
     let _ = std::fs::remove_dir_all(&dir);

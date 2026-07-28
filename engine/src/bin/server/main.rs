@@ -200,11 +200,14 @@ async fn main() {
     let vocab = if let Some(ref path) = cli.vocab_file {
         info!(path = ?path, "loading vocabulary from file");
         let v = reverse_rusty::vocab::Vocab::load_json(path).expect("failed to read vocab file");
+        let aliases = v.alias_summary();
         info!(
             synonyms = v.synonyms().len(),
             phrases = v.phrases().len(),
-            graders = v.graders().len(),
-            grade_words = v.grade_words().len(),
+            equivalences = v.equivalences().len(),
+            aliases_active = aliases.active,
+            aliases_candidate = aliases.candidate,
+            aliases_rejected = aliases.rejected,
             "vocabulary loaded"
         );
         Some(v)

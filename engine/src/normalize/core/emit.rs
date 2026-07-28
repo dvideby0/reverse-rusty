@@ -1,7 +1,6 @@
 use super::{
-    age_active_graders, as_year, canon_grader, collapse_ws_runs_in_place, emit_generic,
-    is_grade_value, parse_number, position_index, EmitMode, FeatureKind, NormScratch, Normalizer,
-    PhraseMode, Side, MAX_POSITIONED_STARTS_PER_GRADER,
+    as_year, collapse_ws_runs_in_place, emit_generic, parse_number, position_index, EmitMode,
+    FeatureKind, NormScratch, Normalizer, PhraseMode, Side,
 };
 
 impl Normalizer {
@@ -17,7 +16,7 @@ impl Normalizer {
     ///      are consumed.
     ///   2) Iterate through tokens. Tokens fully inside a phrase match are
     ///      skipped (the phrase feature is emitted once). All other tokens go
-    ///      through the existing grader/number/synonym/generic pipeline.
+    ///      through the number/synonym/generic pipeline.
     pub fn emit<F: FnMut(&str, FeatureKind)>(
         &self,
         text: &str,
@@ -53,7 +52,6 @@ impl Normalizer {
             force_additive,
             retain_positioned_starts,
         } = mode;
-        sc.position_graph_incomplete = false;
         self.clean_into(text, lc);
 
         // Phrase patterns are registered single-spaced. ADR-061 collapses query
@@ -176,43 +174,17 @@ impl Normalizer {
             }
         }
 
-        // Phase 2b: process non-consumed tokens through the existing pipeline.
-        // `scratch`/`active_graders` are reused buffers on `sc` (cleared here); the token
-        // text is re-sliced from `lc` on demand via `tok_at` (the ranges live in `tokens`).
+        // Phase 2b: process non-consumed tokens through the number/synonym/generic
+        // pipeline. `scratch` is reused on `sc`; token text is re-sliced from `lc`
+        // on demand via `tok_at` (the ranges live in `tokens`).
         let scratch = &mut sc.scratch;
         scratch.clear();
-        let active_graders = &mut sc.active_graders;
-        active_graders.clear();
         let tok_at = |r: (usize, usize)| &lc[r.0..r.1];
         let mut i = 0;
-        let mut pending_grader: Option<(String, u32)> = None;
-        let mut pending_grader_age = 0u8;
-        let mut grade_ctx = false;
-        let mut grade_ctx_age = 0u8;
-        // ADR-061 positive view (`force_additive` ⇒ P(T)) only: a single `pending_grader` cannot
-        // express the parse-union of grades — a parse that consumes a phrase can FREE an earlier
-        // grader to grade a later number, and a second grader OVERWRITES the pending one. So in the
-        // positive pass we track EVERY grader still in window and grade each number with all of
-        // them. The query/compile and single-view title paths keep the single-pending semantics
-        // (byte-identical) and this Vec stays empty ⇒ `age_active_graders` is a no-op, no alloc.
 
         while i < tokens.len() {
             if token_consumed[i] {
-                // This token was part of a phrase match — skip it.
-                // But still age out pending grader/grade context.
-                if pending_grader.is_some() {
-                    pending_grader_age = pending_grader_age.saturating_add(1);
-                    if pending_grader_age > 3 {
-                        pending_grader = None;
-                    }
-                }
-                if grade_ctx {
-                    grade_ctx_age = grade_ctx_age.saturating_add(1);
-                    if grade_ctx_age > 2 {
-                        grade_ctx = false;
-                    }
-                }
-                age_active_graders(active_graders);
+                // This token was part of a collapse phrase match.
                 i += 1;
                 continue;
             }
@@ -225,96 +197,8 @@ impl Normalizer {
                 continue;
             }
 
-            // 1) grader keyword (possibly fused like "psa10")
-            if let Some((g, rest)) = self.split_grader(tok) {
-                let gcanon = canon_grader(&g);
-                scratch.clear();
-                scratch.push_str("grader:");
-                scratch.push_str(&gcanon);
-                emit(
-                    scratch,
-                    FeatureKind::Grader,
-                    position_index(i),
-                    position_index(i.saturating_add(1)),
-                );
-                let fused = rest.is_some();
-                if let Some(num) = rest {
-                    Self::emit_grade(
-                        &gcanon,
-                        &num,
-                        scratch,
-                        position_index(i),
-                        position_index(i),
-                        position_index(i.saturating_add(1)),
-                        emit,
-                    );
-                }
-                if force_additive {
-                    // Positive view: keep this grader active (don't overwrite earlier ones), so a
-                    // later number grades with it too — the parse-union over which graders a parse
-                    // frees by consuming the others. A grader token ages nothing (matches the
-                    // single-pending path, where the new grader resets only its own age).
-                    if retain_positioned_starts {
-                        // Positioned graphs must retain EACH live start: an overlapping phrase can
-                        // consume the later occurrence while leaving an earlier same-name grader to
-                        // form the connected `grader_grade` edge. Bound starts per canonical
-                        // grader; on overflow mark the graph incomplete so quoted verification
-                        // fails open rather than dropping a match.
-                        let same = active_graders
-                            .iter()
-                            .filter(|(g, _, _)| *g == gcanon)
-                            .count();
-                        if same < MAX_POSITIONED_STARTS_PER_GRADER {
-                            active_graders.push((gcanon, 0, position_index(i)));
-                        } else {
-                            sc.position_graph_incomplete = true;
-                            if let Some(entry) = active_graders
-                                .iter_mut()
-                                .rev()
-                                .find(|(g, _, _)| *g == gcanon)
-                            {
-                                entry.1 = 0;
-                                entry.2 = position_index(i);
-                            }
-                        }
-                    } else {
-                        // Flat P(T) remains a set: one live representative per canonical grader
-                        // emits the same feature labels without multiplying duplicate callbacks.
-                        if let Some(entry) = active_graders
-                            .iter_mut()
-                            .rev()
-                            .find(|(g, _, _)| *g == gcanon)
-                        {
-                            entry.1 = 0;
-                            entry.2 = position_index(i);
-                        } else {
-                            active_graders.push((gcanon, 0, position_index(i)));
-                        }
-                    }
-                } else if fused {
-                    pending_grader = None;
-                } else {
-                    pending_grader = Some((gcanon, position_index(i)));
-                    pending_grader_age = 0;
-                }
-                i += 1;
-                continue;
-            }
-
-            // 2) grade modifier / context word
-            if self.grade_words.iter().any(|w| w == tok) {
-                grade_ctx = true;
-                grade_ctx_age = 0;
-                if pending_grader.is_some() {
-                    pending_grader_age = pending_grader_age.saturating_add(1);
-                }
-                age_active_graders(active_graders);
-                i += 1;
-                continue;
-            }
-
-            // 3) numbers: disambiguate card-numbers, serials, number-context words
-            //    (default `pop`, configurable — ADR-069), grades, years
+            // 1) Numbers: structural identifiers and caller-declared numeric
+            // contexts remain generic; otherwise four-digit years are typed.
             if let Some(numstr) = parse_number(tok) {
                 let prev = if i > 0 {
                     Some(tok_at(tokens[i - 1]))
@@ -322,7 +206,7 @@ impl Normalizer {
                     None
                 };
                 let next = tokens.get(i + 1).map(|&r| tok_at(r));
-                let is_cardnum = prev == Some("#");
+                let is_marked_number = prev == Some("#");
                 let is_serial = prev == Some("/") || next == Some("/");
                 let is_numctx = prev.is_some_and(|p| {
                     self.number_context
@@ -330,7 +214,7 @@ impl Normalizer {
                         .any(|w| p.eq_ignore_ascii_case(w))
                 });
 
-                if is_cardnum || is_serial || is_numctx {
+                if is_marked_number || is_serial || is_numctx {
                     emit_generic(
                         &numstr,
                         scratch,
@@ -348,82 +232,6 @@ impl Normalizer {
                         position_index(i),
                         position_index(i.saturating_add(1)),
                     );
-                } else if force_additive {
-                    // Positive view (P(T)) parse-union: grade this number with EVERY active grader
-                    // still in window AND the grade context, all STICKY (never cleared by this
-                    // number). A number consumed by a phrase in some parse frees a grader for a
-                    // later number, and a second grader overwrites the pending one — both readings
-                    // live here, so P(T) keeps every grade any parse could emit. Over-emitting a
-                    // grade no single parse produces is a bounded false positive (recall-safe).
-                    let gradeable = is_grade_value(&numstr);
-                    let mut graded = false;
-                    if gradeable {
-                        for (g, _, grader_start) in active_graders.iter() {
-                            Self::emit_grade(
-                                g,
-                                &numstr,
-                                scratch,
-                                *grader_start,
-                                position_index(i),
-                                position_index(i.saturating_add(1)),
-                                emit,
-                            );
-                            graded = true;
-                        }
-                        if grade_ctx {
-                            scratch.clear();
-                            scratch.push_str("grade:");
-                            scratch.push_str(&numstr);
-                            emit(
-                                scratch,
-                                FeatureKind::Grade,
-                                position_index(i),
-                                position_index(i.saturating_add(1)),
-                            );
-                            graded = true;
-                        }
-                    }
-                    if !graded {
-                        emit_generic(
-                            &numstr,
-                            scratch,
-                            position_index(i),
-                            position_index(i.saturating_add(1)),
-                            emit,
-                        );
-                    }
-                } else if let Some((g, grader_start)) = pending_grader.clone() {
-                    if is_grade_value(&numstr) {
-                        Self::emit_grade(
-                            &g,
-                            &numstr,
-                            scratch,
-                            grader_start,
-                            position_index(i),
-                            position_index(i.saturating_add(1)),
-                            emit,
-                        );
-                        pending_grader = None;
-                    } else {
-                        emit_generic(
-                            &numstr,
-                            scratch,
-                            position_index(i),
-                            position_index(i.saturating_add(1)),
-                            emit,
-                        );
-                    }
-                } else if grade_ctx && is_grade_value(&numstr) {
-                    scratch.clear();
-                    scratch.push_str("grade:");
-                    scratch.push_str(&numstr);
-                    emit(
-                        scratch,
-                        FeatureKind::Grade,
-                        position_index(i),
-                        position_index(i.saturating_add(1)),
-                    );
-                    grade_ctx = false;
                 } else {
                     emit_generic(
                         &numstr,
@@ -437,7 +245,7 @@ impl Normalizer {
                 continue;
             }
 
-            // 4) closed-vocab synonym
+            // 2) closed-vocab synonym
             if let Some(&si) = self.syn_index.get(tok) {
                 let (_, canon, kind) = &self.synonyms[si];
                 emit(
@@ -450,7 +258,7 @@ impl Normalizer {
                 continue;
             }
 
-            // 5) generic fallback term
+            // 3) generic fallback term
             emit_generic(
                 tok,
                 scratch,
@@ -459,58 +267,6 @@ impl Normalizer {
                 emit,
             );
             i += 1;
-
-            // age out stale pending grader / grade context
-            if pending_grader.is_some() {
-                pending_grader_age = pending_grader_age.saturating_add(1);
-                if pending_grader_age > 3 {
-                    pending_grader = None;
-                }
-            }
-            if grade_ctx {
-                grade_ctx_age = grade_ctx_age.saturating_add(1);
-                if grade_ctx_age > 2 {
-                    grade_ctx = false;
-                }
-            }
-            age_active_graders(active_graders);
         }
-    }
-
-    fn emit_grade<F: FnMut(&str, FeatureKind, u32, u32)>(
-        grader: &str,
-        num: &str,
-        scratch: &mut String,
-        grader_start: u32,
-        start: u32,
-        end: u32,
-        emit: &mut F,
-    ) {
-        scratch.clear();
-        scratch.push_str("grade:");
-        scratch.push_str(num);
-        emit(scratch, FeatureKind::Grade, start, end);
-        scratch.clear();
-        scratch.push_str("grader_grade:");
-        scratch.push_str(grader);
-        scratch.push_str(num);
-        emit(scratch, FeatureKind::GraderGrade, grader_start, end);
-    }
-
-    /// Split a possibly-fused grader token like "psa10" -> ("psa", Some("10")).
-    fn split_grader(&self, tok: &str) -> Option<(String, Option<String>)> {
-        for g in &self.graders {
-            if tok == g.as_str() {
-                return Some((g.clone(), None));
-            }
-            if let Some(rest) = tok.strip_prefix(g.as_str()) {
-                if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                    if let Some(num) = parse_number(rest) {
-                        return Some((g.clone(), Some(num)));
-                    }
-                }
-            }
-        }
-        None
     }
 }

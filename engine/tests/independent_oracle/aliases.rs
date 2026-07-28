@@ -16,12 +16,12 @@ use reverse_rusty_ref_matcher::RefVocab;
 /// (multiword player/brand phrases, single-token brand + brand-alt + card-term synonyms, graders,
 /// grade words).
 fn gen_engine_norm() -> Normalizer {
-    use reverse_rusty::gen::{BRANDS, BRAND_ALT, CARD_TERMS, GRADERS, PLAYERS};
+    use reverse_rusty::gen::{BRANDS, BRAND_ALT, CARD_TERMS, PLAYERS};
     let mut b = NormalizerBuilder::new();
     for p in PLAYERS {
         let canon = format!("player:{}", p.replace(' ', "_"));
         let toks: Vec<&str> = p.split(' ').collect();
-        b.add_phrase(&toks, &canon, FeatureKind::Player);
+        b.add_phrase(&toks, &canon, FeatureKind::Entity);
     }
     for brand in BRANDS {
         let canon = format!("brand:{}", brand.replace(' ', "_"));
@@ -39,11 +39,6 @@ fn gen_engine_norm() -> Normalizer {
     for ct in CARD_TERMS {
         b.add_synonym(ct, &format!("card_term:{ct}"), FeatureKind::Category);
     }
-    for g in GRADERS {
-        b.add_grader(g);
-    }
-    b.add_grade_word("gem");
-    b.add_grade_word("mint");
     b.build().expect("gen vocab automaton")
 }
 
@@ -51,7 +46,7 @@ fn gen_engine_norm() -> Normalizer {
 /// expressed in `RefVocab`'s own type. Multiword brand/player phrases are `Collapse` (the engine's
 /// `add_phrase` default).
 fn gen_ref_vocab() -> RefVocab {
-    use reverse_rusty::gen::{BRANDS, BRAND_ALT, CARD_TERMS, GRADERS, PLAYERS};
+    use reverse_rusty::gen::{BRANDS, BRAND_ALT, CARD_TERMS, PLAYERS};
     let mut v = RefVocab::default_vocab();
     for p in PLAYERS {
         let canon = format!("player:{}", p.replace(' ', "_"));
@@ -72,10 +67,7 @@ fn gen_ref_vocab() -> RefVocab {
     for ct in CARD_TERMS {
         v = v.synonym(ct, &format!("card_term:{ct}"));
     }
-    for g in GRADERS {
-        v = v.grader(g);
-    }
-    v.grade_word("gem").grade_word("mint")
+    v
 }
 
 fn cfg(seed: u64) -> GenConfig {

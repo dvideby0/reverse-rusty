@@ -3,9 +3,9 @@
 //! Hot path: yes — `emit` (and its public entry points `match_features` /
 //! `compile_features` / `compile_features_readonly`) run per incoming title.
 //! Holds the `Normalizer` struct definition, its byte-cleaning (`clean_into`),
-//! the two-phase `emit` pipeline (daachorse multiword scan → grader/number/synonym
+//! the two-phase `emit` pipeline (daachorse multiword scan → number/synonym
 //! /generic tokenization), and the small free helpers `emit` relies on
-//! (`fold_diacritic`, number/year/grade parsing, generic emission).
+//! (`fold_diacritic`, number/year parsing, generic emission).
 
 use super::{
     NormScratch, PhraseArc, PhraseEntry, PhraseGraph, PhraseMode, PositionArc, PunctClass,
@@ -18,20 +18,12 @@ mod alias_overlap;
 mod helpers;
 pub(super) use alias_overlap::PhraseOverlap;
 pub use helpers::fold_diacritic;
-use helpers::{
-    age_active_graders, as_year, canon_grader, collapse_ws_runs_in_place, emit_generic,
-    is_grade_value, parse_number,
-};
+use helpers::{as_year, collapse_ws_runs_in_place, emit_generic, parse_number};
 
 #[inline]
 fn position_index(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
-
-/// Retain enough same-grader starts to represent ordinary titles exactly while
-/// bounding a crafted run such as `psa psa psa ...`. If this bound is exceeded,
-/// flat `P(T)` remains complete and positioned verification fails open.
-const MAX_POSITIONED_STARTS_PER_GRADER: usize = 64;
 
 #[derive(Clone, Copy)]
 struct EmitMode {
@@ -72,16 +64,13 @@ pub struct Normalizer {
     /// not activate ADR-061's distinct flat positive view.
     pub(super) has_multiword_aliases: bool,
 
-    pub(super) graders: Vec<String>,
     /// single-token synonyms -> (canonical feature, kind).
     pub(super) synonyms: Vec<(String, String, FeatureKind)>,
     pub(super) syn_index: std::collections::HashMap<String, usize>,
-    pub(super) grade_words: Vec<String>,
     /// Byte-cleaning punctuation classification (ADR-058). Default = historical behavior.
     pub(super) punct: PunctTable,
     /// Number-context words (ADR-069): a number immediately after one of these tokens is
-    /// demoted to a generic term (never typed as a year/grade). Default `["pop"]` = the
-    /// historical hard-coded rule; empty = parity mode (position-insensitive number typing).
+    /// demoted to a generic term instead of typed as a year. Empty by default.
     /// Lowercased at build, so entries compare directly against cleaned tokens.
     pub(super) number_context: Vec<String>,
 }
@@ -90,9 +79,7 @@ impl std::fmt::Debug for Normalizer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Normalizer")
             .field("phrases", &self.phrase_entries.len())
-            .field("graders", &self.graders)
             .field("synonyms", &self.synonyms.len())
-            .field("grade_words", &self.grade_words)
             .field("number_context", &self.number_context)
             .finish()
     }
@@ -125,14 +112,11 @@ impl Normalizer {
         self.has_multiword_aliases
     }
 
-    /// Build the default trading-card vocabulary. Rich enough to exercise the
-    /// spec's worked example and the synthetic generator; not exhaustive.
-    ///
     /// Build a domain-agnostic normalizer with no pre-loaded vocabulary.
     ///
     /// The normalizer still handles year detection, number disambiguation,
     /// diacritic folding, and lowercase normalization. Domain-specific vocabulary
-    /// (phrases, synonyms, graders, grade words) should be supplied via
+    /// (phrases, synonyms, equivalences, and punctuation rules) should be supplied via
     /// [`NormalizerBuilder`](super::NormalizerBuilder) or learned from query any-of groups at runtime.
     pub fn default_vocab() -> Result<Self, crate::error::NormalizerError> {
         super::NormalizerBuilder::new().build()
@@ -140,9 +124,9 @@ impl Normalizer {
 
     /// Lowercase + fold diacritics + apply the punctuation table into `out` (reused).
     /// Alphanumerics pass through lowercased; every other character is handled by its
-    /// [`PunctClass`]. Defaults (ADR-058): `.` is kept in place (half-grades), `#`/`/`
-    /// become standalone marker tokens (so the number logic can tell `#2`/`/199` from
-    /// grades), and everything else becomes a space. A [`PunctClass::Fold`] character is
+    /// [`PunctClass`]. Defaults (ADR-058): `.` is kept in place, `#`/`/`
+    /// become standalone marker tokens (so identifiers such as `#2` and `/199` remain
+    /// generic numbers), and everything else becomes a space. A [`PunctClass::Fold`] character is
     /// deleted, so its neighbors join into one token (`O'Brien` -> `obrien`). The same
     /// table runs over queries and titles, keeping the feature spaces aligned (§2).
     fn clean_into(&self, text: &str, out: &mut String) {

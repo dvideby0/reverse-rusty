@@ -421,7 +421,7 @@ impl AliasRegistry {
 
     /// Demote every ACTIVE entry containing a form the CURRENT normalizer cannot express — a
     /// form that cleans to fewer than two tokens AND does not resolve to exactly one feature
-    /// (e.g. a fused grader `psa10` after a punctuation refold turned `psa-10` into one token) —
+    /// after a punctuation refold —
     /// back to [`Candidate`](AliasStatus::Candidate) (codex R13). Such a form cannot be
     /// registered as an alias phrase and `resolve_equivalences` drops it, so leaving the entry
     /// Active would report an alias that silently never matches. Called by every

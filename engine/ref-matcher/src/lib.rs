@@ -25,14 +25,14 @@
 //!
 //! ## Comparison is by canonical feature STRING
 //! The reference compares matches by the engine's canonical feature names (`year:1994`,
-//! `term:psa`, `grade:10`, `grader_grade:psa10`, …) — never the engine's interned integer
+//! `term:wireless`, `brand:acme`, …) — never the engine's interned integer
 //! `FeatureId`s. That is what lets it reuse none of the dictionary machinery (synthetic hashing
 //! included): two titles match a query iff they produce the same canonical feature set, by name.
 //!
 //! ## Layout
 //! - [`features`] — the feature kinds + their canonical string forms.
 //! - [`vocab`] — [`vocab::RefVocab`], the reference's own plain-data vocabulary (phrases,
-//!   synonyms, graders, grade words, number-context words, aliases, equivalences, punctuation).
+//!   synonyms, number-context words, aliases, equivalences, and punctuation).
 //!   The differential harness builds this AND the engine's `Vocab` from one neutral description.
 //! - [`clean`] — byte cleaning: lowercase + diacritic fold + the punctuation-class table.
 //! - [`normalize`] — the two-phase emit pipeline producing canonical features, including the

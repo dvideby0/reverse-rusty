@@ -128,14 +128,11 @@ mod tests {
     fn sample_dict() -> Dict {
         let mut d = Dict::new();
         let kinds = [
-            ("year:1986", FeatureKind::Year),
-            ("brand:topps", FeatureKind::Brand),
-            ("player:jordan", FeatureKind::Player),
-            ("cat:rookie", FeatureKind::Category),
-            ("grader:psa", FeatureKind::Grader),
-            ("grade:10", FeatureKind::Grade),
-            ("gg:psa10", FeatureKind::GraderGrade),
-            ("flag:auto", FeatureKind::Flag),
+            ("year:2024", FeatureKind::Year),
+            ("brand:acme", FeatureKind::Brand),
+            ("entity:wireless_mouse", FeatureKind::Entity),
+            ("category:refurbished", FeatureKind::Category),
+            ("flag:featured", FeatureKind::Flag),
             ("term:misc", FeatureKind::Generic),
         ];
         for (i, (name, kind)) in kinds.iter().enumerate() {
@@ -220,13 +217,15 @@ mod tests {
         // A single Generic feature, then overwrite its kind byte with an unmapped tag.
         let mut d = Dict::new();
         d.intern("only", FeatureKind::Generic);
-        let mut bytes = serialize_dict(&d);
         // kind byte = header(8) + num_features(4) + name_len(2) + name(4) = offset 18.
         let kind_off = DICT_HEADER + 4 + 2 + "only".len();
-        bytes[kind_off] = 200; // not a known FeatureKind tag
-        let err = deserialize_dict(&bytes).expect_err("must reject an unknown kind tag");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("200"), "got: {err}");
+        for tag in [4, 5, 6, 200] {
+            let mut bytes = serialize_dict(&d);
+            bytes[kind_off] = tag;
+            let err = deserialize_dict(&bytes).expect_err("must reject an unknown kind tag");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains(&tag.to_string()), "got: {err}");
+        }
     }
 
     #[test]

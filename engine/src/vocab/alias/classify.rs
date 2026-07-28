@@ -21,7 +21,7 @@ pub enum AliasKind {
     SingleTokenVariant,
     /// Every form is single-token but they are **not** all variants — distinct tokens that may
     /// be genuine synonyms (when an operator declares them) or merely co-listed alternatives
-    /// like graders `(psa, bgs, sgc)` (when learned from an any-of disjunction). Active only
+    /// like `(standard, deluxe, compact)` (when learned from an any-of disjunction). Active only
     /// when declared / manual; a candidate when learned.
     SingleTokenDistinct,
     /// At least one form spans multiple tokens — a token-graph (multi-word) alias. Expressed
@@ -30,9 +30,9 @@ pub enum AliasKind {
     /// learned from an any-of disjunction.
     MultiWord,
     /// The group cannot be auto-activated safely, so it is **always** a review candidate. Either
-    /// the forms resolve to more than one known `FeatureKind` (e.g. a Brand ≡ a Player — expanding
+    /// the forms resolve to more than one known `FeatureKind` (e.g. a Brand ≡ an Entity — expanding
     /// across kinds is unsafe), or a single-token form does not reduce to exactly one feature (a
-    /// zero-feature grade word, or a fused grader like `psa10`) — it cannot be registered as an
+    /// zero-feature ignored word or a token that expands to several features) — it cannot be registered as an
     /// alias phrase, so activating it would report active yet silently never match (ADR-061).
     MixedKind,
 }
@@ -59,13 +59,13 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
         if cleaned_tokens >= 2 {
             // A genuine multi-word surface form (an ADR-061 token-graph case). Counted on the
             // CLEANED tokens so the boundary can't depend on which phrases happen to fold it
-            // (importing `ud => upper deck` while `upper deck` is a declared phrase still classifies
+            // (importing `ac => alpha compact` while `alpha compact` is a declared phrase still classifies
             // multi-word) — but folding punctuation (`a-b` → `a b`) is honored, since that is how
             // the form will be registered.
             multiword = true;
         } else if feats.len() != 1 {
-            // A single cleaned token that does NOT reduce to exactly one feature (zero features —
-            // a grade word / all-punctuation form — or several — a fused grader): it cannot be
+            // A single cleaned token that does NOT reduce to exactly one feature (zero features
+            // or several expanded features): it cannot be
             // registered as a phrase (needs ≥2 tokens) and `resolve_equivalences` would drop it,
             // so the group would be reported active yet silently never match. Mark it unexpressible
             // so it stays a review candidate, never auto-active (codex review, ADR-061).
@@ -73,7 +73,7 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
         }
         // Collect the kinds of EVERY resolved feature — single- AND multi-token — so a cross-kind
         // group is caught even when a form is multi-word. Without this, a multi-word short-circuit
-        // would let a Brand phrase ≡ Player phrase bypass the MixedKind refusal and auto-activate
+        // would let a Brand phrase ≡ Entity phrase bypass the MixedKind refusal and auto-activate
         // an unsafe equivalence (codex review, ADR-061).
         for &id in &feats {
             kinds.push(dict.kind(id));

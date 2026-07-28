@@ -1,6 +1,5 @@
-//! Pure, `self`-free helpers for the normalization core: diacritic folding, grader
-//! canonicalization, the generic `term:` emit, the positive-view active-grader aging
-//! (ADR-061), and number/year/grade parsing. Split out of `core.rs` to keep that file
+//! Pure, `self`-free helpers for the normalization core: diacritic folding,
+//! the generic `term:` emit, and number/year parsing. Split out of `core.rs` to keep that file
 //! focused on the `Normalizer` struct + the two-phase `emit` pipeline.
 
 use crate::dict::FeatureKind;
@@ -25,13 +24,6 @@ pub fn fold_diacritic(ch: char) -> char {
     }
 }
 
-pub(super) fn canon_grader(g: &str) -> String {
-    match g {
-        "beckett" => "bgs".to_string(),
-        other => other.to_string(),
-    }
-}
-
 pub(super) fn emit_generic<F: FnMut(&str, FeatureKind, u32, u32)>(
     tok: &str,
     scratch: &mut String,
@@ -43,20 +35,6 @@ pub(super) fn emit_generic<F: FnMut(&str, FeatureKind, u32, u32)>(
     scratch.push_str("term:");
     scratch.push_str(tok);
     emit(scratch, FeatureKind::Generic, start, end);
-}
-
-/// Age every active positive-view grader (ADR-061 `P(T)`) one window step, dropping those past the
-/// grader window (`> 3`, the same bound `pending_grader` uses). Called wherever `pending_grader` is
-/// aged. A no-op with no allocation on the empty Vec the query/compile and single-view title paths
-/// always hold — only the positive (`force_additive`) pass ever populates it.
-pub(super) fn age_active_graders(active: &mut Vec<(String, u8, u32)>) {
-    if active.is_empty() {
-        return;
-    }
-    active.retain_mut(|(_, age, _)| {
-        *age = age.saturating_add(1);
-        *age <= 3
-    });
 }
 
 /// Collapse whitespace runs in place (and strip a leading space). Phrase patterns are registered
@@ -105,12 +83,4 @@ pub(super) fn as_year(num: &str) -> Option<String> {
         }
     }
     None
-}
-
-pub(super) fn is_grade_value(num: &str) -> bool {
-    if let Ok(v) = num.parse::<f32>() {
-        (1.0..=10.0).contains(&v)
-    } else {
-        false
-    }
 }

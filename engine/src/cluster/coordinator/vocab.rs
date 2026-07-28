@@ -81,8 +81,8 @@ impl ClusterEngine {
                 .to_normalizer()
                 .map_err(|e| ShardError::Config(format!("building normalizer from vocab: {e}")))?,
         );
-        // 2b. Self-heal stale-active aliases FIRST (codex R13/R14): a punctuation/grader change
-        //     in this vocab can make an Active alias form unexpressible (e.g. a fused grader);
+        // 2b. Self-heal stale-active aliases FIRST (codex R13/R14): a punctuation change in
+        //     this vocab can make an Active alias form unexpressible;
         //     demote those to review candidates rather than install an alias that reports
         //     active and silently never matches. Demotion can only shrink the registered phrase
         //     set, so rebuild the normalizer when it fires, so every later consumer (the

@@ -53,14 +53,10 @@ pub type EquivMap = FastMap<FeatureId, Vec<FeatureId>>;
 pub enum FeatureKind {
     Year,
     Brand,
-    Player,
-    /// Domain-specific category term (e.g. "rookie", "refractor" in trading cards,
-    /// "retro" or "limited" in sneakers). The catch-all for vocabulary terms that
-    /// aren't brands, players, grades, or flags.
+    /// A named subject or product entity.
+    Entity,
+    /// A caller-defined category term.
     Category,
-    Grader,
-    Grade,
-    GraderGrade,
     Flag,
     Generic,
 }
@@ -74,11 +70,10 @@ pub(crate) fn kind_tag(kind: FeatureKind) -> u8 {
     match kind {
         FeatureKind::Year => 0,
         FeatureKind::Brand => 1,
-        FeatureKind::Player => 2,
+        FeatureKind::Entity => 2,
         FeatureKind::Category => 3,
-        FeatureKind::Grader => 4,
-        FeatureKind::Grade => 5,
-        FeatureKind::GraderGrade => 6,
+        // Tags 4..=6 are intentionally retired. Reusing them would make older
+        // and newer binaries silently disagree about persisted feature kinds.
         FeatureKind::Flag => 7,
         FeatureKind::Generic => 8,
     }
@@ -94,11 +89,8 @@ pub(crate) fn kind_from_tag(tag: u8) -> Option<FeatureKind> {
     Some(match tag {
         0 => FeatureKind::Year,
         1 => FeatureKind::Brand,
-        2 => FeatureKind::Player,
+        2 => FeatureKind::Entity,
         3 => FeatureKind::Category,
-        4 => FeatureKind::Grader,
-        5 => FeatureKind::Grade,
-        6 => FeatureKind::GraderGrade,
         7 => FeatureKind::Flag,
         8 => FeatureKind::Generic,
         _ => return None,
@@ -449,26 +441,13 @@ mod tests {
     /// (and, by the round-trip assert, given a distinct tag + a matching `kind_from_tag` arm).
     #[test]
     fn kind_tag_round_trips_and_is_injective() {
-        use FeatureKind::{
-            Brand, Category, Flag, Generic, Grade, Grader, GraderGrade, Player, Year,
-        };
-        let all = [
-            Year,
-            Brand,
-            Player,
-            Category,
-            Grader,
-            Grade,
-            GraderGrade,
-            Flag,
-            Generic,
-        ];
+        use FeatureKind::{Brand, Category, Entity, Flag, Generic, Year};
+        let all = [Year, Brand, Entity, Category, Flag, Generic];
         let mut seen = std::collections::HashSet::new();
         for k in all {
             // Exhaustiveness guard (no `_` arm) — keeps `all` honest when the enum grows.
             match k {
-                Year | Brand | Player | Category | Grader | Grade | GraderGrade | Flag
-                | Generic => {}
+                Year | Brand | Entity | Category | Flag | Generic => {}
             }
             let tag = kind_tag(k);
             assert!(seen.insert(tag), "duplicate kind tag {tag} for {k:?}");

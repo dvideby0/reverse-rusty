@@ -1,6 +1,6 @@
 //! `impl Vocab` — building a [`Normalizer`], merging vocabs, the management
-//! accessors (synonyms / phrases / graders / grade words / punctuation /
-//! number-context words / equivalences), equivalence resolution to an
+//! accessors (synonyms / phrases / punctuation / number-context words /
+//! equivalences), equivalence resolution to an
 //! [`EquivMap`], and JSON (de)serialization. Admin/build-time only — off the
 //! match hot path.
 
@@ -67,19 +67,11 @@ impl Vocab {
         for entry in &self.synonyms {
             b.add_synonym(&entry.token, &entry.canonical, entry.kind.into());
         }
-        for g in &self.graders {
-            b.add_grader(g);
-        }
-        for w in &self.grade_words {
-            b.add_grade_word(w);
-        }
         for rule in &self.punctuation {
             b.set_punct_class(rule.ch, rule.class.into());
         }
-        // ADR-069: an explicit number-context word list overrides the normalizer's built-in
-        // `["pop"]` default (an empty list disables the demotion — the parity mode); `None`
-        // leaves the builder untouched ⇒ byte-identical.
-        if let Some(words) = &self.number_context {
+        if !self.number_context.is_empty() {
+            let words = &self.number_context;
             let refs: Vec<&str> = words.iter().map(String::as_str).collect();
             b.set_number_context_words(&refs);
         }
@@ -116,16 +108,6 @@ impl Vocab {
             }
         }
 
-        for g in &other.graders {
-            if !self.graders.contains(g) {
-                self.graders.push(g.clone());
-            }
-        }
-        for w in &other.grade_words {
-            if !self.grade_words.contains(w) {
-                self.grade_words.push(w.clone());
-            }
-        }
         for grp in &other.equivalences {
             if !self.equivalences.contains(grp) {
                 self.equivalences.push(grp.clone());
@@ -136,9 +118,8 @@ impl Vocab {
                 self.punctuation.push(rule.clone());
             }
         }
-        // ADR-069: an explicitly-set number-context list wins; adopt the other's only when
-        // this vocab never set one (first-wins, like synonyms).
-        if self.number_context.is_none() {
+        // First non-empty number-context declaration wins, like synonyms.
+        if self.number_context.is_empty() {
             self.number_context.clone_from(&other.number_context);
         }
         // Merge the governed alias registry (ADR-060) — existing entries win, a higher-trust
@@ -174,19 +155,16 @@ impl Vocab {
     // ── Number-context words (ADR-069) ──────────────────────────────────
 
     /// Replace the **number-context word list** — tokens that demote an immediately-following
-    /// number to a generic term (`pop 1995` -> `term:1995`). Setting an **empty** list
-    /// disables the rule (the percolator-parity mode, ADR-064 item 3): number typing becomes
-    /// position-insensitive, so a 4-digit year is `year:N` everywhere. Until this is called,
-    /// the normalizer keeps its built-in `["pop"]` default, byte-identical.
+    /// number to a generic term (`model 1995` -> `term:1995`). An empty list disables
+    /// contextual demotion, so a four-digit year is `year:N` everywhere.
     pub fn set_number_context_words(&mut self, words: &[&str]) {
-        self.number_context = Some(words.iter().map(|w| (*w).to_string()).collect());
+        self.number_context = words.iter().map(|w| (*w).to_string()).collect();
     }
 
-    /// The explicit number-context word list, if one was set. `None` ⇒ the normalizer's
-    /// built-in `["pop"]` default applies.
+    /// The configured number-context word list.
     #[must_use]
-    pub fn number_context_words(&self) -> Option<&[String]> {
-        self.number_context.as_deref()
+    pub fn number_context_words(&self) -> &[String] {
+        &self.number_context
     }
 
     // ── Synonym management ──────────────────────────────────────────────
@@ -263,42 +241,6 @@ impl Vocab {
 
     pub fn phrases(&self) -> &[PhraseEntry] {
         &self.phrases
-    }
-
-    // ── Grader management ───────────────────────────────────────────────
-
-    pub fn add_grader(&mut self, name: &str) {
-        if !self.graders.iter().any(|g| g == name) {
-            self.graders.push(name.to_string());
-        }
-    }
-
-    pub fn remove_grader(&mut self, name: &str) -> bool {
-        let before = self.graders.len();
-        self.graders.retain(|g| g != name);
-        self.graders.len() < before
-    }
-
-    pub fn graders(&self) -> &[String] {
-        &self.graders
-    }
-
-    // ── Grade word management ───────────────────────────────────────────
-
-    pub fn add_grade_word(&mut self, word: &str) {
-        if !self.grade_words.iter().any(|w| w == word) {
-            self.grade_words.push(word.to_string());
-        }
-    }
-
-    pub fn remove_grade_word(&mut self, word: &str) -> bool {
-        let before = self.grade_words.len();
-        self.grade_words.retain(|w| w != word);
-        self.grade_words.len() < before
-    }
-
-    pub fn grade_words(&self) -> &[String] {
-        &self.grade_words
     }
 
     // ── Equivalence management (ADR-054) ────────────────────────────────
@@ -500,17 +442,12 @@ impl Vocab {
     }
 
     /// Number of entries across ALL recall-bearing fields (synonyms + phrases +
-    /// graders + grade words + equivalence groups + aliases). Equivalences and
+    /// equivalence groups + aliases). Equivalences and
     /// aliases must be counted: an expansion-mode vocab (learned equivalences or
     /// aliases only) is NOT empty, and a "skip if empty" guard that omitted them
     /// would silently drop those recall-bearing groups.
     pub fn len(&self) -> usize {
-        self.synonyms.len()
-            + self.phrases.len()
-            + self.graders.len()
-            + self.grade_words.len()
-            + self.equivalences.len()
-            + self.aliases.len()
+        self.synonyms.len() + self.phrases.len() + self.equivalences.len() + self.aliases.len()
     }
 
     pub fn is_empty(&self) -> bool {

@@ -183,7 +183,7 @@ fn activate_accepts_multiword_refuses_mixed_kind() {
     let mut lc = String::new();
     // Intern two different KNOWN kinds so {topps, jordan} classifies as MixedKind.
     dict.intern("term:topps", crate::dict::FeatureKind::Brand);
-    dict.intern("term:jordan", crate::dict::FeatureKind::Player);
+    dict.intern("term:jordan", crate::dict::FeatureKind::Entity);
     let _ = n.compile_features_readonly("topps", &dict, &mut lc);
     let mut reg = AliasRegistry::new();
 

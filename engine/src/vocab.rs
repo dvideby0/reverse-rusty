@@ -37,15 +37,12 @@ pub use learn::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Vocab {
     #[serde(default)]
     synonyms: Vec<SynonymEntry>,
     #[serde(default)]
     phrases: Vec<PhraseEntry>,
-    #[serde(default)]
-    graders: Vec<String>,
-    #[serde(default)]
-    grade_words: Vec<String>,
     /// Learned/declared equivalence groups (ADR-054): each inner vec is a set of surface
     /// forms treated as the same entity (e.g. `["ud", "upper deck"]`). Applied via
     /// **expansion, not collapse** — a query requiring one form is widened to an any-of over
@@ -60,16 +57,15 @@ pub struct Vocab {
     /// table runs over queries and titles, so the feature spaces stay aligned (§2).
     #[serde(default)]
     punctuation: Vec<PunctRule>,
-    /// Number-context words (ADR-069): tokens that demote an immediately-following number
-    /// to a generic term (never a year/grade). `None` (the default, and old vocab JSON
-    /// predating the field) ⇒ the normalizer's built-in `["pop"]` rule, byte-identical.
-    /// `Some([])` disables the rule — the percolator-parity mode (ADR-064 item 3), making
-    /// number typing position-insensitive. Serialized with the vocab JSON, so it persists
+    /// Number-context words: tokens that demote an immediately-following number
+    /// to a generic term instead of a year. Empty by default, so numeric typing is
+    /// position-insensitive unless the caller declares context words. Serialized with
+    /// the vocab JSON, so it persists
     /// through every channel a vocab does — `--vocab-file` + `open_with_vocab` single-node,
     /// the `ClusterManifest` vocab blob in a cluster, and `PUT /_vocab` live (which
     /// recompiles stored queries); the same list runs over queries and titles (§2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    number_context: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    number_context: Vec<String>,
     /// Governed alias candidates (ADR-060): a registry with provenance / kind / confidence /
     /// status over the ADR-054 equivalence mechanism. Its **active** single-token groups are
     /// folded into [`effective_equivalence_groups`](Vocab::effective_equivalence_groups), so
@@ -108,11 +104,8 @@ pub struct PhraseEntry {
 pub enum FeatureKindSer {
     Year,
     Brand,
-    Player,
+    Entity,
     Category,
-    Grader,
-    Grade,
-    GraderGrade,
     Flag,
     Generic,
 }
@@ -126,11 +119,8 @@ impl From<FeatureKindSer> for FeatureKind {
         match k {
             FeatureKindSer::Year => FeatureKind::Year,
             FeatureKindSer::Brand => FeatureKind::Brand,
-            FeatureKindSer::Player => FeatureKind::Player,
+            FeatureKindSer::Entity => FeatureKind::Entity,
             FeatureKindSer::Category => FeatureKind::Category,
-            FeatureKindSer::Grader => FeatureKind::Grader,
-            FeatureKindSer::Grade => FeatureKind::Grade,
-            FeatureKindSer::GraderGrade => FeatureKind::GraderGrade,
             FeatureKindSer::Flag => FeatureKind::Flag,
             FeatureKindSer::Generic => FeatureKind::Generic,
         }
@@ -142,11 +132,8 @@ impl From<FeatureKind> for FeatureKindSer {
         match k {
             FeatureKind::Year => FeatureKindSer::Year,
             FeatureKind::Brand => FeatureKindSer::Brand,
-            FeatureKind::Player => FeatureKindSer::Player,
+            FeatureKind::Entity => FeatureKindSer::Entity,
             FeatureKind::Category => FeatureKindSer::Category,
-            FeatureKind::Grader => FeatureKindSer::Grader,
-            FeatureKind::Grade => FeatureKindSer::Grade,
-            FeatureKind::GraderGrade => FeatureKindSer::GraderGrade,
             FeatureKind::Flag => FeatureKindSer::Flag,
             FeatureKind::Generic => FeatureKindSer::Generic,
         }

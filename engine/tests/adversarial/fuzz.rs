@@ -79,13 +79,11 @@ fn random_soup(rng: &mut Rng) -> String {
 /// phrase (`p s`) over pool letters: without those, `force_additive` (the `P(T)` pass)
 /// is indistinguishable from the canonical pass on any fuzz input — alias-mode phrases
 /// are already additive on the title side — and a mutation that computes `N(T)` with the
-/// positive-view semantics survives the `match_features == N(T)` assertion. The grader /
-/// grade-word / collapse-phrase state machines are exactly where the two passes diverge.
+/// positive-view semantics survives the `match_features == N(T)` assertion. A collapse
+/// phrase supplies the required divergence.
 fn fuzz_fixtures() -> (Normalizer, Normalizer, Dict) {
     let plain = Normalizer::default_vocab().expect("default vocab");
     let mut v = Vocab::new();
-    v.add_grader("psa");
-    v.add_grade_word("gem");
     v.add_phrase(&["p", "s"], "term:p_s", FeatureKind::Generic);
     let status = v.aliases_mut().add_classified(
         &["ny".into(), "new york".into()],

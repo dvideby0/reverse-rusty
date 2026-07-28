@@ -4,8 +4,8 @@
 //! disagrees it's an engine bug; if they agree with each other but not the human, re-read the spec.
 //!
 //! These pin the exact boundaries most prone to engine-vs-spec drift: negation adjacency, the
-//! `#`/`/` markers, `psa10` fusion (default vs grader vocab), grader aging, number-context, diacritic
-//! fold, half-grades, any-of, number-typing boundaries, and class-D drops.
+//! `#`/`/` markers, caller-defined number context, diacritic folding, decimal tokens,
+//! any-of, number-typing boundaries, and class-D drops.
 //!
 use reverse_rusty::normalize::{Normalizer, NormalizerBuilder};
 use reverse_rusty::segment::{Engine, MatchScratch};
@@ -19,22 +19,13 @@ fn def_vocab() -> RefVocab {
     RefVocab::default_vocab()
 }
 
-fn grader_norm() -> Normalizer {
+fn context_norm() -> Normalizer {
     let mut b = NormalizerBuilder::new();
-    b.add_grader("psa");
-    b.add_grader("bgs");
-    b.add_grader("sgc");
-    b.add_grade_word("gem");
-    b.add_grade_word("mint");
-    b.build().expect("grader norm")
+    b.set_number_context_words(&["model"]);
+    b.build().expect("context normalizer")
 }
-fn grader_vocab() -> RefVocab {
-    RefVocab::default_vocab()
-        .grader("psa")
-        .grader("bgs")
-        .grader("sgc")
-        .grade_word("gem")
-        .grade_word("mint")
+fn context_vocab() -> RefVocab {
+    RefVocab::default_vocab().number_context(&["model"])
 }
 
 /// Build a single-query engine + reference under the given vocab, and assert BOTH agree with the
@@ -149,93 +140,44 @@ fn clause_boundaries_are_semantic_not_a_global_positive_stream() {
 }
 
 #[test]
-fn markers_card_number_and_serial() {
-    // `#2` -> the `2` is a card-number (generic `term:2`), NOT a year/grade. A bare `2002` is a year,
+fn marked_number_and_serial() {
+    // `#2` -> the `2` is an identifier number (generic `term:2`), not a year. A bare `2002` is a year,
     // so the `#2` query must NOT reach a `2002` title.
     check(
         def_norm,
         def_vocab,
-        "mantle #2",
+        "widget #2",
         &[
-            ("mantle #2", true),
-            ("mantle 2002", false),
-            ("mantle", false),
+            ("widget #2", true),
+            ("widget 2002", false),
+            ("widget", false),
         ],
     );
     // `/1999` is a serial (generic `term:1999`), distinct from the bare year `year:1999`.
     check(
         def_norm,
         def_vocab,
-        "card /1999",
-        &[("card /1999", true), ("card 1999", false)],
+        "widget /1999",
+        &[("widget /1999", true), ("widget 1999", false)],
     );
-    // A marker token never becomes a feature: a plain `card` query still matches a `card # 2` title.
-    check(def_norm, def_vocab, "card", &[("card # 2", true)]);
+    // A marker token never becomes a feature.
+    check(def_norm, def_vocab, "widget", &[("widget # 2", true)]);
 }
 
 #[test]
-fn psa10_fusion_default_vs_grader_vocab() {
-    // DEFAULT vocab: no graders, so `psa10` is one generic token and does NOT cross-match `psa 10`.
+fn caller_defined_number_context() {
+    // A number immediately after a declared context token remains generic.
     check(
-        def_norm,
-        def_vocab,
-        "psa10",
-        &[("psa10", true), ("psa 10", false)],
-    );
-    // GRADER vocab: `psa10` fuses to grader:psa + grade:10 + grader_grade:psa10, and so does
-    // `psa 10` (pending grader grades the next number) — so they DO cross-match.
-    check(
-        grader_norm,
-        grader_vocab,
-        "psa10",
-        &[("psa10", true), ("psa 10", true)],
-    );
-    // Negation applies to the complete analyzed bare-term predicate. Seeing
-    // only `grader:psa` is not enough to satisfy the `psa10` exclusion.
-    check(
-        grader_norm,
-        grader_vocab,
-        "card -psa10",
-        &[
-            ("card psa", true),
-            ("card psa 9", true),
-            ("card psa10", false),
-            ("card psa 10", false),
-        ],
-    );
-}
-
-#[test]
-fn grader_aging_window() {
-    // The pending grader survives <=3 intervening tokens, then ages out (`> 3`). `psa <=3 toks> 10`
-    // grades (matches the `psa 10` query); `psa <4 toks> 10` does not (the `10` falls back to
-    // `term:10`, so grade:10 / grader_grade:psa10 are absent).
-    check(
-        grader_norm,
-        grader_vocab,
-        "psa 10",
-        &[
-            ("psa a b c 10", true),    // 3 fillers: still in window
-            ("psa a b c d 10", false), // 4 fillers: aged out -> generic 10
-        ],
-    );
-}
-
-#[test]
-fn number_context_pop() {
-    // A number immediately after `pop` is demoted to a generic term, never typed as a year. So a
-    // `pop 1995` query (term:1995) does NOT match a `card 1995` title (year:1995), and vice-versa.
-    check(
-        def_norm,
-        def_vocab,
-        "pop 1995",
-        &[("pop 1995", true), ("card 1995", false)],
+        context_norm,
+        context_vocab,
+        "model 1995",
+        &[("model 1995", true), ("widget 1995", false)],
     );
     check(
-        def_norm,
-        def_vocab,
-        "1995 topps",
-        &[("1995 topps", true), ("pop 1995 topps", false)],
+        context_norm,
+        context_vocab,
+        "1995 widget",
+        &[("1995 widget", true), ("model 1995 widget", false)],
     );
 }
 
@@ -256,13 +198,13 @@ fn diacritic_fold() {
 }
 
 #[test]
-fn half_grade_stays_one_token() {
+fn decimal_stays_one_token() {
     // `.` is Keep, so `9.5` is a single token (not split into `9` and `5`).
     check(
         def_norm,
         def_vocab,
         "9.5",
-        &[("card 9.5", true), ("card 9 5", false)],
+        &[("widget 9.5", true), ("widget 9 5", false)],
     );
 }
 

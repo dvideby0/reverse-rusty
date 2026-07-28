@@ -121,72 +121,6 @@ fn punctuation_folding_is_shared_by_phrase_queries_and_titles() {
 }
 
 #[test]
-fn fused_grader_features_are_composite_phrase_edges_not_alternatives() {
-    let mut builder = Normalizer::builder();
-    builder.add_grader("psa");
-    builder.add_grader("bgs");
-    let queries = vec![
-        (1, "\"psa10\"".to_string()),
-        (2, "\"psa 10\"".to_string()),
-        (3, "\"psa\"".to_string()),
-    ];
-    let mut engine = Engine::new(builder.build().expect("normalizer"));
-    engine.build_from_queries(&queries);
-    let reference = RefMatcher::build(
-        &queries,
-        RefVocab::default_vocab().grader("psa").grader("bgs"),
-    );
-
-    for (title, expected) in [
-        ("psa10", vec![1, 2, 3]),
-        ("psa 10", vec![1, 2, 3]),
-        ("psa 9", vec![3]),
-        ("bgs 10", vec![]),
-    ] {
-        assert_eq!(matched(&engine, title), expected, "engine: {title}");
-        assert_eq!(
-            reference.matches(title),
-            expected.into_iter().collect(),
-            "independent reference: {title}"
-        );
-    }
-}
-
-#[test]
-fn grader_composites_do_not_skip_quoted_interior_tokens() {
-    let mut builder = Normalizer::builder();
-    builder.add_grader("psa");
-    let queries = vec![
-        (1, "\"psa foo 10\"".to_string()),
-        (2, "\"psa gem mint 10\"".to_string()),
-        (3, "item -\"psa foo 10\"".to_string()),
-        (4, "\"psa 10\"".to_string()),
-    ];
-    let mut engine = Engine::new(builder.build().expect("normalizer"));
-    engine.build_from_queries(&queries);
-    let reference = RefMatcher::build(&queries, RefVocab::default_vocab().grader("psa"));
-
-    for (title, expected) in [
-        ("psa foo 10", vec![1]),
-        ("psa bar 10", vec![]),
-        ("psa 10", vec![4]),
-        ("psa10", vec![4]),
-        ("psa gem mint 10", vec![2]),
-        ("psa zip zap 10", vec![]),
-        ("item psa foo 10", vec![1]),
-        ("item psa bar 10", vec![3]),
-        ("item psa 10", vec![3, 4]),
-    ] {
-        assert_eq!(matched(&engine, title), expected, "engine: {title}");
-        assert_eq!(
-            reference.matches(title),
-            expected.into_iter().collect(),
-            "independent reference: {title}"
-        );
-    }
-}
-
-#[test]
 fn phrase_rows_force_batch_exactness_instead_of_entering_the_flat_kernel() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
     engine.build_from_queries(&[
@@ -384,25 +318,24 @@ fn repeated_phrase_labels_do_not_hide_bare_rows_at_the_hot_boundary() {
 }
 
 #[test]
-fn positive_phrase_graph_includes_stateful_raw_token_paths() {
+fn positive_phrase_graph_includes_raw_token_paths() {
     let mut builder = Normalizer::builder();
-    builder.add_grader("psa");
-    builder.add_phrase_alias(&["psa", "x"], "term:px", FeatureKind::Generic);
-    let queries = vec![(1, "\"psa x 10\"".to_string())];
+    builder.add_phrase_alias(&["alpha", "x"], "term:alpha_x", FeatureKind::Generic);
+    let queries = vec![(1, "\"alpha x 10\"".to_string())];
     let mut engine = Engine::new(builder.build().expect("normalizer"));
     engine.build_from_queries(&queries);
 
-    assert_eq!(matched_with_broad(&engine, "psa x 10", false), vec![1]);
+    assert_eq!(matched_with_broad(&engine, "alpha x 10", false), vec![1]);
 
     let reference = RefMatcher::build(
         &queries,
-        RefVocab::default_vocab().grader("psa").phrase(
-            "psa x",
-            "term:px",
+        RefVocab::default_vocab().phrase(
+            "alpha x",
+            "term:alpha_x",
             reverse_rusty_ref_matcher::vocab::PhraseMode::Alias,
         ),
     );
-    assert_eq!(reference.matches("psa x 10"), [1].into_iter().collect());
+    assert_eq!(reference.matches("alpha x 10"), [1].into_iter().collect());
 }
 
 #[test]
@@ -509,83 +442,15 @@ fn quoted_phrase_whitespace_is_normalized_without_aliases() {
 }
 
 #[test]
-fn graph_only_probe_labels_do_not_widen_bare_term_semantics() {
+fn vocabulary_canonical_labels_do_not_widen_bare_term_semantics() {
     let mut builder = Normalizer::builder();
-    builder.add_grade_word("gem");
-    builder.add_synonym("stone", "term:gem", FeatureKind::Generic);
+    builder.add_synonym("stone", "entity:mineral", FeatureKind::Entity);
     let mut engine = Engine::new(builder.build().expect("normalizer"));
     engine.build_from_queries(&[(1, "stone".to_string()), (2, "\"red shoe\"".to_string())]);
 
     assert!(
-        matched(&engine, "gem").is_empty(),
+        matched(&engine, "mineral").is_empty(),
         "graph-only proxy labels must not widen ordinary rows or unrelated broad/hot probes"
-    );
-}
-
-#[test]
-fn repeated_graders_do_not_create_nonadjacent_phrase_shortcuts() {
-    let mut builder = Normalizer::builder();
-    builder.add_grader("psa");
-    builder.add_phrase_alias(&["a", "x"], "term:a_x", FeatureKind::Generic);
-    builder.add_phrase(&["x", "psa"], "term:x_psa", FeatureKind::Generic);
-    let queries = vec![(1, "\"foo psa10 bar\"".to_string())];
-    let mut engine = Engine::new(builder.build().expect("normalizer"));
-    engine.build_from_queries(&queries);
-    let title = "foo psa a x psa 10 bar";
-
-    assert!(
-        matched_with_broad(&engine, title, false).is_empty(),
-        "alternate analyzer paths must not let a fused quoted grade skip title positions"
-    );
-
-    let reference = RefMatcher::build(
-        &queries,
-        RefVocab::default_vocab()
-            .grader("psa")
-            .phrase(
-                "a x",
-                "term:a_x",
-                reverse_rusty_ref_matcher::vocab::PhraseMode::Alias,
-            )
-            .phrase(
-                "x psa",
-                "term:x_psa",
-                reverse_rusty_ref_matcher::vocab::PhraseMode::Collapse,
-            ),
-    );
-    assert!(reference.matches(title).is_empty());
-}
-
-#[test]
-fn positioned_state_cap_fails_open_only_for_positive_graphs() {
-    let mut builder = Normalizer::builder();
-    builder.add_grader("psa");
-    // Activates the force-additive positive graph where alternate grader starts
-    // are retained; the alias itself need not occur in this adversarial title.
-    builder.add_phrase_alias(
-        &["unused", "alias"],
-        "term:unused_alias",
-        FeatureKind::Generic,
-    );
-    let mut engine = Engine::new(builder.build().expect("normalizer"));
-    engine.build_from_queries(&[
-        (1, "\"red shoe\"".to_string()),
-        (2, "red -\"shoe boot\"".to_string()),
-    ]);
-
-    let graders = std::iter::repeat_n("psa", 65).collect::<Vec<_>>().join(" ");
-    let incomplete_positive = format!("red {graders} boot");
-    assert_eq!(
-        matched_with_broad(&engine, &incomplete_positive, true),
-        vec![1, 2],
-        "bounded positive analysis must over-match rather than drop a candidate"
-    );
-
-    let forbidden_still_exact = format!("red {graders} shoe boot");
-    assert_eq!(
-        matched_with_broad(&engine, &forbidden_still_exact, true),
-        vec![1],
-        "positive incompleteness must not disable the complete canonical forbidden graph"
     );
 }
 

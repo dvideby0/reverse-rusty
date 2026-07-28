@@ -4,7 +4,7 @@
 //! (tests/oracle/) runs THIS normalizer on both its engine and its brute-force
 //! ground truth, and only ever under the EMPTY `default_vocab` — so a
 //! normalization-model bug is invisible there, and the entire vocab-driven path
-//! (phrases/synonyms/graders) is never exercised at all. These pins close that
+//! (phrases/synonyms) is never exercised at all. These pins close that
 //! gap with expectations a code bug cannot infect. See docs/DECISIONS.md ADR-050.
 use super::*;
 use crate::dict::Dict;
@@ -25,26 +25,20 @@ fn s(items: &[&str]) -> Vec<String> {
     items.iter().map(ToString::to_string).collect()
 }
 
-/// The spec's worked-example vocabulary (docs/design/normalization.md §1), built
-/// explicitly so the expected canonical names are themselves part of the contract.
-fn spec_vocab() -> Normalizer {
+/// A domain-neutral sample vocabulary, built explicitly so the expected canonical
+/// names are themselves part of the contract.
+fn sample_vocab() -> Normalizer {
     NormalizerBuilder::new()
-        .phrase(&["upper", "deck"], "brand:upper_deck", FeatureKind::Brand)
+        .phrase(&["acme", "labs"], "brand:acme_labs", FeatureKind::Brand)
         .phrase(
-            &["michael", "jordan"],
-            "player:michael_jordan",
-            FeatureKind::Player,
+            &["wireless", "mouse"],
+            "entity:wireless_mouse",
+            FeatureKind::Entity,
         )
-        .synonym("ud", "brand:upper_deck", FeatureKind::Brand)
-        .synonym("topps", "brand:topps", FeatureKind::Brand)
-        .synonym("sp", "card_term:sp", FeatureKind::Category)
-        .grader("psa")
-        .grader("bgs")
-        .grader("sgc")
-        .grade_word("gem")
-        .grade_word("mint")
+        .synonym("acme", "brand:acme_labs", FeatureKind::Brand)
+        .synonym("refurb", "category:refurbished", FeatureKind::Category)
         .build()
-        .expect("spec vocab automaton")
+        .expect("sample vocab automaton")
 }
 
 // ---- vocab-independent pipeline (the empty default_vocab still does this) ----
@@ -61,12 +55,12 @@ fn diacritics_fold_to_ascii() {
 #[test]
 fn number_disambiguation_matrix() {
     let n = Normalizer::default_vocab().unwrap();
-    // normalization.md §4 hardening table: markers keep numbers from becoming grades.
-    assert_eq!(names(&n, "#2 bulls"), s(&["term:2", "term:bulls"])); // card number
+    // Structural markers keep identifier numbers generic.
+    assert_eq!(names(&n, "#2 widget"), s(&["term:2", "term:widget"]));
     assert_eq!(names(&n, "/5"), s(&["term:5"])); // serial
     assert_eq!(names(&n, "3/10"), s(&["term:10", "term:3"])); // serial halves
     assert_eq!(names(&n, "1994"), s(&["year:1994"])); // year
-    assert_eq!(names(&n, "pop 1"), s(&["term:1", "term:pop"])); // population
+    assert_eq!(names(&n, "count 1"), s(&["term:1", "term:count"]));
 }
 
 #[test]
@@ -78,76 +72,44 @@ fn generic_fallback_term() {
 // ---- number-context words (ADR-069) ----
 
 #[test]
-fn number_context_default_demotes_pop_adjacent_year() {
-    // The historical hard-coded rule, pinned (ADR-064 item 3's "today's behavior"):
-    // a 4-digit year immediately after `pop` is a generic term, not a year — number
-    // typing is position-SENSITIVE by default.
+fn number_context_is_empty_by_default() {
     let n = Normalizer::default_vocab().unwrap();
-    assert_eq!(names(&n, "pop 1995"), s(&["term:1995", "term:pop"]));
-    assert_eq!(names(&n, "1995 pop"), s(&["term:pop", "year:1995"]));
+    assert_eq!(names(&n, "model 1995"), s(&["term:model", "year:1995"]));
+    assert_eq!(names(&n, "1995 model"), s(&["term:model", "year:1995"]));
 }
 
 #[test]
 fn number_context_empty_list_is_position_insensitive() {
-    // Parity mode (ADR-069): an EMPTY list disables the demotion, so a 4-digit year
-    // types as `year:N` in every position — the same feature set either side of `pop`.
+    // An EMPTY list keeps the default position-insensitive behavior.
     let p = NormalizerBuilder::new()
         .number_context_words(&[])
         .build()
         .unwrap();
-    assert_eq!(names(&p, "pop 1995"), s(&["term:pop", "year:1995"]));
-    assert_eq!(names(&p, "1995 pop"), s(&["term:pop", "year:1995"]));
-    // Non-year numbers are untouched (no grader/grade context in this vocab).
-    assert_eq!(names(&p, "pop 7"), s(&["term:7", "term:pop"]));
+    assert_eq!(names(&p, "model 1995"), s(&["term:model", "year:1995"]));
+    assert_eq!(names(&p, "1995 model"), s(&["term:model", "year:1995"]));
+    assert_eq!(names(&p, "model 7"), s(&["term:7", "term:model"]));
     // Marker-driven typing (`#`/`/`) is punctuation-table territory (ADR-058), not this knob.
     assert_eq!(names(&p, "#1995"), s(&["term:1995"]));
 }
 
 #[test]
-fn number_context_is_a_word_list_not_a_pop_flag() {
-    // The rule generalizes (ADR-069): the list REPLACES the default, so `qty` demotes
-    // and `pop` — no longer in the list — does not.
+fn number_context_is_caller_supplied() {
     let q = NormalizerBuilder::new()
-        .number_context_words(&["qty"])
+        .number_context_words(&["model"])
         .build()
         .unwrap();
-    assert_eq!(names(&q, "qty 1995"), s(&["term:1995", "term:qty"]));
-    assert_eq!(names(&q, "pop 1995"), s(&["term:pop", "year:1995"]));
-}
-
-#[test]
-fn number_context_disabled_changes_pop_count_reading_under_graders() {
-    // Characterization (ADR-069): the knob removes `pop`'s number-context role ENTIRELY.
-    // In a graders-on vocabulary that also changes population counts — `psa pop 7` reads
-    // as a psa grade once the rule is off. The parity knob targets the domain-agnostic
-    // parity configuration (no graders); this pins the trade so it stays a visible,
-    // documented consequence rather than a surprise.
-    let n = spec_vocab();
-    assert_eq!(
-        names(&n, "psa pop 7"),
-        s(&["grader:psa", "term:7", "term:pop"]),
-        "default: pop shields the count from the pending grader"
-    );
-    let p = NormalizerBuilder::new()
-        .grader("psa")
-        .number_context_words(&[])
-        .build()
-        .unwrap();
-    assert_eq!(
-        names(&p, "psa pop 7"),
-        s(&["grade:7", "grader:psa", "grader_grade:psa7", "term:pop"]),
-        "knob off: the pending grader grades the count"
-    );
+    assert_eq!(names(&q, "model 1995"), s(&["term:1995", "term:model"]));
+    assert_eq!(names(&q, "series 1995"), s(&["term:series", "year:1995"]));
 }
 
 // ---- vocab-driven pipeline (spec vocab) — never reached by the oracle ----
 
 #[test]
 fn multiword_phrases_collapse_to_one_feature() {
-    let n = spec_vocab();
+    let n = sample_vocab();
     // normalization.md §1/§2: a multiword entity is ONE feature, not its tokens.
-    assert_eq!(names(&n, "michael jordan"), s(&["player:michael_jordan"]));
-    assert_eq!(names(&n, "upper deck"), s(&["brand:upper_deck"]));
+    assert_eq!(names(&n, "wireless mouse"), s(&["entity:wireless_mouse"]));
+    assert_eq!(names(&n, "acme labs"), s(&["brand:acme_labs"]));
 }
 
 #[test]
@@ -158,15 +120,15 @@ fn whitespace_runs_are_not_collapsed_in_canonical_features() {
     // whitespace-run TITLE against an alias is handled recall-safely by the positive-view overlap
     // scan (`tests/oracle/alias.rs::multiword_alias_matches_a_double_space_title`), which never
     // touches these canonical features.
-    let n = spec_vocab();
+    let n = sample_vocab();
     assert_eq!(
-        names(&n, "upper  deck"),
-        s(&["term:deck", "term:upper"]),
+        names(&n, "wireless  mouse"),
+        s(&["term:mouse", "term:wireless"]),
         "double space → components (not collapsed)"
     );
     assert_eq!(
-        names(&n, "upper deck"),
-        s(&["brand:upper_deck"]),
+        names(&n, "wireless mouse"),
+        s(&["entity:wireless_mouse"]),
         "single space → the phrase entity (unchanged)"
     );
 }
@@ -240,56 +202,12 @@ fn boundary_invalid_match_cannot_suppress_a_valid_overlapping_alias() {
 }
 
 #[test]
-fn repeated_graders_stay_deduped_in_the_positive_view() {
-    // ADR-061 (codex R12, P1): the positive-view active-grader set dedupes per canonical grader
-    // (refreshing the age), so repeated grader tokens cannot grow it without bound — a crafted
-    // title of N graders + M numbers would otherwise emit N×M duplicate grades (a quadratic
-    // normalization DoS). The freshest occurrence outlives any older same-name one, so the
-    // parse-union superset is unaffected.
-    let n = NormalizerBuilder::new().grader("psa").build().expect("n");
-    let mut emitted: Vec<String> = Vec::new();
-    let mut lc = String::new();
-    let mut sc = super::NormScratch::new();
-    n.emit(
-        "psa psa psa 10",
-        &mut lc,
-        &mut sc,
-        Side::Title,
-        true,
-        &mut |name, _| {
-            emitted.push(name.to_string());
-        },
-    );
-    assert_eq!(
-        emitted
-            .iter()
-            .filter(|n| n.as_str() == "grader_grade:psa10")
-            .count(),
-        1,
-        "one grade per (distinct grader, number), not one per repeated grader token: {emitted:?}"
-    );
-}
-
-#[test]
 fn synonyms_converge_alternate_surface_forms() {
-    let n = spec_vocab();
-    // normalization.md §2: "ud" and the "upper deck" phrase land on the SAME feature.
-    assert_eq!(names(&n, "ud"), s(&["brand:upper_deck"]));
-    assert_eq!(names(&n, "topps"), s(&["brand:topps"]));
-}
-
-#[test]
-fn grader_path_emits_grader_grade_and_fused_form() {
-    let n = spec_vocab();
-    // normalization.md §1/§2: psa 10 / psa10 -> grader:psa + grade:10 + grader_grade:psa10.
-    let expected = s(&["grade:10", "grader:psa", "grader_grade:psa10"]);
-    assert_eq!(names(&n, "psa 10"), expected);
-    assert_eq!(names(&n, "psa10"), expected, "fused form == spaced form");
-    assert_eq!(
-        names(&n, "psa 9.5"),
-        s(&["grade:9.5", "grader:psa", "grader_grade:psa9.5"]),
-        "half grades are kept"
-    );
+    let n = sample_vocab();
+    // A synonym and its declared phrase land on the same feature.
+    assert_eq!(names(&n, "acme"), s(&["brand:acme_labs"]));
+    assert_eq!(names(&n, "acme labs"), s(&["brand:acme_labs"]));
+    assert_eq!(names(&n, "refurb"), s(&["category:refurbished"]));
 }
 
 // ---- determinism (the §2 invariant; normalize∘normalize isn't typeable, so we
@@ -307,9 +225,9 @@ fn compile_does_not_drift_on_repeat() {
     let n = Normalizer::default_vocab().unwrap();
     let mut dict = Dict::new();
     let mut lc = String::new();
-    let first = n.compile_features("psa 10 michael jordan", &mut dict, &mut lc);
+    let first = n.compile_features("wireless mouse model 10", &mut dict, &mut lc);
     let len_after_first = dict.len();
-    let second = n.compile_features("psa 10 michael jordan", &mut dict, &mut lc);
+    let second = n.compile_features("wireless mouse model 10", &mut dict, &mut lc);
     assert_eq!(first, second, "same text -> same IDs");
     assert_eq!(
         dict.len(),
@@ -373,8 +291,7 @@ fn fold_merges_only_within_a_word_not_across_spaces() {
 
 #[test]
 fn punct_class_keep_default_is_overridable_to_fold() {
-    // `.` defaults to Keep (in place, so half-grades survive); reclassifying it to
-    // Fold deletes it. A pure-letter token keeps clear of the number/grade pipeline.
+    // `.` defaults to Keep; reclassifying it to Fold deletes it.
     let keep = Normalizer::default_vocab().unwrap();
     assert_eq!(names(&keep, "a.b.c"), s(&["term:a.b.c"]));
     let fold = NormalizerBuilder::new()
@@ -389,7 +306,7 @@ fn marker_and_keep_defaults_are_unchanged_by_the_table() {
     // Regression guard: the default table reproduces the historical `#`/`/`/`.`
     // behaviors exactly (the same cases as `number_disambiguation_matrix`).
     let n = Normalizer::default_vocab().unwrap();
-    assert_eq!(names(&n, "#2 bulls"), s(&["term:2", "term:bulls"]));
+    assert_eq!(names(&n, "#2 widget"), s(&["term:2", "term:widget"]));
     assert_eq!(names(&n, "3/10"), s(&["term:10", "term:3"]));
 }
 
@@ -457,22 +374,19 @@ fn alias_phrase_collapses_on_query_overlaps_on_title() {
 /// equal `match_features` — the default path is byte-identical (the no-overhead guarantee).
 #[test]
 fn positive_view_is_always_a_superset_of_negative() {
-    // ADR-061 (codex R8): P(T) ⊇ N(T) always. The force-additive re-emit for P(T) can change a
-    // STATEFUL token read — a `psa` grader un-consumed from a collapsing `psa foo` phrase turns the
-    // trailing `10` from `term:10` (its `N(T)` reading) into `grade:10` — so P(T) must UNION N(T),
-    // never replace it, or the canonical `term:10` would vanish and a query needing it would FN.
+    // P(T) must union the canonical view with every additive/overlapping
+    // entity and raw component; it can never replace N(T).
     let mut b = NormalizerBuilder::new();
-    b.add_phrase(&["psa", "foo"], "term:psa_foo", FeatureKind::Generic); // collapsing
-    b.add_grader("psa");
+    b.add_phrase(&["alpha", "beta"], "term:alpha_beta", FeatureKind::Generic);
     b.add_alias_form("new york"); // ⇒ the dual (P(T)/N(T)) path is active
     let n = b.build().expect("normalizer");
     let mut dict = Dict::new();
     let mut lc = String::new();
-    let _ = n.compile_features("psa foo 10", &mut dict, &mut lc);
+    let _ = n.compile_features("alpha beta 10", &mut dict, &mut lc);
 
     let mut sc = super::NormScratch::new();
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    n.match_features_dual("psa foo 10", &dict, &mut lc, &mut sc, &mut neg, &mut pos);
+    n.match_features_dual("alpha beta 10", &dict, &mut lc, &mut sc, &mut neg, &mut pos);
     let ten = dict.get_or_synthetic("term:10");
     assert!(
         neg.contains(&ten),
@@ -487,74 +401,12 @@ fn positive_view_is_always_a_superset_of_negative() {
     }
 }
 
-/// ADR-061 parse-union refinement: the positive view `P(T)` tracks ALL active graders, so each
-/// number grades with every grader still in window — not just the most-recent pending one. Two
-/// "Goldilocks parse" failure modes, both pinned here (the exhaustive sweep is in
-/// [`super::parse_union_oracle`]): (a) an intervening number EATS the pending grader, and (b) a
-/// second grader OVERWRITES it. In each, a parse that collapses an overlapping phrase reads a
-/// genuine `psa N`, so `P(T)` must carry that grade or a `psa N` query is a false negative. The
-/// grade must also be ABSENT from the canonical `N(T)` (whose leftmost-longest parse binds `psa`
-/// elsewhere), so the forbidden view stays canonical.
-#[test]
-fn positive_view_grades_the_full_parse_union() {
-    // (a) the eat case: `psa 9`/`9 lives` overlap on the gradeable `9`.
-    let mut b = NormalizerBuilder::new();
-    b.add_grader("psa");
-    b.add_phrase(&["psa", "9"], "term:psa_9", FeatureKind::Generic);
-    b.add_phrase(&["9", "lives"], "term:9_lives", FeatureKind::Generic);
-    b.add_alias_form("new york"); // ⇒ the dual (P(T)/N(T)) path is active
-    assert_grades_psa8(&b.build().expect("normalizer"), "psa 9 lives 8");
-
-    // (b) the overwrite case: `psa a`/`a bgs` overlap on `a`; a second grader `bgs` would overwrite
-    // the pending `psa`, but the active-grader set keeps `psa` reaching the trailing `8`.
-    let mut b = NormalizerBuilder::new();
-    b.add_grader("psa");
-    b.add_grader("bgs");
-    b.add_phrase(&["psa", "a"], "term:psa_a", FeatureKind::Generic);
-    b.add_phrase(&["a", "bgs"], "term:a_bgs", FeatureKind::Generic);
-    b.add_alias_form("new york");
-    assert_grades_psa8(&b.build().expect("normalizer"), "psa a bgs 8");
-}
-
-/// `P(T)` of `title` must carry `grade:8`/`grader_grade:psa8` (a `psa 8` query must not FN it),
-/// while `N(T)` (canonical, used for forbidden) must NOT.
-fn assert_grades_psa8(n: &Normalizer, title: &str) {
-    let mut dict = Dict::new();
-    let mut lc = String::new();
-    let _ = n.compile_features("psa 8", &mut dict, &mut lc); // intern the features we probe
-    let psa8 = dict.get_or_synthetic("grader_grade:psa8");
-    let grade8 = dict.get_or_synthetic("grade:8");
-
-    let mut sc = super::NormScratch::new();
-    let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    n.match_features_dual(title, &dict, &mut lc, &mut sc, &mut neg, &mut pos);
-
-    assert!(
-        pos.binary_search(&psa8).is_ok() && pos.binary_search(&grade8).is_ok(),
-        "P(T) of `{title}` must grade the trailing 8 (parse-union): a `psa 8` query must not FN it"
-    );
-    // The psa-8 GRADER-grade is the discriminating feature: it must not be in the canonical N(T)
-    // (the leftmost-longest parse binds psa elsewhere). `grade:8` alone may legitimately be in N(T)
-    // via a *different* grader (e.g. `psa a bgs 8` reads `bgs 8` canonically), so only psa8 is
-    // asserted absent.
-    assert!(
-        neg.binary_search(&psa8).is_err(),
-        "N(T) of `{title}` stays canonical: no psa-8 grader-grade in the forbidden view"
-    );
-    for f in &neg {
-        assert!(
-            pos.binary_search(f).is_ok(),
-            "N(T) ⊆ P(T) still holds for `{title}`"
-        );
-    }
-}
-
 #[test]
 fn dual_view_equals_single_view_without_aliases() {
-    let n = spec_vocab();
+    let n = sample_vocab();
     let mut dict = Dict::new();
     let mut lc = String::new();
-    let title = "1994 upper deck michael jordan psa 10 gem mint";
+    let title = "1994 acme labs wireless mouse model 10";
     // Seed the dict with a mutating compile so ids are dense.
     let _ = n.compile_features(title, &mut dict, &mut lc);
 
