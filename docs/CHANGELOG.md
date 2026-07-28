@@ -97,6 +97,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   admission, independently bounded pre-body unauthenticated requests and body-read deadlines,
   sanitized failures, deadline-checked observations, and whole-route no-store telemetry
   ([ADR-144](decisions/adr-144-health-api-contract.md)).
+- Hardened native `GET`/`HEAD /_metrics` with strict bounded no-store transport, Prometheus text
+  0.0.4 semantics, whole-route telemetry, lock-free standalone snapshots, and fail-loud
+  coordinator collection that runs one complete shard-count pass off async workers and removes
+  stale per-position labels
+  ([ADR-145](decisions/adr-145-metrics-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

@@ -200,7 +200,7 @@ The full method/path matrix is below.
 | `/_cat/stats` | GET | Strict native standalone `metric` / `value` stats table with ES/OS-familiar `format`, `v`, `h`, `help`, and `s` controls; shares bounded collection with `/_stats` (ADR-141) |
 | `/_cat/segments` | GET | Strict native per-segment LSM table with ES/OS-familiar `format`, `v`, `h`, `help`, `s`, and `bytes` controls (ADR-142) |
 | `/_health` | GET/HEAD | Strict native no-store readiness with familiar status waiting and fail-loud green/yellow/red results (ADR-144) |
-| `/_metrics` | GET | Prometheus text exposition format |
+| `/_metrics` | GET/HEAD | Strict native, no-store Prometheus text 0.0.4 scrape; fail-loud coordinator collection and complete per-position replacement (ADR-145) |
 | `/_vocab` | GET | Current vocabulary as JSON |
 | `/_vocab` | PUT | Replace vocabulary |
 | `/_vocab/learn` | POST | Learn synonyms (+ opt-in NPMI phrases, `corpus_phrases=true`) from raw query text |

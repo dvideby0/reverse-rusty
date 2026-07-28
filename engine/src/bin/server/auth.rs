@@ -14,6 +14,7 @@
 //! remembering to list it here.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     body::Body,
@@ -25,6 +26,7 @@ use axum::{
 use tracing::warn;
 
 use crate::dto::ApiError;
+use crate::handlers::finish_metrics_response;
 use crate::state::RequestCtx;
 
 /// Resolved auth configuration held in [`AppState`]. Built once at startup by
@@ -165,6 +167,12 @@ pub(crate) async fn auth_middleware<S: RequestCtx>(
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    // A protected metrics request can terminate at this outer boundary before
+    // the route extractor starts its timer. Retain only a cheap timestamp and
+    // use it if authentication actually rejects the request; successful and
+    // open requests remain exclusively accounted by the route itself.
+    let metrics_started = (request.uri().path() == "/_metrics").then(Instant::now);
+    let metrics_head = request.method() == Method::HEAD;
     let Some(auth) = state.auth() else {
         return next.run(request).await;
     };
@@ -204,6 +212,14 @@ pub(crate) async fn auth_middleware<S: RequestCtx>(
         header::WWW_AUTHENTICATE,
         header::HeaderValue::from_static(challenge),
     );
+    if let Some(started) = metrics_started {
+        response = finish_metrics_response(state.prom(), response, metrics_head);
+        state
+            .prom()
+            .http_request_duration
+            .with_label_values(&["metrics"])
+            .observe(started.elapsed().as_secs_f64());
+    }
     response
 }
 
@@ -212,7 +228,8 @@ mod tests {
     use super::*;
     use crate::metrics::PrometheusMetrics;
     use crate::state::AppState;
-    use axum::routing::{get, post};
+    use axum::extract::DefaultBodyLimit;
+    use axum::routing::{any, get, post};
     use axum::Router;
     use reverse_rusty::segment::Engine;
     use reverse_rusty::Normalizer;
@@ -405,10 +422,16 @@ mod tests {
             .route("/_search", post(|| async { "read" }))
             .route("/_flush", get(|| async { "ok" }).post(|| async { "ok" }))
             .route("/_health", get(|| async { "ok" }))
+            .route(
+                "/_metrics",
+                any(crate::handlers::prometheus_metrics)
+                    .layer(DefaultBodyLimit::max(crate::handlers::METRICS_BODY_LIMIT)),
+            )
             .layer(axum::middleware::from_fn_with_state(
                 Arc::clone(state),
                 auth_middleware,
             ))
+            .with_state(Arc::clone(state))
     }
 
     fn req(method: &str, path: &str, token: Option<&str>) -> Request<Body> {
@@ -570,6 +593,85 @@ mod tests {
         assert_eq!(
             status(&state, req("POST", "/_health", None)).await,
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_metrics_auth_outcomes_keep_the_route_contract() {
+        let auth = AuthConfig::resolve(
+            Some("s3cr3t".into()),
+            Err(std::env::VarError::NotPresent),
+            true,
+        )
+        .expect("valid");
+        let state = test_state(auth);
+
+        let response = router(&state)
+            .oneshot(req("GET", "/_metrics", None))
+            .await
+            .expect("missing-token response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .expect("cache control"),
+            "no-store"
+        );
+
+        let response = router(&state)
+            .oneshot(req("HEAD", "/_metrics", Some("wrong")))
+            .await
+            .expect("invalid-token response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .expect("cache control"),
+            "no-store"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("HEAD body");
+        assert!(body.is_empty());
+
+        let response = router(&state)
+            .oneshot(req("GET", "/_metrics", Some("s3cr3t")))
+            .await
+            .expect("authorized response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .expect("cache control"),
+            "no-store"
+        );
+
+        assert_eq!(
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["metrics", "401"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["metrics", "200"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            state
+                .prom
+                .http_request_duration
+                .with_label_values(&["metrics"])
+                .get_sample_count(),
+            3
         );
     }
 }

@@ -121,61 +121,71 @@ mod registry;
 impl PrometheusMetrics {
     /// Update gauge metrics from an EngineMetrics snapshot.
     pub(crate) fn refresh_gauges(&self, m: &reverse_rusty::events::EngineMetrics) {
-        self.total_queries.set(m.total_queries as i64);
-        self.base_segments.set(m.base_segments as i64);
-        self.memtable_entries.set(m.memtable_entries as i64);
-        self.dict_features.set(m.dict_features as i64);
+        self.total_queries.set(usize_gauge(m.total_queries));
+        self.base_segments.set(usize_gauge(m.base_segments));
+        self.memtable_entries.set(usize_gauge(m.memtable_entries));
+        self.dict_features.set(usize_gauge(m.dict_features));
         self.memory_bytes
             .with_label_values(&["exact"])
-            .set(m.exact_bytes as i64);
+            .set(usize_gauge(m.exact_bytes));
         self.memory_bytes
             .with_label_values(&["index"])
-            .set(m.index_bytes as i64);
+            .set(usize_gauge(m.index_bytes));
         self.memory_bytes
             .with_label_values(&["filter"])
-            .set(m.filter_bytes as i64);
-        self.wal_size_bytes.set(m.wal_size_bytes as i64);
-        self.wal_pending_entries.set(m.wal_pending_entries as i64);
-        self.would_be_hot.set(m.would_be_hot as i64);
-        self.dedup_bodies_total.set(m.bodies_total as i64);
-        self.dedup_joined.set(m.dup_joined as i64);
+            .set(usize_gauge(m.filter_bytes));
+        self.wal_size_bytes.set(u64_gauge(m.wal_size_bytes));
+        self.wal_pending_entries
+            .set(u64_gauge(m.wal_pending_entries));
+        self.would_be_hot.set(u64_gauge(m.would_be_hot));
+        self.dedup_bodies_total.set(u64_gauge(m.bodies_total));
+        self.dedup_joined.set(u64_gauge(m.dup_joined));
         self.dedup_distinct_bodies_est
-            .set(m.distinct_bodies_est as i64);
+            .set(u64_gauge(m.distinct_bodies_est));
     }
 
-    /// Refresh the cluster gRPC transport gauges (ADR-085) from a coordinator snapshot.
-    /// Called on each cluster-mode `/_metrics` scrape; a single-node server never calls it,
-    /// and an in-process cluster's snapshot is all-zero, so the series simply read 0.
-    pub(crate) fn observe_transport(
+    /// Atomically refresh the coordinator gauges while the metrics handler
+    /// retains shared stats admission. A failed collection never reaches here.
+    pub(crate) fn refresh_cluster_gauges(
         &self,
-        snap: &reverse_rusty::cluster::TransportMetricsSnapshot,
+        total_queries: usize,
+        shard_queries: &[usize],
+        transport: &reverse_rusty::cluster::TransportMetricsSnapshot,
     ) {
+        self.total_queries.set(usize_gauge(total_queries));
+        self.observe_shard_queries(shard_queries);
+        self.observe_transport(transport);
+    }
+
+    /// Refresh the cluster gRPC transport gauges (ADR-085).
+    fn observe_transport(&self, snap: &reverse_rusty::cluster::TransportMetricsSnapshot) {
         for m in &snap.methods {
             self.transport_rpc_calls
                 .with_label_values(&[m.method])
-                .set(m.calls as i64);
+                .set(u64_gauge(m.calls));
             self.transport_rpc_errors
                 .with_label_values(&[m.method])
-                .set(m.errors as i64);
+                .set(u64_gauge(m.errors));
             self.transport_rpc_timeouts
                 .with_label_values(&[m.method])
-                .set(m.timeouts as i64);
+                .set(u64_gauge(m.timeouts));
             self.transport_rpc_retries
                 .with_label_values(&[m.method])
-                .set(m.retries as i64);
+                .set(u64_gauge(m.retries));
             self.transport_rpc_latency_seconds
                 .with_label_values(&[m.method])
                 .set(m.latency_nanos_total as f64 / 1e9);
         }
     }
 
-    /// Refresh the per-shard stored-query gauge (ADR-091) from `ClusterEngine::shard_query_counts`.
-    /// Called on each cluster-mode `/_metrics` scrape; `counts[i]` is shard `i`'s query count.
-    pub(crate) fn observe_shard_queries(&self, counts: &[usize]) {
+    /// Replace the per-position query series so a shrink cannot leave removed
+    /// label values in later scrapes.
+    fn observe_shard_queries(&self, counts: &[usize]) {
+        self.cluster_shard_queries.reset();
         for (shard, count) in counts.iter().enumerate() {
             self.cluster_shard_queries
                 .with_label_values(&[&shard.to_string()])
-                .set(*count as i64);
+                .set(usize_gauge(*count));
         }
     }
 
@@ -230,4 +240,12 @@ impl PrometheusMetrics {
             }
         }
     }
+}
+
+fn usize_gauge(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn u64_gauge(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }

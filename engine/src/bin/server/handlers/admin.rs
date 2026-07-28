@@ -6,6 +6,7 @@ pub(crate) mod cat_table;
 mod compact;
 mod flush;
 mod health;
+mod metrics;
 mod segments;
 mod stats;
 
@@ -18,6 +19,10 @@ pub(crate) use health::{
     finish_health_response, health, health_rejection, validate_health_request, wait_delay,
     HealthParams, HealthStatus, HealthTransport, HEALTH_BODY_LIMIT,
 };
+pub(crate) use metrics::{
+    encode_metrics, finish_metrics_response, metrics_rejection, prometheus_metrics,
+    MetricsTransport, METRICS_BODY_LIMIT,
+};
 pub(crate) use segments::{
     cat_segments, finish_cat_segments_response, validate_cat_segments_method,
     validate_cat_segments_request, CatSegmentsParams, CAT_SEGMENTS_BODY_LIMIT,
@@ -27,15 +32,10 @@ pub(crate) use stats::{
     validate_stats_request, StatsShards, STATS_BODY_LIMIT,
 };
 
-use std::sync::Arc;
-
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use prometheus::{Encoder, TextEncoder};
+use axum::{response::IntoResponse, Json};
 use serde::Serialize;
-use tracing::error;
 
 use crate::dto::ApiVersion;
-use crate::state::AppState;
 
 // -- GET /
 #[derive(Serialize)]
@@ -61,37 +61,6 @@ pub(crate) async fn api_root() -> impl IntoResponse {
     })
 }
 
-/// GET /_metrics — Prometheus text exposition format.
-///
-/// On each scrape, refreshes gauge metrics from an EngineMetrics snapshot,
-/// then encodes all registered metrics.
-pub(crate) async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Refresh gauges from current snapshot state.
-    {
-        let snap = state.snapshot.load();
-        let m = snap.metrics();
-        state.prom.refresh_gauges(&m);
-    }
-
-    let encoder = TextEncoder::new();
-    let metric_families = state.prom.registry.gather();
-    let mut buffer = Vec::new();
-    if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
-        error!(error = %e, "failed to encode prometheus metrics");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [("content-type", "text/plain; charset=utf-8")],
-            Vec::new(),
-        );
-    }
-
-    (
-        StatusCode::OK,
-        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
-        buffer,
-    )
-}
-
 #[cfg(test)]
 mod root_tests;
 
@@ -103,3 +72,6 @@ mod compact_tests;
 
 #[cfg(test)]
 mod health_tests;
+
+#[cfg(test)]
+mod metrics_tests;

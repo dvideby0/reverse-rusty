@@ -254,8 +254,12 @@ stock-vocabulary-only; custom vocabulary requires an in-process blue/green deplo
 
 ## 9. Monitoring & observability
 
-`GET /_metrics` on the **coordinator** exposes Prometheus text with the `reverse_rusty_` prefix,
-including a per-shard `reverse_rusty_cluster_shard_queries{shard="N"}` gauge. Each `shardserver` /
+`GET`/`HEAD /_metrics` on the **coordinator** exposes Prometheus text with the
+`reverse_rusty_` prefix, including a per-shard
+`reverse_rusty_cluster_shard_queries{shard="N"}` gauge. Collection shares bounded stats admission,
+runs required shard probes off async workers, and returns 503 rather than a successful partial or
+stale scrape if any required position fails. Successful collection replaces the complete
+per-position label set, so removed positions disappear after a shrink (ADR-145). Each `shardserver` /
 `controlserver` ALSO exposes its own `/_metrics` on the plaintext `--metrics-addr` port (ADR-091) —
 the reference Compose topology binds shards on `9100` and control nodes on `9101` on the `rrmesh` network
 (not published to the host; scrape from a Prometheus on that network). Shard nodes report
