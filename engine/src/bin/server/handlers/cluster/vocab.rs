@@ -19,18 +19,36 @@ use tracing::{info, instrument};
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::vocab::{AliasRegistry, AliasSummary, Vocab};
 
-use crate::handlers::vocab::{build_corpus_config, default_min_count, LearnApplyQuery};
+use crate::handlers::vocab::{
+    acquire_vocab_read_permit, build_corpus_config, default_min_count, finish_vocab_worker,
+    serialize_vocab, LearnApplyQuery, VocabReadTransport,
+};
 use crate::state::ClusterAppState;
 
 use super::{not_in_cluster_mode, shard_error_response};
 
-/// GET /_vocab — the installed vocabulary (empty default when the cluster was
-/// built directly from a normalizer).
+/// GET/HEAD /_vocab — clone the installed vocabulary under the cluster read
+/// guard, then release the guard before serializing it. The whole operation runs
+/// in the shared bounded blocking slot rather than on an async request worker.
 pub(crate) async fn cluster_get_vocab(
     State(state): State<Arc<ClusterAppState>>,
-) -> impl IntoResponse {
-    let cluster = state.cluster.read();
-    Json(cluster.vocab().cloned().unwrap_or_default())
+    transport: VocabReadTransport,
+) -> Response {
+    let _duration = transport.into_timer();
+    let permit = match acquire_vocab_read_permit(&state.stats_permits, &state.prom).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
+    let worker_state = Arc::clone(&state);
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let vocab = {
+            let cluster = worker_state.cluster.read();
+            cluster.vocab().cloned()
+        };
+        serialize_vocab(vocab.as_ref())
+    });
+    finish_vocab_worker(&state.prom, worker.await)
 }
 
 #[derive(Serialize)]

@@ -17,6 +17,12 @@ use reverse_rusty::config::EngineConfig;
 use crate::dto::ApiError;
 use crate::state::AppState;
 
+mod read;
+pub(crate) use read::{
+    acquire_vocab_read_permit, finish_vocab_worker, get_vocab, serialize_vocab,
+    vocab_method_not_allowed, VocabReadTransport, VOCAB_READ_BODY_LIMIT,
+};
+
 // -- PUT /_vocab
 #[derive(Serialize)]
 struct PutVocabResponse {
@@ -24,16 +30,6 @@ struct PutVocabResponse {
     /// Number of stored queries recompiled under the new normalizer so the change
     /// takes effect immediately with zero false negatives (0 if none were affected).
     recompiled: usize,
-}
-
-/// GET /_vocab — return the current vocabulary as JSON. Reads the lock-free
-/// `ArcSwap` snapshot (ADR-016) rather than locking the engine, so vocab reads
-/// never block behind a writer — consistent with `/_search` and the other read
-/// endpoints.
-pub(crate) async fn get_vocab(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let snap = state.snapshot.load();
-    let vocab = snap.vocab().cloned().unwrap_or_default();
-    Json(vocab)
 }
 
 /// PUT /_vocab — replace the vocabulary, then recompile every stored query
@@ -551,3 +547,6 @@ mod settings_tests {
         assert!(err.iter().any(|e| e.contains("data_dir")), "{err:?}");
     }
 }
+
+#[cfg(test)]
+mod read_tests;

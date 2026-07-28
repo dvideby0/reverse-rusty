@@ -35,8 +35,9 @@ pub(crate) const MAX_CONCURRENT_BACKUPS: usize = 1;
 /// The health route stays open even when read auth is enabled. Bound all of
 /// its requests independently before their bodies are buffered.
 pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
-/// A stats snapshot scans class columns and collects/sorts posting lengths, so
-/// only one such corpus-wide blocking job is admitted per server.
+/// Expensive administrative reads share one blocking-work slot per server.
+/// Stats scans dominate the cost; vocabulary reads also use it so a large JSON
+/// snapshot cannot fan out clone/serialization work.
 pub(crate) const MAX_CONCURRENT_STATS: usize = 1;
 
 pub(crate) struct AppState {
@@ -51,8 +52,8 @@ pub(crate) struct AppState {
     pub(crate) backup_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Per-server admission for the intentionally unauthenticated health route.
     pub(crate) health_permits: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Bounds the corpus-wide `GET /_stats` scan independently from search and
-    /// backup work. The permit is owned by the blocking worker.
+    /// Bounds corpus-wide stats and potentially large vocabulary snapshot work
+    /// independently from search and backup. The permit is owned by the worker.
     pub(crate) stats_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) snapshot: ArcSwap<EngineSnapshot>,
     pub(crate) pool: rayon::ThreadPool,

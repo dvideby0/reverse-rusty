@@ -147,7 +147,15 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 crate::handlers::METRICS_BODY_LIMIT,
             )),
         )
-        .route("/_vocab", get(cluster_get_vocab).put(cluster_put_vocab))
+        .route(
+            "/_vocab",
+            get(cluster_get_vocab)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::handlers::VOCAB_READ_BODY_LIMIT,
+                ))
+                .put(cluster_put_vocab)
+                .fallback(crate::handlers::vocab_method_not_allowed::<ClusterAppState>),
+        )
         .route("/_vocab/learn", post(cluster_learn_vocab))
         .route(
             "/_vocab/learn_and_apply",
@@ -229,3 +237,4 @@ mod metrics;
 mod pit;
 mod ranked;
 mod v2;
+mod vocab;

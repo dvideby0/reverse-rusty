@@ -17,7 +17,7 @@
 //!   GET  /_cat/segments      Per-segment LSM detail (text table; ?format=json)
 //!   GET/HEAD /_health        Native readiness
 //!   GET/HEAD /_metrics       Prometheus text exposition format
-//!   GET  /_vocab             Current vocabulary as JSON
+//!   GET/HEAD /_vocab         Current vocabulary as JSON / bodyless metadata
 //!   PUT  /_vocab             Replace vocabulary (body: Vocab JSON)
 //!   POST /_vocab/learn       Learn synonyms from raw query text (returns them)
 //!   POST /_vocab/learn_and_apply  Learn synonyms from stored queries + apply (?min_count=N)
@@ -82,9 +82,9 @@ use handlers::{
     get_job_stream, get_settings, get_vocab, health, import_aliases, learn_and_apply_aliases,
     learn_and_apply_vocab, learn_vocab, mpercolate_route, open_pit_route, prometheus_metrics,
     put_doc, put_settings, put_vocab, reset_alias_feedback, search_route, stats,
-    v2_mpercolate_route, v2_search_route, validate_and_apply_feedback, BACKUP_BODY_LIMIT,
-    CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT,
-    PIT_BODY_LIMIT, STATS_BODY_LIMIT,
+    v2_mpercolate_route, v2_search_route, validate_and_apply_feedback, vocab_method_not_allowed,
+    BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT,
+    METRICS_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -479,7 +479,13 @@ async fn main() {
             "/_metrics",
             any(prometheus_metrics).layer(DefaultBodyLimit::max(METRICS_BODY_LIMIT)),
         )
-        .route("/_vocab", get(get_vocab).put(put_vocab))
+        .route(
+            "/_vocab",
+            get(get_vocab)
+                .layer(DefaultBodyLimit::max(VOCAB_READ_BODY_LIMIT))
+                .put(put_vocab)
+                .fallback(vocab_method_not_allowed::<AppState>),
+        )
         .route("/_vocab/learn", post(learn_vocab))
         .route("/_vocab/learn_and_apply", post(learn_and_apply_vocab))
         .route("/_vocab/aliases", get(get_aliases))
@@ -519,7 +525,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, GET/HEAD/PUT/DELETE /_doc/{id}, GET/POST /_search, POST /_mpercolate, POST /_bulk, GET/POST /_flush, POST /_compact, POST /_forcemerge, POST /_backup, GET /_stats, GET /_cat/stats, GET/HEAD /_health, GET/HEAD /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply, POST /_vocab/aliases/discover, POST /_vocab/aliases/discover_and_record, GET /_vocab/aliases/feedback, POST /_vocab/aliases/feedback/reset, POST /_vocab/aliases/validate_and_apply",
+        endpoints = "GET /, GET/HEAD/PUT/DELETE /_doc/{id}, GET/POST /_search, POST /_mpercolate, POST /_bulk, GET/POST /_flush, POST /_compact, POST /_forcemerge, POST /_backup, GET /_stats, GET /_cat/stats, GET/HEAD /_health, GET/HEAD /_metrics, GET/HEAD/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply, POST /_vocab/aliases/discover, POST /_vocab/aliases/discover_and_record, GET /_vocab/aliases/feedback, POST /_vocab/aliases/feedback/reset, POST /_vocab/aliases/validate_and_apply",
         "server listening"
     );
 

@@ -22,6 +22,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [143](../adr-143-cat-shards-api-contract.md) | CAT shards API contract | Makes logical shard counts and committed assignments strict, bounded, and fail-loud. | Accepted |
 | [144](../adr-144-health-api-contract.md) | Health REST API contract | Makes native readiness strict, waitable, bounded, and fail-loud. | Accepted |
 | [145](../adr-145-metrics-api-contract.md) | Metrics REST API contract | Makes Prometheus scrapes strict and coordinator collection complete, bounded, and fail-loud. | Accepted |
+| [146](../adr-146-get-vocab-api-contract.md) | Vocabulary read REST API contract | Makes the native vocabulary document strict, round-trippable, cache-safe, and bounded off async workers. | Accepted |
 
 ---
 

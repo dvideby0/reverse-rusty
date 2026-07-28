@@ -102,6 +102,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   coordinator collection that runs one complete shard-count pass off async workers and removes
   stale per-position labels
   ([ADR-145](decisions/adr-145-metrics-api-contract.md)).
+- Hardened native `GET`/`HEAD /_vocab` with strict bounded no-store transport, complete
+  round-trippable JSON, GET-only request limits, whole-route telemetry, shared blocking-work
+  admission, lock-free standalone snapshot capture, and brief off-runtime coordinator locking
+  ([ADR-146](decisions/adr-146-get-vocab-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
