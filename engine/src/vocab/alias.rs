@@ -30,6 +30,14 @@ mod tests;
 
 pub use classify::AliasKind;
 pub use feedback::{AliasFeedback, FeedbackEvidence, PairFeedback};
+pub use solr::{AliasImportError, MAX_ALIAS_FORMS_PER_RULE, MAX_ALIAS_IMPORT_RULES};
+
+/// Validate strict Solr/Lucene synonym text without changing a registry.
+///
+/// Returns the number of non-comment rules on success.
+pub fn validate_solr_aliases(text: &str) -> Result<usize, AliasImportError> {
+    solr::parse_solr_synonyms(text).map(|groups| groups.len())
+}
 
 /// Where an alias group came from — drives how aggressively it auto-activates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,7 +73,7 @@ pub enum AliasStatus {
 }
 
 /// One governed alias group.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AliasEntry {
     /// The surface forms treated as the same entity (raw — resolved through the normalizer
     /// when applied). Sorted + deduped on insert, so it is a canonical key for the group.
@@ -111,7 +119,7 @@ pub struct AliasSummary {
 
 /// A governed set of equivalence-alias groups (ADR-060). Default-empty ⇒ a no-op ⇒ the
 /// vocabulary behaves exactly as before this registry existed.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AliasRegistry {
     #[serde(default)]
     entries: Vec<AliasEntry>,
@@ -331,10 +339,17 @@ impl AliasRegistry {
     /// Import a Solr/Lucene synonym file (ADR-060 item 3) into the registry as
     /// [`DeclaredFile`](AliasProvenance::DeclaredFile) groups. Operator intent makes expressible
     /// single-token and multi-word groups active; mixed/unexpressible groups remain candidates.
-    /// Returns the number of newly-active groups.
-    pub fn import_solr(&mut self, text: &str, norm: &Normalizer, dict: &Dict) -> usize {
+    /// Returns the number of newly-active groups. Malformed or resource-heavy
+    /// input fails atomically before the registry is changed.
+    pub fn import_solr(
+        &mut self,
+        text: &str,
+        norm: &Normalizer,
+        dict: &Dict,
+    ) -> Result<usize, AliasImportError> {
+        let groups = solr::parse_solr_synonyms(text)?;
         let mut activated = 0;
-        for forms in solr::parse_solr_synonyms(text) {
+        for forms in groups {
             let was_active = self.is_active_group(&forms);
             if self.add_classified(&forms, AliasProvenance::DeclaredFile, 1.0, norm, dict)
                 == Some(AliasStatus::Active)
@@ -343,7 +358,7 @@ impl AliasRegistry {
                 activated += 1;
             }
         }
-        activated
+        Ok(activated)
     }
 
     /// Promote a candidate to [`Active`](AliasStatus::Active). Refuses (returns `false`) a

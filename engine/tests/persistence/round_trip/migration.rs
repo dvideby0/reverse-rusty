@@ -8,11 +8,13 @@ fn durable_reopen_recompiles_legacy_clause_boundary_semantics() {
         ..EngineConfig::default()
     };
     let mut vocab = Vocab::new();
-    vocab.import_solr_aliases(
-        "ny => new york",
-        &Normalizer::default_vocab().expect("vocab"),
-        &reverse_rusty::dict::Dict::new(),
-    );
+    vocab
+        .import_solr_aliases(
+            "ny => new york",
+            &Normalizer::default_vocab().expect("vocab"),
+            &reverse_rusty::dict::Dict::new(),
+        )
+        .expect("valid alias fixture");
 
     {
         let mut engine = Engine::with_vocab(vocab.clone(), config.clone()).expect("with_vocab");
@@ -256,11 +258,13 @@ fn legacy_migration_then_vocab_adoption_recompiles_equivalences() {
         ..EngineConfig::default()
     };
     let mut vocab = Vocab::new();
-    vocab.import_solr_aliases(
-        "ny => new york",
-        &Normalizer::default_vocab().expect("vocab"),
-        &reverse_rusty::dict::Dict::new(),
-    );
+    vocab
+        .import_solr_aliases(
+            "ny => new york",
+            &Normalizer::default_vocab().expect("vocab"),
+            &reverse_rusty::dict::Dict::new(),
+        )
+        .expect("valid alias fixture");
 
     {
         let mut engine = Engine::with_vocab(vocab.clone(), config.clone()).expect("with_vocab");

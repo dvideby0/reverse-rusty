@@ -21,10 +21,18 @@ use crate::dto::ApiError;
 use crate::state::AppState;
 
 mod feedback;
+mod import;
+#[cfg(test)]
+mod import_tests;
 mod read;
 #[cfg(test)]
 mod read_tests;
 pub(crate) use feedback::{get_alias_feedback, reset_alias_feedback, validate_and_apply_feedback};
+pub(crate) use import::{
+    acquire_alias_import_permit, alias_import_error_response, alias_import_method_not_allowed,
+    alias_import_success, finish_alias_import_response, import_aliases, AliasImportTransport,
+    ALIAS_IMPORT_BODY_LIMIT,
+};
 pub(crate) use read::{
     acquire_alias_read_permit, alias_read_method_not_allowed, finish_alias_read_worker,
     get_aliases, serialize_aliases, AliasReadTransport, ALIAS_READ_BODY_LIMIT,
@@ -34,40 +42,12 @@ fn default_min_count() -> usize {
     2
 }
 
-#[derive(Deserialize)]
-pub(crate) struct ImportAliasesRequest {
-    /// Raw Solr/Lucene synonym-file text (comma lists and `a, b => c` mappings; `#` comments).
-    synonyms: String,
-}
-
 #[derive(Serialize)]
 struct AliasApplyResponse {
     acknowledged: bool,
-    /// Groups newly switched to active by this call.
     activated: usize,
-    /// Stored queries recompiled so the change took effect immediately (zero false negatives).
     recompiled: usize,
     summary: reverse_rusty::vocab::AliasSummary,
-}
-
-/// POST /_vocab/aliases/import — import a Solr/Lucene synonym file into the registry and apply it
-/// live (ADR-060 item 3). Expressible declared single-token and multi-word groups activate through
-/// FN-safe expansion; mixed/unexpressible groups remain review candidates. Recompiles in place —
-/// no restart.
-pub(crate) async fn import_aliases(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<ImportAliasesRequest>,
-) -> Response {
-    let result = {
-        let mut engine = state.engine.lock();
-        match engine.import_alias_synonyms(&req.synonyms) {
-            Ok(report) => alias_apply_response(report),
-            Err(e) => ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
-                .into_response(),
-        }
-    };
-    state.publish_snapshot();
-    result
 }
 
 #[derive(Deserialize, Default)]
@@ -250,10 +230,7 @@ pub(crate) async fn discover_and_record_aliases(
 #[cfg(test)]
 mod tests {
     use super::read::{serialize_aliases, AliasReadPage};
-    use super::{
-        discover_aliases, discover_and_record_aliases, import_aliases, DiscoverAliasesRequest,
-        ImportAliasesRequest,
-    };
+    use super::{discover_aliases, discover_and_record_aliases, DiscoverAliasesRequest};
     use crate::metrics::PrometheusMetrics;
     use crate::state::AppState;
     use axum::extract::State;
@@ -313,34 +290,6 @@ mod tests {
         )
         .expect("serialize aliases");
         serde_json::from_slice(&bytes).expect("alias JSON")
-    }
-
-    /// Import → the snapshot is republished so the lock-free `GET /_vocab/aliases` reflects it:
-    /// the variant pair is active, the category-alternative triple is a candidate.
-    #[tokio::test]
-    async fn import_then_get_reflects_registry_via_published_snapshot() {
-        let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
-        eng.build_from_queries(&[(1u64, "vertex adapter".to_string())]);
-        let state = state_with(eng);
-
-        let imp = import_aliases(
-            State(Arc::clone(&state)),
-            Json(ImportAliasesRequest {
-                synonyms: "adapter, adapters\nsofa, couch".to_string(),
-            }),
-        )
-        .await;
-        let imp = body_json(imp).await;
-        assert_eq!(imp["acknowledged"], true);
-        // The single-token variant activates; the declared distinct triple ALSO activates
-        // (operator intent), so two groups are active.
-        assert_eq!(imp["activated"], 2);
-
-        // GET reads the published snapshot (no engine lock) and sees the same state.
-        let got = aliases_json(&state);
-        assert_eq!(got["summary"]["active"], 2);
-        let entries = got["aliases"]["entries"].as_array().expect("entries");
-        assert_eq!(entries.len(), 2);
     }
 
     /// A corpus with an obvious substitute pair: two tokens filling the same slot across

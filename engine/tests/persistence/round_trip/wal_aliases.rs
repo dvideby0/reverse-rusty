@@ -16,11 +16,13 @@ fn wal_tail_recovers_alias_expansion() {
             ..EngineConfig::default()
         };
         let mut vocab = Vocab::new();
-        vocab.import_solr_aliases(
-            "ny => new york",
-            &Normalizer::default_vocab().expect("vocab"),
-            &reverse_rusty::dict::Dict::new(),
-        );
+        vocab
+            .import_solr_aliases(
+                "ny => new york",
+                &Normalizer::default_vocab().expect("vocab"),
+                &reverse_rusty::dict::Dict::new(),
+            )
+            .expect("valid alias fixture");
 
         {
             let mut eng = Engine::with_vocab(vocab.clone(), config.clone()).expect("with_vocab");

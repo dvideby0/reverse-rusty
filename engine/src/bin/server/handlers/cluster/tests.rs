@@ -183,6 +183,14 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 .fallback(crate::handlers::alias_read_method_not_allowed::<ClusterAppState>),
         )
         .route(
+            "/_vocab/aliases/import",
+            post(cluster_import_aliases)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::handlers::ALIAS_IMPORT_BODY_LIMIT,
+                ))
+                .fallback(crate::handlers::alias_import_method_not_allowed::<ClusterAppState>),
+        )
+        .route(
             "/_settings",
             get(cluster_get_settings).put(cluster_put_settings),
         )
@@ -246,6 +254,7 @@ fn seed() -> Vec<(u64, String)> {
 }
 
 mod admin;
+mod alias_import;
 mod backup;
 mod bulk;
 mod cat_shards;

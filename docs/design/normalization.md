@@ -162,12 +162,14 @@ relationship expansion, phrase tokens and growth passes, body/result size, and b
 validation, learning, and serialization on the shared administrative blocking slot. It does not
 inspect stored queries or apply its result.
 
-The REST replacement and stored-corpus learn-and-apply paths perform the O(corpus) rebuild through
-the same one-slot blocking-work boundary and recompile stored queries before publishing the new
-normalizer. The mutating learner accepts only bounded, bodyless, validated query controls; it merges
-new rules under the installed vocabulary and returns the same timed `recompiled` result in standalone
-and coordinator modes. A successful durable response means the rebuilt query state committed; a
-coherent live rebuild whose storage commit fails is published but explicitly not acknowledged.
+The REST replacement, alias-import, and stored-corpus learn-and-apply paths perform any required
+O(corpus) rebuild through the same one-slot blocking-work boundary and recompile stored queries
+before publishing the new normalizer. Alias imports parse atomically, bound rules and forms, and
+skip installation entirely when an identical registry declaration is retried. The mutating learner
+accepts only bounded, bodyless, validated query controls; both mutations return the same timed
+`recompiled` result in standalone and coordinator modes. A successful durable response means the
+rebuilt query state committed; a coherent live rebuild whose storage commit fails is published but
+explicitly not acknowledged.
 Alias-registry review shares that administrative slot for potentially large JSON snapshots. A
 standalone read captures one immutable engine snapshot; a coordinator read clones the registry
 under a brief cluster guard inside the blocking worker and releases the guard before paging and

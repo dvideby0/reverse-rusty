@@ -32,10 +32,23 @@ impl Engine {
         solr_text: &str,
     ) -> Result<AliasApplyReport, crate::error::NormalizerError> {
         let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
-        let activated = vocab.import_solr_aliases(solr_text, &self.norm, &self.dict);
+        let before = vocab.aliases().clone();
+        let activated = vocab
+            .import_solr_aliases(solr_text, &self.norm, &self.dict)
+            .map_err(|error| crate::error::NormalizerError::new(error.to_string()))?;
+        let changed = vocab.aliases() != &before;
+        if !changed {
+            return Ok(AliasApplyReport {
+                applied: false,
+                activated,
+                recompiled: 0,
+                summary: self.alias_summary(),
+            });
+        }
         self.set_vocab(vocab)?;
         let recompiled = self.recompile_stale_segments();
         Ok(AliasApplyReport {
+            applied: true,
             activated,
             recompiled,
             summary: self.alias_summary(),
@@ -57,6 +70,7 @@ impl Engine {
         self.set_vocab(vocab)?;
         let recompiled = self.recompile_stale_segments();
         Ok(AliasApplyReport {
+            applied: true,
             activated,
             recompiled,
             summary: self.alias_summary(),

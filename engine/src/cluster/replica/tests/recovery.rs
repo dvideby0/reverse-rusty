@@ -313,11 +313,13 @@ fn durable_shard_replays_an_acknowledged_query_above_default_parse_limits() {
 #[test]
 fn durable_shard_self_restart_refuses_legacy_clause_boundary_semantics() {
     let mut vocab = crate::vocab::Vocab::new();
-    vocab.import_solr_aliases(
-        "ny => new york",
-        &Normalizer::default_vocab().expect("normalizer"),
-        &Dict::new(),
-    );
+    vocab
+        .import_solr_aliases(
+            "ny => new york",
+            &Normalizer::default_vocab().expect("normalizer"),
+            &Dict::new(),
+        )
+        .expect("valid aliases");
     let norm = Arc::new(vocab.to_normalizer().expect("alias normalizer"));
     let mut dict = Dict::new();
     let mut lc = String::new();

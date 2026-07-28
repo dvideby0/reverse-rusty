@@ -14,11 +14,13 @@ fn durable_reopen_preserves_multiword_alias() {
         ..EngineConfig::default()
     };
     let mut vocab = Vocab::new();
-    vocab.import_solr_aliases(
-        "ny => new york",
-        &Normalizer::default_vocab().expect("vocab"),
-        &reverse_rusty::dict::Dict::new(),
-    );
+    vocab
+        .import_solr_aliases(
+            "ny => new york",
+            &Normalizer::default_vocab().expect("vocab"),
+            &reverse_rusty::dict::Dict::new(),
+        )
+        .expect("valid alias fixture");
 
     // Build durable with the alias active, store a `new york` query, flush, close.
     {

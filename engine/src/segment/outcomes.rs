@@ -17,6 +17,8 @@ pub struct IngestReport {
 /// [`Engine::learn_aliases_and_apply`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AliasApplyReport {
+    /// Whether this call installed a vocabulary (an identical import is a no-op).
+    pub applied: bool,
     /// Groups newly switched to active by this call.
     pub activated: usize,
     /// Stored queries recompiled so the change took effect immediately (zero false negatives).

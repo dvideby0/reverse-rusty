@@ -37,11 +37,13 @@ fn migration_interns_features_exposed_by_splitting_the_legacy_stream() {
         ..EngineConfig::default()
     };
     let mut vocab = crate::vocab::Vocab::new();
-    vocab.import_solr_aliases(
-        "ny => new york",
-        &Normalizer::default_vocab().expect("normalizer"),
-        &Dict::new(),
-    );
+    vocab
+        .import_solr_aliases(
+            "ny => new york",
+            &Normalizer::default_vocab().expect("normalizer"),
+            &Dict::new(),
+        )
+        .expect("valid aliases");
 
     {
         let mut engine = Engine::with_vocab(vocab.clone(), config.clone()).expect("vocab engine");

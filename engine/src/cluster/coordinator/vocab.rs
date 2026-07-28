@@ -235,9 +235,26 @@ impl ClusterEngine {
         solr_text: &str,
     ) -> Result<crate::segment::AliasApplyReport, ShardError> {
         let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
-        let activated = vocab.import_solr_aliases(solr_text, &self.norm, &self.dict);
+        let before = vocab.aliases().clone();
+        let activated = vocab
+            .import_solr_aliases(solr_text, &self.norm, &self.dict)
+            .map_err(|error| ShardError::Config(error.to_string()))?;
+        let changed = vocab.aliases() != &before;
+        if !changed {
+            return Ok(crate::segment::AliasApplyReport {
+                applied: false,
+                activated,
+                recompiled: 0,
+                summary: self
+                    .vocab
+                    .as_deref()
+                    .map(Vocab::alias_summary)
+                    .unwrap_or_default(),
+            });
+        }
         let rebuilt = self.set_vocab(vocab)?;
         Ok(crate::segment::AliasApplyReport {
+            applied: true,
             activated,
             recompiled: rebuilt,
             summary: self
@@ -262,6 +279,7 @@ impl ClusterEngine {
             vocab.learn_aliases_from_queries(&corpus, min_count, &self.norm, &self.dict);
         let rebuilt = self.set_vocab(vocab)?;
         Ok(crate::segment::AliasApplyReport {
+            applied: true,
             activated,
             recompiled: rebuilt,
             summary: self

@@ -127,6 +127,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   runners, retained the complete local `check.sh` entry point and one required aggregate result,
   and stopped producing empty test harnesses for binary targets without binary-local tests
   ([ADR-151](decisions/adr-151-parallel-ci-code-gate-lanes.md)).
+- Hardened native `POST /_vocab/aliases/import` with strict atomic Solr parsing, familiar
+  Elasticsearch rule objects and synchronous refresh plus OpenSearch Solr/expansion controls,
+  bounded no-store transport, true no-op retries, timed standalone/coordinator parity, shared
+  off-runtime mutation admission, complete standalone rebuild verification, and fail-loud durable
+  acknowledgement ([ADR-152](decisions/adr-152-alias-import-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
