@@ -22,7 +22,7 @@ use crate::harness::*;
 fn grpc_assembly_refuses_pit_typed_and_leaks_nothing() {
     let queries: Vec<(u64, String)> = vec![
         (1, "wireless mouse".to_string()),
-        (2, "product gamma pro".to_string()),
+        (2, "mouse pro".to_string()),
         (3, "acme chrome".to_string()),
     ];
     let norm = Arc::new(vocab());
