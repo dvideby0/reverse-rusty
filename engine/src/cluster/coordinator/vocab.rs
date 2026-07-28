@@ -1,6 +1,6 @@
 //! `impl ClusterEngine` — runtime vocabulary change (ADR-046 mechanism 2).
 //!
-//! A vocabulary change (e.g. a declared alias `ud ≡ upperdeck`) swaps the ONE
+//! A vocabulary change (e.g. a declared alias `ns ≡ northstar`) swaps the ONE
 //! shared normalizer and rebuilds the cluster from its live source set: every
 //! query is re-extracted under the new normalizer, **re-placed** (an alias can
 //! change a query's anchor → hence its shard), and re-ingested. This is a
@@ -137,7 +137,7 @@ impl ClusterEngine {
 
     /// Learn alias/synonym rules from the cluster's OWN live corpus (ADR-015 any-of
     /// learning) and apply them (ADR-046 mechanism 2). A synonym appearing in at least
-    /// `min_count` any-of groups (e.g. `(rookie,rc)` ⇒ `rc → rookie`) is merged UNDER
+    /// `min_count` any-of groups (e.g. `(new,pkg)` ⇒ `pkg → new`) is merged UNDER
     /// the current vocabulary — a previously *declared* alias wins over a learned one —
     /// and the cluster is rebuilt via [`Self::set_vocab`]. Returns the number of queries
     /// rebuilt. Refuses a non-local cluster (the gather can't enumerate a remote shard).

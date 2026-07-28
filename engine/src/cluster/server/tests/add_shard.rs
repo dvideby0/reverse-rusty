@@ -7,7 +7,7 @@ use super::*;
 fn add_shard_before_adopt_fails() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["psa 10"], &n);
+    let d = frozen_dict(&["pro"], &n);
     let srv = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
     assert_eq!(
         rt.block_on(srv.add_shard(add_shard_req(0, d.fingerprint(), empty_tag_fp())))
@@ -24,7 +24,7 @@ fn add_shard_before_adopt_fails() {
 fn add_shard_after_adopt_creates_slot() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["psa 10"], &n);
+    let d = frozen_dict(&["pro"], &n);
     let (fp, tag_fp) = (d.fingerprint(), empty_tag_fp());
     let srv = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
     rt.block_on(srv.adopt_dict(adopt_req_shard(&d, 0)))
@@ -32,7 +32,7 @@ fn add_shard_after_adopt_creates_slot() {
     // Co-located slot — NO dict bytes shipped, just the fingerprint attestation.
     rt.block_on(srv.add_shard(add_shard_req(1, fp, tag_fp)))
         .expect("add co-located slot 1");
-    rt.block_on(srv.insert_extracted(insert_req(1, 11, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req(1, 11, "pro")))
         .expect("write the co-located slot");
     let n1 = rt
         .block_on(srv.num_queries(Request::new(proto::ShardRef { shard_id: 1 })))
@@ -54,7 +54,7 @@ fn add_shard_after_adopt_creates_slot() {
 fn add_shard_wrong_fingerprint_fails() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["psa 10"], &n);
+    let d = frozen_dict(&["pro"], &n);
     let tag_fp = empty_tag_fp();
     let srv = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
     rt.block_on(srv.adopt_dict(adopt_req_shard(&d, 0)))
@@ -73,14 +73,14 @@ fn add_shard_wrong_fingerprint_fails() {
 fn add_shard_idempotent() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["psa 10"], &n);
+    let d = frozen_dict(&["pro"], &n);
     let (fp, tag_fp) = (d.fingerprint(), empty_tag_fp());
     let srv = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
     rt.block_on(srv.adopt_dict(adopt_req_shard(&d, 0)))
         .expect("adopt slot 0");
     rt.block_on(srv.add_shard(add_shard_req(1, fp, tag_fp)))
         .expect("add slot 1");
-    rt.block_on(srv.insert_extracted(insert_req(1, 11, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req(1, 11, "pro")))
         .expect("seed slot 1");
     // A second AddShard for the same slot is a no-op — it must NOT wipe the slot's data.
     rt.block_on(srv.add_shard(add_shard_req(1, fp, tag_fp)))
@@ -101,13 +101,13 @@ fn add_shard_idempotent() {
 fn metrics_render_the_hosted_nonzero_slot() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["1994 upper deck", "psa 10"], &n);
+    let d = frozen_dict(&["1994 north star", "pro"], &n);
 
     let srv = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
     // This node hosts ONLY shard-id 2 (a non-zero position) — there is no slot 0.
     rt.block_on(srv.adopt_dict(adopt_req_shard(&d, 2)))
         .expect("adopt slot 2");
-    rt.block_on(srv.insert_extracted(insert_req(2, 20, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req(2, 20, "pro")))
         .expect("write slot 2");
 
     let body = srv.metrics_source().render();
@@ -125,7 +125,7 @@ fn metrics_render_the_hosted_nonzero_slot() {
 fn metrics_aggregate_over_colocated_slots() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["1994 upper deck", "psa 10"], &n);
+    let d = frozen_dict(&["1994 north star", "pro"], &n);
     let (fp, tag_fp) = (d.fingerprint(), empty_tag_fp());
 
     // This node hosts slots {0, 5}: slot 0 ships the dict, slot 5 is co-located via AddShard.
@@ -134,9 +134,9 @@ fn metrics_aggregate_over_colocated_slots() {
         .expect("adopt slot 0");
     rt.block_on(srv.add_shard(add_shard_req(5, fp, tag_fp)))
         .expect("add co-located slot 5");
-    rt.block_on(srv.insert_extracted(insert_req(0, 10, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req(0, 10, "pro")))
         .expect("write slot 0");
-    rt.block_on(srv.insert_extracted(insert_req(5, 15, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req(5, 15, "pro")))
         .expect("write slot 5");
 
     let body = srv.metrics_source().render();

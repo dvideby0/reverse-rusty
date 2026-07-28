@@ -279,14 +279,14 @@ fn resize_then_live_add_survives_reopen() {
     let (queries, _titles) = build_corpus();
     let dir = unique_dir("resize_then_add");
     let newq = 9_800_001u64;
-    let newtitle = "1994 fleer zznewplayer psa 10";
+    let newtitle = "1994 vertex zznewentity pro";
     {
         let mut cluster =
             ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
                 .expect("durable build");
         cluster.resize(6).expect("resize"); // checkpoints at K=6
         cluster
-            .add_query(newq, "1994 fleer zznewplayer")
+            .add_query(newq, "1994 vertex zznewentity")
             .expect("add after resize"); // logged only
     }
     let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
@@ -349,8 +349,8 @@ fn vocab_survives_resize_and_reopen() {
     // ADR-078 vocab-preservation property (resize passes `None`, so `self.vocab` is kept).
     let (mut queries, _titles) = build_corpus();
     let qid = 9_900_001u64;
-    queries.push((qid, "1994 fleer zzabbr".into()));
-    let title = "1994 fleer zzcanon psa 10";
+    queries.push((qid, "1994 vertex zzabbr".into()));
+    let title = "1994 vertex zzcanon pro";
     let dir = unique_dir("resize_vocab");
     {
         let mut cluster =

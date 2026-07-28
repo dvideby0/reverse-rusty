@@ -20,13 +20,13 @@ fn batch_path_zero_false_negatives_against_oracle() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0BA7_C0DE,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     };
     let data = generate(&cfg);
 
     // Multi-segment engine: base segments + an unflushed memtable tail.
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     let n = data.queries.len();
     let c = n / 4;
     eng.build_from_queries(&data.queries[..c]);

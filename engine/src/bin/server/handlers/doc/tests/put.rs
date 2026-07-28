@@ -5,35 +5,35 @@ async fn put_doc_is_created_then_updated_with_replace_semantics() {
     let state = state();
 
     // First PUT: 201 created.
-    let (status, body) = do_put(&state, 7, "michael jordan").await;
+    let (status, body) = do_put(&state, 7, "wireless mouse").await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["_index"], "queries");
     assert_eq!(body["_id"], 7);
     assert_eq!(body["_version"], 1);
     assert_eq!(body["result"], "created");
     assert!(body.get("error").is_none());
-    assert!(matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&7));
+    assert!(matches_in_snapshot(&state, "1986 vertex wireless mouse new").contains(&7));
 
     // Re-PUT with different semantics: 200 updated, and the snapshot flips
     // atomically — the old version stops matching exactly when the new starts
     // (one lock, one publish; no matches-under-either-version window).
-    let (status, body) = do_put(&state, 7, "lebron james").await;
+    let (status, body) = do_put(&state, 7, "mechanical keyboard").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["_index"], "queries");
     assert_eq!(body["_version"], 1);
     assert_eq!(body["result"], "updated");
     assert!(
-        !matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&7),
+        !matches_in_snapshot(&state, "1986 vertex wireless mouse new").contains(&7),
         "old semantics must stop matching after the re-PUT"
     );
-    assert!(matches_in_snapshot(&state, "2003 topps lebron james rookie").contains(&7));
+    assert!(matches_in_snapshot(&state, "2003 acme mechanical keyboard new").contains(&7));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn put_doc_create_only_is_atomic_and_never_overwrites() {
     let state = state();
-    let first_body = serde_json::json!({"query":"michael jordan","version":7});
-    let second_body = serde_json::json!({"query":"lebron james","version":8});
+    let first_body = serde_json::json!({"query":"wireless mouse","version":7});
+    let second_body = serde_json::json!({"query":"mechanical keyboard","version":8});
     let first = route_put_json(&state, "/_doc/7?op_type=create", &first_body);
     let second = route_put_json(&state, "/_doc/7?op_type=create", &second_body);
     let (a, b) = tokio::join!(first, second);
@@ -56,24 +56,24 @@ async fn put_doc_create_only_is_atomic_and_never_overwrites() {
         "version_conflict_engine_exception"
     );
 
-    let jordan = matches_in_snapshot(&state, "1986 fleer michael jordan rookie");
-    let lebron = matches_in_snapshot(&state, "2003 topps lebron james rookie");
+    let first_body = matches_in_snapshot(&state, "1986 vertex wireless mouse new");
+    let second_body = matches_in_snapshot(&state, "2003 acme mechanical keyboard new");
     assert_ne!(
-        jordan.contains(&7),
-        lebron.contains(&7),
+        first_body.contains(&7),
+        second_body.contains(&7),
         "exactly one create-only body must become live"
     );
 
     let (status, after) = route_put_json(
         &state,
         "/_doc/7?op_type=create",
-        &serde_json::json!({"query":"wayne gretzky","version":9}),
+        &serde_json::json!({"query":"espresso machine","version":9}),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(after["error"]["type"], "version_conflict_engine_exception");
     assert!(
-        !matches_in_snapshot(&state, "1979 opc wayne gretzky rookie").contains(&7),
+        !matches_in_snapshot(&state, "1979 acme espresso machine new").contains(&7),
         "a conflict must not replace the winning document"
     );
     let (status, malformed_conflict) = route_put_json(
@@ -96,12 +96,12 @@ async fn put_doc_validates_query_parameters_and_accepts_refresh_policies() {
         let (status, body) = route_put_json(
             &state,
             &format!("/_doc/{id}?refresh={refresh}&op_type=index"),
-            &serde_json::json!({"query":format!("topps chrome {id}")}),
+            &serde_json::json!({"query":format!("acme chrome {id}")}),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         assert!(
-            matches_in_snapshot(&state, &format!("topps chrome {id}")).contains(&id),
+            matches_in_snapshot(&state, &format!("acme chrome {id}")).contains(&id),
             "every accepted refresh policy has immediate visibility"
         );
     }
@@ -112,13 +112,13 @@ async fn put_doc_validates_query_parameters_and_accepts_refresh_policies() {
         "/_doc/22?routing=custom",
     ] {
         let (status, body) =
-            route_put_json(&state, path, &serde_json::json!({"query":"michael jordan"})).await;
+            route_put_json(&state, path, &serde_json::json!({"query":"wireless mouse"})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
         assert_eq!(body["error"]["type"], "illegal_argument_exception");
     }
     for id in [20, 21, 22] {
         assert!(
-            !matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&id),
+            !matches_in_snapshot(&state, "1986 vertex wireless mouse new").contains(&id),
             "invalid query parameters must reject before mutation"
         );
     }
@@ -127,8 +127,8 @@ async fn put_doc_validates_query_parameters_and_accepts_refresh_policies() {
 #[tokio::test]
 async fn delete_after_reput_reports_one_copy() {
     let state = state();
-    do_put(&state, 7, "michael jordan").await;
-    do_put(&state, 7, "lebron james").await;
+    do_put(&state, 7, "wireless mouse").await;
+    do_put(&state, 7, "mechanical keyboard").await;
 
     let resp = delete_doc(
         State(Arc::clone(&state)),
@@ -165,21 +165,21 @@ async fn put_doc_honors_memtable_flush_threshold() {
     let eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg);
     let state = state_with_engine(eng);
 
-    do_put(&state, 1, "michael jordan").await;
-    do_put(&state, 2, "lebron james").await;
-    do_put(&state, 3, "wayne gretzky").await;
+    do_put(&state, 1, "wireless mouse").await;
+    do_put(&state, 2, "mechanical keyboard").await;
+    do_put(&state, 3, "espresso machine").await;
     // A re-PUT (the upsert path) must honor the threshold too.
-    do_put(&state, 2, "mario lemieux").await;
+    do_put(&state, 2, "coffee grinder").await;
 
     assert!(
         state.engine.lock().num_segments() > 0,
         "threshold-2 PUTs must auto-flush the memtable into a segment"
     );
-    assert!(matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&1));
-    assert!(matches_in_snapshot(&state, "1985 opc mario lemieux rookie").contains(&2));
-    assert!(matches_in_snapshot(&state, "1979 opc wayne gretzky rookie").contains(&3));
+    assert!(matches_in_snapshot(&state, "1986 vertex wireless mouse new").contains(&1));
+    assert!(matches_in_snapshot(&state, "1985 acme coffee grinder new").contains(&2));
+    assert!(matches_in_snapshot(&state, "1979 acme espresso machine new").contains(&3));
     assert!(
-        !matches_in_snapshot(&state, "2003 topps lebron james rookie").contains(&2),
+        !matches_in_snapshot(&state, "2003 acme mechanical keyboard new").contains(&2),
         "the upserted-away version must stay dead across the flush"
     );
 }

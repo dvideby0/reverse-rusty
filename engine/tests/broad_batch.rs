@@ -20,8 +20,8 @@ fn gen(seed: u64, num_queries: usize, num_titles: usize, broad_frac: f64) -> Dat
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: (num_queries / 40).max(2_000),
-        num_sets: (num_queries / 100).max(1_000),
+        num_entities: (num_queries / 40).max(2_000),
+        num_collections: (num_queries / 100).max(1_000),
     })
 }
 
@@ -130,7 +130,7 @@ fn run_matrix(eng: &Engine, titles: &[String]) {
 // ---- Filtered percolation (ADR-049): the columnar batch path must apply the SAME tag
 // filter as the scalar path, including the pure-anchor materialization fast path. ----
 
-const FILTER_CATS: [&str; 4] = ["cards", "coins", "stamps", "comics"];
+const FILTER_CATS: [&str; 4] = ["items", "coins", "stamps", "comics"];
 
 fn tags_for(logical: u64) -> Vec<(String, String)> {
     vec![(
@@ -227,7 +227,7 @@ fn prefilter_corpus() -> (Vec<(u64, String)>, Vec<String>) {
 // the Inline kill-switch, the materialize (vacuous-accept) kill-switch on the
 // tail-anchored population, and the ADR-061 multi-word-alias forced-inline path. ----
 
-/// θ small enough that the generated corpus's Zipf-head players classify H at
+/// θ small enough that the generated corpus's Zipf-head entities classify H at
 /// this scale (asserted, not assumed).
 const HOT_THETA: u32 = 64;
 

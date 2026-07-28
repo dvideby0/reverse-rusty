@@ -10,17 +10,17 @@ use reverse_rusty::vocab::Vocab;
 use std::collections::HashSet;
 
 /// A populated normalizer vocabulary aligned to the synthetic generator's surface
-/// forms (`gen.rs`): multiword player/brand phrases, single-token brand, brand-alt,
-/// and card-term synonyms, plus graders and grade words. The default oracle runs the
-/// empty `default_vocab`, so the multiword-phrase / synonym / grader normalization
+/// forms (`gen.rs`): multiword entity/brand phrases, single-token brand, brand-alt,
+/// and generic attribute synonyms. The default oracle runs the
+/// empty `default_vocab`, so the multiword-phrase and synonym normalization
 /// machinery is never exercised on either side; this builds it so the differential
 /// check covers that machinery end-to-end. Both the engine and the brute reference use
 /// it, so they still agree by construction unless the engine's index/verify diverges.
 fn gen_vocab() -> Normalizer {
-    use reverse_rusty::gen::{BRANDS, BRAND_ALT, CARD_TERMS, PLAYERS};
+    use reverse_rusty::gen::{ATTRIBUTES, BRANDS, BRAND_ALT, ENTITIES};
     let mut b = NormalizerBuilder::new();
-    for p in PLAYERS {
-        let canon = format!("player:{}", p.replace(' ', "_"));
+    for p in ENTITIES {
+        let canon = format!("entity:{}", p.replace(' ', "_"));
         let toks: Vec<&str> = p.split(' ').collect();
         b.add_phrase(&toks, &canon, FeatureKind::Entity);
     }
@@ -33,14 +33,14 @@ fn gen_vocab() -> Normalizer {
             b.add_synonym(toks[0], &canon, FeatureKind::Brand);
         }
     }
-    // Alternate brand surface forms (e.g. "ud" -> brand:upper_deck) converge onto the
+    // Alternate brand surface forms (e.g. "ns" -> brand:north_star) converge onto the
     // same canonical as the full brand at the matching index.
     for (alt, brand) in BRAND_ALT.iter().zip(BRANDS.iter()) {
         let canon = format!("brand:{}", brand.replace(' ', "_"));
         b.add_synonym(alt, &canon, FeatureKind::Brand);
     }
-    for ct in CARD_TERMS {
-        b.add_synonym(ct, &format!("card_term:{ct}"), FeatureKind::Category);
+    for ct in ATTRIBUTES {
+        b.add_synonym(ct, &format!("attribute:{ct}"), FeatureKind::Category);
     }
     b.build().expect("gen vocab automaton")
 }
@@ -60,8 +60,8 @@ fn zero_false_negatives_with_populated_vocab() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x1234_5678,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     };
     let data = generate(&cfg);
 
@@ -132,19 +132,19 @@ fn zero_false_negatives_with_punctuation_folding() {
 
     let queries = vec![
         (1u64, "obrien".to_string()),            // joined-form required term
-        (2u64, "mcdonald -reprint".to_string()), // required + forbidden
-        (3u64, "oneill rookie".to_string()),     // two required terms
+        (2u64, "mcdonald -replica".to_string()), // required + forbidden
+        (3u64, "oneill new".to_string()),        // two required terms
         (4u64, "(obrien|oneill)".to_string()),   // any-of group
     ];
     let titles = vec![
-        "O\u{2019}Brien rookie".to_string(), // curly apostrophe  -> q1, q4
-        "O'Brien auto".to_string(),          // ascii apostrophe  -> q1, q4
-        "O-Brien".to_string(),               // mid-word hyphen   -> q1, q4
-        "OBrien".to_string(),                // already joined    -> q1, q4
-        "Ronald McDonald".to_string(),       // -> q2
-        "Mc-Donald reprint".to_string(),     // folds to mcdonald but excluded by -reprint
-        "O'Neill rookie".to_string(),        // -> q3, q4
-        "nothing here".to_string(),          // -> {}
+        "O\u{2019}Brien new".to_string(), // curly apostrophe  -> q1, q4
+        "O'Brien manual".to_string(),     // ascii apostrophe  -> q1, q4
+        "O-Brien".to_string(),            // mid-word hyphen   -> q1, q4
+        "OBrien".to_string(),             // already joined    -> q1, q4
+        "Ronald McDonald".to_string(),    // -> q2
+        "Mc-Donald replica".to_string(),  // folds to mcdonald but excluded by -replica
+        "O'Neill new".to_string(),        // -> q3, q4
+        "nothing here".to_string(),       // -> {}
     ];
 
     let mut eng = Engine::new(fold_vocab());
@@ -170,7 +170,7 @@ fn zero_false_negatives_with_punctuation_folding() {
     assert!(total_truth > 0, "degenerate: folding produced no matches");
 
     // Recall win: the joined-form query (`obrien`, id 1) matches every punctuated variant.
-    for title in ["O\u{2019}Brien rookie", "O'Brien auto", "O-Brien", "OBrien"] {
+    for title in ["O\u{2019}Brien new", "O'Brien manual", "O-Brien", "OBrien"] {
         eng.match_title(title, &mut s, &mut out, true);
         assert!(
             out.contains(&1),
@@ -182,7 +182,7 @@ fn zero_false_negatives_with_punctuation_folding() {
     // doing the work — the apostrophe splits `obrien` into `o`/`brien` by default).
     let mut def = Engine::new(Normalizer::default_vocab().expect("default vocab"));
     def.build_from_queries(&queries);
-    def.match_title("O'Brien auto", &mut s, &mut out, true);
+    def.match_title("O'Brien manual", &mut s, &mut out, true);
     assert!(
         !out.contains(&1),
         "default normalizer must NOT match `obrien` against an apostrophized title"

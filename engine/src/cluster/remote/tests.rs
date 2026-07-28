@@ -4,12 +4,12 @@ fn placed(tags: Vec<(String, String)>, tag_ids: Vec<crate::tagdict::TagId>) -> P
     let norm = crate::normalize::Normalizer::default_vocab().expect("vocab");
     let mut dict = crate::dict::Dict::new();
     let mut lc = String::new();
-    let ast = crate::dsl::parse("1994 upper deck").expect("parse");
+    let ast = crate::dsl::parse("1994 north star").expect("parse");
     let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
     PlacedQuery {
         logical: 1,
         ex,
-        dsl: "1994 upper deck".into(),
+        dsl: "1994 north star".into(),
         version: 1,
         source_generation: None,
         tags,
@@ -22,7 +22,7 @@ fn placed(tags: Vec<(String, String)>, tag_ids: Vec<crate::tagdict::TagId>) -> P
 #[test]
 fn wire_guard_passes_raw_tags_and_refuses_pre_resolved_ids() {
     // Raw (key,value) tags are the supported wire shape — no refusal.
-    let raw = placed(vec![("category".into(), "cards".into())], Vec::new());
+    let raw = placed(vec![("category".into(), "items".into())], Vec::new());
     assert!(refuse_wire_tag_ids(std::slice::from_ref(&raw)).is_ok());
     // Pre-resolved ids (the ADR-074 carry-through) must be refused loudly.
     let carried = placed(

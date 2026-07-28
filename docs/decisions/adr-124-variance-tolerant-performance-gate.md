@@ -94,3 +94,12 @@ manual because its recorded ~16 GiB peak consumes the entire standard public run
 - Hosted-runner image or hardware-contract changes fail loud and require a five-run rebaseline.
 - The weekly soak supplies retained longitudinal evidence without adding 10M-query cost to every
   pull request.
+
+## Current outcome
+
+The domain-neutral fixture migration changed workload semantics, invalidating the original six-run
+timing history. Rather than compare unlike workloads, the baseline now uses the ADR's explicit
+all-empty pending state: deterministic structure and resource checks remain active, while timing
+is still captured in each CI report but comparison is visibly suspended until five fresh reviewed
+reports are passed through the same `perfgate rebaseline` workflow. Any partial baseline history
+fails validation.

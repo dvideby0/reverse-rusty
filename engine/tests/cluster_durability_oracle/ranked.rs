@@ -30,7 +30,7 @@ fn ranked_view(cluster: &ClusterEngine) -> RankedView {
         query_scope: QueryScope::WithBroad,
     };
     let ranked = cluster
-        .try_percolate_filtered_top_k("2020 topps chrome update", &[], options, &program, None)
+        .try_percolate_filtered_top_k("2020 acme chrome update", &[], options, &program, None)
         .expect("top k");
     let rows = ranked
         .hits
@@ -43,8 +43,8 @@ fn ranked_view(cluster: &ClusterEngine) -> RankedView {
     // The ADR-112 batch over the same durable segments: per-title rows must be
     // byte-stable across checkpoint/reopen/restore exactly like the scalar.
     let batch_titles = [
-        "2020 topps chrome update".to_string(),
-        "1998 topps chrome refractor".to_string(),
+        "2020 acme chrome update".to_string(),
+        "1998 acme chrome premium".to_string(),
     ];
     let batch = cluster
         .try_percolate_filtered_top_k_batch(&batch_titles, &[], options, &program, None)
@@ -68,9 +68,7 @@ fn ranked_view(cluster: &ClusterEngine) -> RankedView {
 
 #[test]
 fn top_k_and_winner_sources_survive_checkpoint_reopen_and_backup_restore() {
-    let queries: Vec<(u64, String)> = (1..=30)
-        .map(|id| (id, "topps chrome".to_string()))
-        .collect();
+    let queries: Vec<(u64, String)> = (1..=30).map(|id| (id, "acme chrome".to_string())).collect();
     let tags: Vec<Vec<(String, String)>> = queries
         .iter()
         .map(|(id, _)| {

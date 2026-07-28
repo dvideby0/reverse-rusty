@@ -15,13 +15,13 @@ fn zero_false_negatives_against_oracle() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x00AB_CDEF,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     };
     let data = generate(&cfg);
 
     // engine
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&data.queries);
 
     // oracle
@@ -66,10 +66,10 @@ fn zero_false_negatives_against_oracle() {
 }
 
 #[test]
-fn spec_example_matches_expected() {
-    let norm = Normalizer::default_vocab().expect("built-in vocab");
-    let q = "1994 (upper deck,UD) michael jordan sp (preview,previews) \
-        -(auto,autograph,signed,dna,signature) PSA 10 -(sgc,bgs)";
+fn representative_product_query_matches_expected() {
+    let norm = Normalizer::default_vocab().expect("default vocabulary");
+    let q = "2024 (north star,northstar) wireless mouse \
+        (compact,portable) pro -(damaged,parts,replica,manual)";
     let mut eng = Engine::new(norm);
     eng.build_from_queries(&[(1, q.to_string())]);
 
@@ -77,9 +77,9 @@ fn spec_example_matches_expected() {
     let mut out = Vec::new();
 
     let pass = [
-        "1994 Upper Deck Michael Jordan SP Preview PSA GEM MT 10",
-        "1994 UD Michael Jordan SP Previews PSA 10",
-        "vintage 1994 upper deck michael jordan sp preview psa 10 sharp",
+        "2024 North Star Wireless Mouse Compact Pro",
+        "2024 Northstar Wireless Mouse Portable Pro",
+        "new 2024 north star wireless mouse compact pro boxed",
     ];
     for t in pass {
         eng.match_title(t, &mut s, &mut out, true);
@@ -87,10 +87,10 @@ fn spec_example_matches_expected() {
     }
 
     let fail = [
-        "1994 Upper Deck Michael Jordan SP Preview PSA 10 auto", // forbidden
-        "1994 Upper Deck Michael Jordan SP Preview BGS 9.5", // wrong grader/grade + forbidden bgs
-        "1993 Upper Deck Michael Jordan SP Preview PSA 10",  // wrong year
-        "1994 Topps Michael Jordan SP Preview PSA 10",       // wrong brand
+        "2024 North Star Wireless Mouse Compact Pro damaged", // forbidden
+        "2024 North Star Wireless Mouse Compact Basic",       // wrong variant
+        "2023 North Star Wireless Mouse Compact Pro",         // wrong year
+        "2024 Acme Wireless Mouse Compact Pro",               // wrong brand
     ];
     for t in fail {
         eng.match_title(t, &mut s, &mut out, true);

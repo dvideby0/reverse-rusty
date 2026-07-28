@@ -25,7 +25,7 @@ pub(crate) use std::time::Instant;
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub(crate) fn make_norm() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 pub(crate) fn match_ids(engine: &Engine, title: &str) -> Vec<u64> {

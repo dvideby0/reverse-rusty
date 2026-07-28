@@ -12,7 +12,7 @@ type CompiledCorpus = (Arc<Normalizer>, Arc<Dict>, Vec<(u64, Extracted, String)>
 /// `ClusterEngine::build`'s pass A — so a test can seed a `LocalShard` at the level the
 /// coordinator uses (the same helper shape as `replica.rs`'s tests).
 fn compile_corpus(dsls: &[(u64, &str)]) -> CompiledCorpus {
-    let norm = Arc::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let norm = Arc::new(Normalizer::default_vocab().expect("default vocabulary"));
     let mut dict = Dict::new();
     let mut lc = String::new();
     let mut out = Vec::new();

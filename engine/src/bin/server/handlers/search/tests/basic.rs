@@ -37,9 +37,7 @@ async fn routed_search(
 #[tokio::test]
 async fn get_search_accepts_es_controls_and_returns_compatibility_metadata() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
-    engine
-        .try_insert_live("topps chrome", 7, 1)
-        .expect("insert");
+    engine.try_insert_live("acme chrome", 7, 1).expect("insert");
     let state = state_with(engine, false);
     let (status, response) = routed_search(
         &state,
@@ -49,7 +47,7 @@ async fn get_search_accepts_es_controls_and_returns_compatibility_metadata() {
             "query": {
                 "percolate": {
                     "field": "query",
-                    "document": {"title": "2020 topps chrome"}
+                    "document": {"title": "2020 acme chrome"}
                 }
             }
         }),
@@ -153,7 +151,7 @@ async fn search_preserves_content_type_and_body_limit_statuses() {
         Engine::new(Normalizer::default_vocab().expect("vocab")),
         false,
     );
-    let body = serde_json::json!({"document": {"title": "topps chrome"}}).to_string();
+    let body = serde_json::json!({"document": {"title": "acme chrome"}}).to_string();
 
     let app = Router::new()
         .route("/_search", post(search_route))
@@ -219,7 +217,7 @@ async fn search_rejects_batch_over_max_percolate_batch() {
         ..EngineConfig::default()
     };
     let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg);
-    eng.build_from_queries(&[(1u64, "michael jordan".to_string())]);
+    eng.build_from_queries(&[(1u64, "wireless mouse".to_string())]);
     let state = state_with(eng, false);
 
     // 3 documents > cap of 2 ⇒ 400 before any matching runs.
@@ -249,13 +247,11 @@ async fn search_rejects_batch_over_max_percolate_batch() {
 #[tokio::test]
 async fn multi_document_explain_is_rejected_and_profile_is_aggregated() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
-    engine
-        .try_insert_live("topps chrome", 7, 1)
-        .expect("insert");
+    engine.try_insert_live("acme chrome", 7, 1).expect("insert");
     let state = state_with(engine, false);
 
     let explain: SearchBody = serde_json::from_value(serde_json::json!({
-        "documents": [{"title": "topps chrome"}, {"title": "topps chrome"}],
+        "documents": [{"title": "acme chrome"}, {"title": "acme chrome"}],
         "include_source": false,
         "explain": true
     }))
@@ -267,7 +263,7 @@ async fn multi_document_explain_is_rejected_and_profile_is_aggregated() {
     assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
 
     let profile: SearchBody = serde_json::from_value(serde_json::json!({
-        "documents": [{"title": "topps chrome"}, {"title": "topps chrome"}],
+        "documents": [{"title": "acme chrome"}, {"title": "acme chrome"}],
         "include_source": false,
         "profile": true
     }))
@@ -296,9 +292,7 @@ async fn search_fails_loud_when_a_matched_source_is_unavailable() {
     {
         let mut engine =
             Engine::with_config(Normalizer::default_vocab().expect("vocab"), config.clone());
-        engine
-            .try_insert_live("topps chrome", 7, 1)
-            .expect("insert");
+        engine.try_insert_live("acme chrome", 7, 1).expect("insert");
         engine.flush();
     }
     let source_name = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin"))
@@ -309,7 +303,7 @@ async fn search_fails_loud_when_a_matched_source_is_unavailable() {
     assert!(engine.snapshot().has_live_query(7));
     let state = state_with(engine, false);
     let request: SearchBody = serde_json::from_value(serde_json::json!({
-        "document": {"title": "topps chrome"}
+        "document": {"title": "acme chrome"}
     }))
     .expect("body");
     let error = search(State(state), Json(request))

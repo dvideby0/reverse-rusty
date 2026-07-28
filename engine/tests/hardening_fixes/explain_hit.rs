@@ -10,12 +10,12 @@ fn explain_hit_returns_structured_detail_for_matched_query() {
     let mut engine = Engine::new(norm);
 
     let queries = vec![
-        (1u64, "michael jordan 1986 fleer".to_string()),
-        (2u64, "kobe bryant psa 10".to_string()),
+        (1u64, "wireless mouse 1986 vertex".to_string()),
+        (2u64, "noise cancelling headphones pro".to_string()),
     ];
     engine.build_from_queries(&queries);
 
-    let title = "michael jordan 1986 fleer rookie card";
+    let title = "wireless mouse 1986 vertex new item";
     let ids = match_ids(&engine, title);
     assert!(ids.contains(&1), "query 1 should match");
 
@@ -46,9 +46,9 @@ fn explain_hit_shows_failure_for_non_matching_title() {
     let norm = make_norm();
     let mut engine = Engine::new(norm);
 
-    engine.build_from_queries(&[(1u64, "michael jordan 1986 fleer".to_string())]);
+    engine.build_from_queries(&[(1u64, "wireless mouse 1986 vertex".to_string())]);
 
-    let title = "kobe bryant 1996 topps chrome";
+    let title = "noise cancelling headphones 1996 acme chrome";
     let ids = match_ids(&engine, title);
     assert!(!ids.contains(&1), "query 1 should not match this title");
 
@@ -74,12 +74,12 @@ fn explain_hit_uses_dual_view_for_multiword_alias() {
     // canonical N(T) (which lacks the overlap-only `term:new_york`). This fails on the pre-fix
     // single-view explain.
     let mut engine = Engine::new(reverse_rusty::normalize::Normalizer::default_vocab().unwrap());
-    engine.build_from_queries(&[(1u64, "new york yankees".to_string())]);
+    engine.build_from_queries(&[(1u64, "new york inventory".to_string())]);
     engine
         .import_alias_synonyms("ny => new york\nnyc => new york city")
         .expect("apply multi-word aliases");
 
-    let title = "new york city yankees";
+    let title = "new york city inventory";
     assert!(
         match_ids(&engine, title).contains(&1),
         "the matcher hits via the positive superset P(T)"

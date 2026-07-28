@@ -21,6 +21,17 @@ pub(super) fn check(baseline_path: &Path, report_path: &Path) -> Result<(), Box<
         print_failures("deterministic/resource", &static_failures);
         return Err(io::Error::other("performance gate failed without a timing retry").into());
     }
+    if baseline.reference.source_run_ids.is_empty() {
+        report
+            .timing_attempts
+            .push(measure_timing(&engine, &titles)?);
+        write_json(report_path, &report)?;
+        super::print_report_summary(&report);
+        println!(
+            "performance gate: PASS structure/resources; timing captured but comparison pending five reviewed CI reports"
+        );
+        return Ok(());
+    }
 
     let first = measure_timing(&engine, &titles)?;
     let first_failures = compare_timing(&first, &baseline);
@@ -90,19 +101,40 @@ fn validate_baseline_definition(baseline: &Baseline) -> Result<(), Box<dyn Error
         ))
         .into());
     }
-    if baseline.reference.source_run_ids.len() < 5 {
-        return Err(
-            io::Error::other("baseline must retain at least five reviewed CI source runs").into(),
-        );
-    }
-    for (name, samples) in timing_histories(&baseline.reference.timing) {
-        if samples.len() != baseline.reference.source_run_ids.len() {
-            return Err(io::Error::other(format!(
-                "{name} has {} samples for {} source runs",
-                samples.len(),
-                baseline.reference.source_run_ids.len()
-            ))
+    validate_timing_reference(
+        &baseline.reference.source_run_ids,
+        &baseline.reference.timing,
+    )
+}
+
+fn validate_timing_reference(
+    source_run_ids: &[String],
+    timing: &TimingHistory,
+) -> Result<(), Box<dyn Error>> {
+    let source_runs = source_run_ids.len();
+    let histories = timing_histories(timing);
+    if source_runs == 0 {
+        if histories.iter().any(|(_, samples)| !samples.is_empty()) {
+            return Err(io::Error::other(
+                "a pending timing baseline must have no source runs and no timing samples",
+            )
             .into());
+        }
+    } else {
+        if source_runs < 5 {
+            return Err(io::Error::other(
+                "baseline must retain at least five reviewed CI source runs",
+            )
+            .into());
+        }
+        for (name, samples) in histories {
+            if samples.len() != source_runs {
+                return Err(io::Error::other(format!(
+                    "{name} has {} samples for {source_runs} source runs",
+                    samples.len()
+                ))
+                .into());
+            }
         }
     }
     Ok(())
@@ -399,5 +431,31 @@ mod tests {
     #[test]
     fn resource_limit_rounds_up() {
         assert_eq!(basis_point_allowance(101, 500), 6);
+    }
+
+    fn timing_history(samples: usize) -> TimingHistory {
+        TimingHistory {
+            latency_p50_ns: vec![1; samples],
+            latency_p95_ns: vec![1; samples],
+            latency_p99_ns: vec![1; samples],
+            selective_titles_per_sec: vec![1; samples],
+            columnar_titles_per_sec: vec![1; samples],
+        }
+    }
+
+    #[test]
+    fn pending_timing_reference_must_be_completely_empty() {
+        validate_timing_reference(&[], &timing_history(0)).expect("empty pending state");
+        assert!(validate_timing_reference(&[], &timing_history(1)).is_err());
+    }
+
+    #[test]
+    fn populated_timing_reference_requires_five_aligned_ci_runs() {
+        let four = (0..4).map(|i| i.to_string()).collect::<Vec<_>>();
+        assert!(validate_timing_reference(&four, &timing_history(4)).is_err());
+
+        let five = (0..5).map(|i| i.to_string()).collect::<Vec<_>>();
+        validate_timing_reference(&five, &timing_history(5)).expect("five aligned histories");
+        assert!(validate_timing_reference(&five, &timing_history(4)).is_err());
     }
 }

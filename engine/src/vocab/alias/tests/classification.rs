@@ -5,11 +5,11 @@ fn single_token_variant_pair_is_variant_kind() {
     let dict = Dict::new();
     // Plurals / truncations share a >=3 char prefix → variant.
     assert_eq!(
-        classify_kind(&forms(&["refractor", "refractors"]), &norm(), &dict),
+        classify_kind(&forms(&["premium", "premiums"]), &norm(), &dict),
         AliasKind::SingleTokenVariant
     );
     assert_eq!(
-        classify_kind(&forms(&["autograph", "autographed"]), &norm(), &dict),
+        classify_kind(&forms(&["adapter", "adapters"]), &norm(), &dict),
         AliasKind::SingleTokenVariant
     );
 }
@@ -199,7 +199,7 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
     // Seed a candidate via discovery, reject it, re-discover: stays rejected.
     assert_eq!(
         reg.add_classified(
-            &forms(&["refractor", "refractors"]),
+            &forms(&["premium", "premiums"]),
             AliasProvenance::LearnedDistributional,
             0.7,
             &n,
@@ -208,10 +208,10 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
         Some(AliasStatus::Candidate),
         "even a variant-looking pair lands Candidate from discovery"
     );
-    assert!(reg.reject(&forms(&["refractor", "refractors"])));
+    assert!(reg.reject(&forms(&["premium", "premiums"])));
     assert_eq!(
         reg.add_classified(
-            &forms(&["refractor", "refractors"]),
+            &forms(&["premium", "premiums"]),
             AliasProvenance::LearnedDistributional,
             0.9,
             &n,
@@ -224,7 +224,7 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
     // A re-discovered candidate refreshes confidence upward, never status.
     assert_eq!(
         reg.add_classified(
-            &forms(&["ud", "upperdeck"]),
+            &forms(&["north", "northstar"]),
             AliasProvenance::LearnedDistributional,
             0.6,
             &n,
@@ -234,7 +234,7 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
     );
     assert_eq!(
         reg.add_classified(
-            &forms(&["ud", "upperdeck"]),
+            &forms(&["north", "northstar"]),
             AliasProvenance::LearnedDistributional,
             0.8,
             &n,
@@ -246,7 +246,7 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
     let e = reg
         .entries()
         .iter()
-        .find(|e| e.forms == forms(&["ud", "upperdeck"]))
+        .find(|e| e.forms == forms(&["north", "northstar"]))
         .expect("entry recorded");
     assert!(
         (e.confidence - 0.8).abs() < 1e-12,
@@ -259,7 +259,7 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
     // distributional seed must not block the existing reconciliation ladder.
     assert_eq!(
         reg.add_classified(
-            &forms(&["ud", "upperdeck"]),
+            &forms(&["north", "northstar"]),
             AliasProvenance::DeclaredFile,
             1.0,
             &n,

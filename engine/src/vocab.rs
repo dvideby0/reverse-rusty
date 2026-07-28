@@ -44,7 +44,7 @@ pub struct Vocab {
     #[serde(default)]
     phrases: Vec<PhraseEntry>,
     /// Learned/declared equivalence groups (ADR-054): each inner vec is a set of surface
-    /// forms treated as the same entity (e.g. `["ud", "upper deck"]`). Applied via
+    /// forms treated as the same entity (e.g. `["ns", "north star"]`). Applied via
     /// **expansion, not collapse** — a query requiring one form is widened to an any-of over
     /// the group's features, so it matches a title bearing any form, FN-safe. Distinct from
     /// `synonyms` (which collapse a form to a canonical via the normalizer).

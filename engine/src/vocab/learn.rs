@@ -151,7 +151,7 @@ fn normalize_token(text: &str) -> String {
 /// Collect positive any-of **groups** (each sorted + deduped) that appear in at least
 /// `min_count` queries, with the count. Group-level, unlike
 /// [`learn_equivalences_from_queries`] (which decomposes a group into pairs): this
-/// preserves `(psa, bgs, sgc)` as ONE 3-form group so the alias registry can classify it
+/// preserves `(alpha, beta, gamma)` as ONE 3-form group so the alias registry can classify it
 /// as a multi-form category alternative rather than three variant pairs (ADR-060). Forms
 /// are kept raw — resolved through the normalizer when applied. Negated groups are skipped
 /// (a `-(a,b)` is a forbidden disjunction, never an equivalence assertion). Output is sorted
@@ -229,7 +229,7 @@ impl Default for CorpusLearnConfig {
 
 /// Learn equivalence relationships from query any-of co-occurrence (ADR-054): an any-of group
 /// `(a, b, c)` declares its members interchangeable. Each unordered **pair** within a group is
-/// counted — so `(rc,rookie)` and `(rc,rookie,rookie card)` both reinforce `rc≡rookie`, matching
+/// counted — so `(pkg,new)` and `(pkg,new,new item)` both reinforce `pkg≡new`, matching
 /// the pair-level [`learn_from_queries`] synonym learner rather than keying on the exact group.
 /// A pair seen in at least `min_count` any-of groups is emitted as a 2-element equivalence
 /// group; overlapping pairs are unioned transitively at apply time

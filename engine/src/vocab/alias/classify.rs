@@ -84,7 +84,7 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
     // not auto-activate), checked BEFORE the multi-word classification. Mixed-kind fires only when
     // ≥2 *different* known (non-Generic) kinds appear: an un-interned form reads as Generic, so a
     // fresh import (nothing interned yet) never trips it — it is a guard against merging an
-    // already-known Brand with an already-known Player (in any form), not a hair-trigger.
+    // already-known Brand with an already-known Entity (in any form), not a hair-trigger.
     let known = kinds
         .iter()
         .copied()
@@ -126,7 +126,7 @@ pub(super) fn default_status_for(kind: AliasKind, provenance: AliasProvenance) -
         AliasKind::SingleTokenVariant => true,
         // Distinct single tokens, or a multi-word token-graph alias (ADR-061): honor an operator
         // declaration (declared / manual), but treat a learned any-of disjunction (the
-        // `(psa, bgs, sgc)` case, or a learned multi-word guess) as a review candidate.
+        // `(alpha, beta, gamma)` case, or a learned multi-word guess) as a review candidate.
         AliasKind::SingleTokenDistinct | AliasKind::MultiWord => match provenance {
             DeclaredFile | Manual => true,
             LearnedFromQueries | LearnedDistributional => false,
@@ -153,7 +153,7 @@ fn all_pairwise_variant(forms: &[String]) -> bool {
 }
 
 /// Two surface tokens are spelling / abbreviation variants iff they share a common prefix of
-/// at least 3 characters (plurals `refractor`/`refractors`, truncations `auto`/`autograph`,
+/// at least 3 characters (plurals `premium`/`premiums`, truncations `config`/`configuration`,
 /// hyphenation folds). Deliberately narrow + explainable: it errs toward `false` (→ candidate),
 /// so a recall-first deployment never *silently* merges two distinct tokens. Richer signals
 /// (subsequence abbreviations, bounded edit distance) are a deferred refinement that can only

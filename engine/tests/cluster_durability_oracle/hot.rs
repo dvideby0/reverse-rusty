@@ -11,7 +11,7 @@
 use crate::harness::*;
 const MANIFEST: &str = "cluster_manifest.bin";
 /// θ for the durable corpus (~12k queries) — smaller than the 20k oracles' 64 so
-/// the Zipf-head players still cross it; non-degeneracy is asserted.
+/// the Zipf-head entities still cross it; non-degeneracy is asserted.
 const THETA: u32 = 32;
 
 fn theta_cfg(num_shards: usize, dir: std::path::PathBuf, theta: u32) -> ClusterConfig {
@@ -36,7 +36,7 @@ fn durable_hot_cluster_reopens_and_matches() {
             assert!(h > 0, "k={k}: degenerate — no class H stored");
             // A live add on the un-checkpointed clog tail (replayed on reopen).
             cluster
-                .add_query(9_000_777, "2001 topps rareplayer3")
+                .add_query(9_000_777, "2001 acme rareentity3")
                 .expect("live add");
             (
                 titles
@@ -60,7 +60,7 @@ fn durable_hot_cluster_reopens_and_matches() {
             "k={k}: class-H population drifted across reopen (same θ)"
         );
         let mut live = queries.clone();
-        live.push((9_000_777, "2001 topps rareplayer3".to_string()));
+        live.push((9_000_777, "2001 acme rareentity3".to_string()));
         let brute = Brute::build(&live);
         let mut blc = String::new();
         let mut bfeats = Vec::new();
@@ -147,7 +147,7 @@ fn reopen_with_flipped_theta_is_result_identical_and_fences_hold() {
     }
     let before_add = reopened.class_counts().expect("cc");
     reopened
-        .add_query(9_100_000, "1990 topps rareplayer7")
+        .add_query(9_100_000, "1990 acme rareentity7")
         .expect("live add under θ=0");
     let after_add = reopened.class_counts().expect("cc");
     assert_eq!(

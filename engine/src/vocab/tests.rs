@@ -367,7 +367,7 @@ fn snapshot_carries_vocab_for_lock_free_reads() {
     // time, and that a published snapshot is immutable across a later
     // set_vocab (an older snapshot keeps its own view).
     let mut vocab = Vocab::new();
-    vocab.add_synonym("rc", "term:rookie", FeatureKind::Category);
+    vocab.add_synonym("pkg", "term:new", FeatureKind::Category);
     let mut eng = crate::segment::Engine::with_vocab(vocab, crate::config::EngineConfig::default())
         .expect("should build engine from vocab");
 
@@ -381,8 +381,8 @@ fn snapshot_carries_vocab_for_lock_free_reads() {
 
     // Swap in a larger vocab on the engine.
     let mut vocab2 = Vocab::new();
-    vocab2.add_synonym("rc", "term:rookie", FeatureKind::Category);
-    vocab2.add_synonym("ud", "term:upper_deck", FeatureKind::Generic);
+    vocab2.add_synonym("pkg", "term:new", FeatureKind::Category);
+    vocab2.add_synonym("ns", "term:north_star", FeatureKind::Generic);
     eng.set_vocab(vocab2).expect("set_vocab should succeed");
 
     // A fresh snapshot reflects the update; the old snapshot is unchanged.
@@ -410,7 +410,7 @@ fn corpus_learn_default_off_equals_anyof_only() {
     // The default CorpusLearnConfig disables NPMI, so the composer must be
     // byte-identical to any-of learning alone (the back-compat guarantee, ADR-053).
     let queries: Vec<(u64, String)> = (0..30)
-        .map(|i| (i, format!("(rookie,rc) upper deck unique{i:03}")))
+        .map(|i| (i, format!("(new,pkg) north star unique{i:03}")))
         .collect();
     let cfg = CorpusLearnConfig {
         anyof_min_count: 2,
@@ -428,9 +428,9 @@ fn corpus_learn_default_off_equals_anyof_only() {
 #[test]
 fn corpus_learn_on_adds_npmi_phrases() {
     // No any-of groups -> any-of learning finds nothing; turning on NPMI induces the
-    // repeated adjacent "upper deck" entity as a phrase.
+    // repeated adjacent "north star" entity as a phrase.
     let queries: Vec<(u64, String)> = (0..30)
-        .map(|i| (i, format!("upper deck unique{i:03}")))
+        .map(|i| (i, format!("north star unique{i:03}")))
         .collect();
     let off = learn_vocab_from_corpus(
         &queries,
@@ -455,21 +455,21 @@ fn corpus_learn_on_adds_npmi_phrases() {
     assert!(
         on.phrases()
             .iter()
-            .any(|p| p.tokens == vec!["upper".to_string(), "deck".to_string()]),
-        "NPMI on must induce the upper/deck phrase"
+            .any(|p| p.tokens == vec!["north".to_string(), "star".to_string()]),
+        "NPMI on must induce the north/star phrase"
     );
 }
 
 #[test]
 fn learns_equivalences_from_anyof_groups() {
     let queries: Vec<(u64, String)> = (0..10)
-        .map(|i| (i, format!("(rookie,rc) card{i:03}")))
+        .map(|i| (i, format!("(new,pkg) item{i:03}")))
         .collect();
     let groups = learn_equivalences_from_queries(&queries, 2);
     assert!(
         groups
             .iter()
-            .any(|g| g.contains(&"rc".to_string()) && g.contains(&"rookie".to_string())),
+            .any(|g| g.contains(&"pkg".to_string()) && g.contains(&"new".to_string())),
         "an any-of group seen >= min_count must be learned as an equivalence group"
     );
     // Below threshold -> nothing learned.
@@ -479,7 +479,7 @@ fn learns_equivalences_from_anyof_groups() {
 #[test]
 fn corpus_learn_equivalences_mode_emits_groups_not_synonyms() {
     let queries: Vec<(u64, String)> = (0..10)
-        .map(|i| (i, format!("(rookie,rc) card{i:03}")))
+        .map(|i| (i, format!("(new,pkg) item{i:03}")))
         .collect();
     let cfg = CorpusLearnConfig {
         anyof_min_count: 2,
@@ -499,19 +499,19 @@ fn corpus_learn_equivalences_mode_emits_groups_not_synonyms() {
 
 #[test]
 fn learn_equivalences_reinforces_pairs_across_group_sizes() {
-    // (rc,rookie) once + (rc,rookie,rcfull) once: pair-level counting reinforces rc≡rookie
+    // (pkg,new) once + (pkg,new,rcfull) once: pair-level counting reinforces pkg≡new
     // (count 2), so it survives min_count=2 — exact-group counting would see two distinct
     // groups (count 1 each) and learn nothing.
     let queries = vec![
-        (1u64, "(rc,rookie)".to_string()),
-        (2u64, "(rc,rookie,rcfull)".to_string()),
+        (1u64, "(pkg,new)".to_string()),
+        (2u64, "(pkg,new,rcfull)".to_string()),
     ];
     let groups = learn_equivalences_from_queries(&queries, 2);
     assert!(
         groups
             .iter()
-            .any(|g| g.contains(&"rc".to_string()) && g.contains(&"rookie".to_string())),
-        "rc≡rookie must reinforce across the two differently-sized any-of groups"
+            .any(|g| g.contains(&"pkg".to_string()) && g.contains(&"new".to_string())),
+        "pkg≡new must reinforce across the two differently-sized any-of groups"
     );
 }
 

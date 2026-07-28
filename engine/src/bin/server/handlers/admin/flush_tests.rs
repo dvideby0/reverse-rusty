@@ -52,7 +52,7 @@ fn state_with_engine(engine: Engine) -> Arc<AppState> {
 
 fn state_with_memtable() -> Arc<AppState> {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
-    engine.try_insert_live("1994 topps", 7, 1).expect("insert");
+    engine.try_insert_live("1994 acme", 7, 1).expect("insert");
     state_with_engine(engine)
 }
 
@@ -202,7 +202,7 @@ async fn durable_failure_is_a_failed_shard_and_never_acknowledged() {
         ..EngineConfig::default()
     };
     let mut engine = Engine::with_config(Normalizer::default_vocab().expect("vocab"), config);
-    engine.try_insert_live("1994 topps", 7, 1).expect("insert");
+    engine.try_insert_live("1994 acme", 7, 1).expect("insert");
     let state = state_with_engine(engine);
 
     let segments = dir.join("segments");

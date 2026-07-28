@@ -28,8 +28,8 @@ fn messy_dataset(seed: u64) -> reverse_rusty::gen::Dataset {
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: 2_500,
-        num_sets: 1_000,
+        num_entities: 2_500,
+        num_collections: 1_000,
     };
     let mut data = generate(&cfg);
     let clean_titles = data.titles.clone();
@@ -70,7 +70,7 @@ fn messy_dataset(seed: u64) -> reverse_rusty::gen::Dataset {
 fn zero_false_negatives_with_messy_corpus() {
     let data = messy_dataset(0x00DE_FACE);
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     let n = data.queries.len();
     let c = n / 3;
     eng.build_from_queries(&data.queries[..c]);
@@ -117,7 +117,7 @@ fn zero_false_negatives_with_messy_corpus() {
 fn batch_path_zero_false_negatives_with_messy_corpus() {
     let data = messy_dataset(0x0BAD_F00D);
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     let n = data.queries.len();
     let c = n / 2;
     eng.build_from_queries(&data.queries[..c]);

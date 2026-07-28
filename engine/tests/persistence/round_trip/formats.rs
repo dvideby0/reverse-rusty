@@ -22,11 +22,11 @@ fn segment_round_trip() {
 
     // 3) Verify both produce the same matches
     let titles = [
-        "1986 Fleer Michael Jordan Rookie Card #57 PSA 10",
-        "LeBron James 2003 Topps Chrome Rookie RC",
-        "Kobe Bryant 1996 Topps Chrome Refractor PSA 10",
-        "Mike Trout 2011 Topps Update RC US175",
-        "Random card that matches nothing specific",
+        "1986 Vertex Wireless Mouse New Item #57 PRO",
+        "Mechanical Keyboard 2003 Acme Chrome New PKG",
+        "Noise Cancelling Headphones 1996 Acme Chrome Premium PRO",
+        "Air Purifier 2011 Acme Update PKG US175",
+        "Random item that matches nothing specific",
     ];
 
     for title in &titles {
@@ -58,7 +58,7 @@ fn persist_and_reopen() {
     engine.build_from_queries(&queries);
 
     // Record expected matches
-    let title = "1986 Fleer Michael Jordan Rookie Card #57 PSA 10";
+    let title = "1986 Vertex Wireless Mouse New Item #57 PRO";
     let expected = match_ids(&engine, title);
     drop(engine); // "close" the engine
 
@@ -322,11 +322,11 @@ fn tagged_queries_survive_reopen_and_filter_on_mmap() {
         ..EngineConfig::default()
     };
     let queries = vec![
-        (1u64, "topps chrome".to_string()),
-        (2u64, "topps chrome".to_string()),
+        (1u64, "acme chrome".to_string()),
+        (2u64, "acme chrome".to_string()),
     ];
     let tags = vec![
-        vec![("category".to_string(), "cards".to_string())],
+        vec![("category".to_string(), "items".to_string())],
         vec![("category".to_string(), "coins".to_string())],
     ];
     let mut engine = Engine::with_config(make_norm(), config.clone());
@@ -338,14 +338,14 @@ fn tagged_queries_survive_reopen_and_filter_on_mmap() {
     // Reopen — the base segment is now mmap'd, so the tag column is read from the v3 .seg.
     let engine2 = Engine::open(make_norm(), config).unwrap();
     let snap = engine2.snapshot();
-    let title = "2020 topps chrome update";
+    let title = "2020 acme chrome update";
     let source = snap.get_query_document(1).expect("stored source metadata");
-    assert_eq!(source.query(), "topps chrome");
+    assert_eq!(source.query(), "acme chrome");
     assert_eq!(source.version(), 1);
     assert!(source.tags_known());
     assert_eq!(
         source.tags(),
-        [("category".to_string(), "cards".to_string())]
+        [("category".to_string(), "items".to_string())]
     );
 
     let mut s = reverse_rusty::segment::MatchScratch::new();
@@ -359,13 +359,13 @@ fn tagged_queries_survive_reopen_and_filter_on_mmap() {
         "both queries match the title unfiltered after reopen"
     );
 
-    let cards = snap.compile_tag_predicate(&[("category".to_string(), vec!["cards".to_string()])]);
-    snap.match_title_filtered(title, &mut s, &mut out, true, &cards);
+    let items = snap.compile_tag_predicate(&[("category".to_string(), vec!["items".to_string()])]);
+    snap.match_title_filtered(title, &mut s, &mut out, true, &items);
     out.sort_unstable();
     assert_eq!(
         out,
         vec![1],
-        "category=cards narrows to query 1 on the reopened mmap segment"
+        "category=items narrows to query 1 on the reopened mmap segment"
     );
 
     let coins = snap.compile_tag_predicate(&[("category".to_string(), vec!["coins".to_string()])]);

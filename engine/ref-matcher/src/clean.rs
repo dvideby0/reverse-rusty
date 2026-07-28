@@ -17,7 +17,7 @@ pub enum PunctClass {
     /// Left literally in place inside the token (`.` so `9.5` survives).
     Keep,
     /// Emitted as its own standalone token (` <c> `), so the number logic can tell `#2` / `/199`
-    /// from grades.
+    /// from decimal values.
     Marker,
 }
 
@@ -57,7 +57,7 @@ impl PunctTable {
     }
 }
 
-/// Fold common Latin diacritics to ASCII so `Jokić` -> `jokic`, `Acuña` -> `acuna`.
+/// Fold common Latin diacritics to ASCII so `café` -> `cafe`, `jalapeño` -> `jalapeno`.
 ///
 /// Transcribed verbatim from `engine/src/normalize/core/helpers.rs::fold_diacritic`. A divergence
 /// here is a genuine finding; the table is a finite lookup, so the independence value is in the

@@ -4,17 +4,15 @@ use super::*;
 fn solr_parses_lists_mappings_and_comments() {
     let text = "\
 # a comment line
-refractor, refractors
+premium, premiums
 
 ipod, i-pod, i pod
 foozball => foosball
 sea biscuit, sea biscit => seabiscuit
 ";
     let groups = parse_solr_synonyms(text);
-    // refractor/refractors
-    assert!(groups
-        .iter()
-        .any(|g| g == &forms(&["refractor", "refractors"])));
+    // premium/premiums
+    assert!(groups.iter().any(|g| g == &forms(&["premium", "premiums"])));
     // ipod list (sorted): "i pod", "i-pod", "ipod"
     assert!(groups
         .iter()
@@ -47,7 +45,7 @@ fn registry_active_groups_includes_variants_and_declared_multiword() {
 
     // variant → active
     reg.add_classified(
-        &forms(&["refractor", "refractors"]),
+        &forms(&["premium", "premiums"]),
         AliasProvenance::LearnedFromQueries,
         0.5,
         &n,
@@ -55,7 +53,7 @@ fn registry_active_groups_includes_variants_and_declared_multiword() {
     );
     // learned distinct → candidate
     reg.add_classified(
-        &forms(&["psa", "bgs", "sgc"]),
+        &forms(&["alpha", "beta", "gamma"]),
         AliasProvenance::LearnedFromQueries,
         0.5,
         &n,
@@ -63,7 +61,7 @@ fn registry_active_groups_includes_variants_and_declared_multiword() {
     );
     // declared multi-word → active (the ADR-061 matcher expresses it)
     reg.add_classified(
-        &forms(&["ud", "upper deck"]),
+        &forms(&["ns", "north star"]),
         AliasProvenance::DeclaredFile,
         1.0,
         &n,
@@ -74,15 +72,15 @@ fn registry_active_groups_includes_variants_and_declared_multiword() {
     assert_eq!(
         active,
         vec![
-            forms(&["refractor", "refractors"]),
-            forms(&["ud", "upper deck"])
+            forms(&["premium", "premiums"]),
+            forms(&["north star", "ns"])
         ]
     );
     // EVERY active entry's forms are offered for phrase registration (the builder re-derives
     // multi-wordness from the live punct table and skips the single-token ones, codex R11).
     assert_eq!(
         reg.active_alias_forms(),
-        forms(&["refractor", "refractors", "ud", "upper deck"])
+        forms(&["north star", "ns", "premium", "premiums"])
     );
     let s = reg.summary();
     assert_eq!((s.active, s.candidate, s.rejected), (2, 1, 0));
@@ -96,7 +94,7 @@ fn declared_distinct_activates_but_learned_does_not() {
     let mut learned = AliasRegistry::new();
     assert_eq!(
         learned.add_classified(
-            &forms(&["psa", "bgs"]),
+            &forms(&["alpha", "beta"]),
             AliasProvenance::LearnedFromQueries,
             0.5,
             &n,
@@ -108,7 +106,7 @@ fn declared_distinct_activates_but_learned_does_not() {
     let mut declared = AliasRegistry::new();
     assert_eq!(
         declared.add_classified(
-            &forms(&["psa", "bgs"]),
+            &forms(&["alpha", "beta"]),
             AliasProvenance::DeclaredFile,
             1.0,
             &n,
@@ -125,7 +123,7 @@ fn declared_import_upgrades_a_learned_candidate() {
     let mut reg = AliasRegistry::new();
     // First learned as a candidate (distinct single tokens).
     reg.add_classified(
-        &forms(&["psa", "bgs"]),
+        &forms(&["alpha", "beta"]),
         AliasProvenance::LearnedFromQueries,
         0.5,
         &n,
@@ -133,8 +131,8 @@ fn declared_import_upgrades_a_learned_candidate() {
     );
     assert!(reg.active_groups().is_empty());
     // An operator then declares the same pair → upgraded to active.
-    reg.import_solr("psa, bgs", &n, &dict);
-    assert_eq!(reg.active_groups(), vec![forms(&["bgs", "psa"])]);
+    reg.import_solr("alpha, beta", &n, &dict);
+    assert_eq!(reg.active_groups(), vec![forms(&["alpha", "beta"])]);
 }
 
 #[test]
@@ -143,9 +141,9 @@ fn reimport_reports_zero_newly_active() {
     let dict = Dict::new();
     let mut reg = AliasRegistry::new();
     // First import activates the variant pair.
-    assert_eq!(reg.import_solr("refractor, refractors", &n, &dict), 1);
+    assert_eq!(reg.import_solr("premium, premiums", &n, &dict), 1);
     // Re-importing the same (already-active) group activates nothing new — idempotent.
-    assert_eq!(reg.import_solr("refractor, refractors", &n, &dict), 0);
+    assert_eq!(reg.import_solr("premium, premiums", &n, &dict), 0);
     assert_eq!(reg.len(), 1, "a re-import must not duplicate the entry");
 }
 
@@ -155,18 +153,18 @@ fn reject_blocks_reactivation_by_relearn() {
     let dict = Dict::new();
     let mut reg = AliasRegistry::new();
     reg.add_classified(
-        &forms(&["refractor", "refractors"]),
+        &forms(&["premium", "premiums"]),
         AliasProvenance::LearnedFromQueries,
         0.5,
         &n,
         &dict,
     );
-    assert!(reg.reject(&forms(&["refractor", "refractors"])));
+    assert!(reg.reject(&forms(&["premium", "premiums"])));
     assert!(reg.active_groups().is_empty());
     // A re-learn must NOT resurrect a rejected group.
     let acts = reg.learn_from_queries(
         &(0..5)
-            .map(|i| (i, "(refractor,refractors)".to_string()))
+            .map(|i| (i, "(premium,premiums)".to_string()))
             .collect::<Vec<_>>(),
         2,
         &n,
@@ -181,10 +179,10 @@ fn activate_accepts_multiword_refuses_mixed_kind() {
     let n = norm();
     let mut dict = Dict::new();
     let mut lc = String::new();
-    // Intern two different KNOWN kinds so {topps, jordan} classifies as MixedKind.
-    dict.intern("term:topps", crate::dict::FeatureKind::Brand);
-    dict.intern("term:jordan", crate::dict::FeatureKind::Entity);
-    let _ = n.compile_features_readonly("topps", &dict, &mut lc);
+    // Intern two different KNOWN kinds so {acme, widget} classifies as MixedKind.
+    dict.intern("term:acme", crate::dict::FeatureKind::Brand);
+    dict.intern("term:widget", crate::dict::FeatureKind::Entity);
+    let _ = n.compile_features_readonly("acme", &dict, &mut lc);
     let mut reg = AliasRegistry::new();
 
     // A learned multi-word group lands as a candidate; explicit activate now succeeds (ADR-061).
@@ -203,14 +201,14 @@ fn activate_accepts_multiword_refuses_mixed_kind() {
 
     // Mixed-kind is still refused — the matcher cannot express a cross-kind expansion.
     reg.add_classified(
-        &forms(&["topps", "jordan"]),
+        &forms(&["acme", "widget"]),
         AliasProvenance::DeclaredFile,
         1.0,
         &n,
         &dict,
     );
     assert!(
-        !reg.activate(&forms(&["jordan", "topps"])),
+        !reg.activate(&forms(&["widget", "acme"])),
         "mixed-kind activation is refused"
     );
 }

@@ -21,8 +21,8 @@ fn identity_perturbations_preserve_the_exact_match_set() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x3E7A_0001,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
     let eng = engine_from(&data.queries);

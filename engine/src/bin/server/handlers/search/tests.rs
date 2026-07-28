@@ -25,8 +25,8 @@ fn corpus() -> (Engine, Vec<String>) {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0BA7_C0DE,
-        num_players: 2_000,
-        num_sets: 1_000,
+        num_entities: 2_000,
+        num_collections: 1_000,
     });
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&data.queries);
@@ -97,12 +97,12 @@ fn body(docs: Option<Vec<&str>>, include_broad: Option<bool>, profile: bool) -> 
 
 // -- Ranking + pagination (ADR-059) ----------------------------------------
 
-/// A small engine where three queries all match `"2020 topps chrome update"`,
+/// A small engine where three queries all match `"2020 acme chrome update"`,
 /// each carrying distinct `priority`/`tier` tags — the fixture for ranking.
 fn tagged_state() -> Arc<AppState> {
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.insert_live_with_tags(
-        "topps chrome",
+        "acme chrome",
         1,
         1,
         &[
@@ -111,13 +111,13 @@ fn tagged_state() -> Arc<AppState> {
         ],
     );
     eng.insert_live_with_tags(
-        "topps chrome",
+        "acme chrome",
         2,
         1,
         &[("priority".to_string(), "50".to_string())],
     );
     eng.insert_live_with_tags(
-        "topps chrome",
+        "acme chrome",
         3,
         1,
         &[("tier".to_string(), "gold".to_string())],
@@ -143,7 +143,7 @@ fn ranked_engine() -> Engine {
     for (id, priority) in [(1, 5), (2, 50), (3, -7)] {
         engine
             .try_insert_live_ranked(
-                "topps chrome",
+                "acme chrome",
                 id,
                 1,
                 &[("priority".into(), priority.to_string())],

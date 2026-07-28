@@ -24,9 +24,9 @@ fn write_error_metrics_and_responses_share_the_same_status_classification() {
 #[tokio::test]
 async fn cluster_v2_search_is_exact_enriched_and_reports_routed_positions() {
     let state = test_state(&[
-        (3, "topps chrome".to_string()),
-        (1, "topps chrome".to_string()),
-        (2, "topps chrome".to_string()),
+        (3, "acme chrome".to_string()),
+        (1, "acme chrome".to_string()),
+        (2, "acme chrome".to_string()),
     ]);
     let (status, json) = send(
         &state,
@@ -34,7 +34,7 @@ async fn cluster_v2_search_is_exact_enriched_and_reports_routed_positions() {
             "POST",
             "/v2/_search",
             &serde_json::json!({
-                "document": {"title": "2020 topps chrome update"},
+                "document": {"title": "2020 acme chrome update"},
                 "explain": true
             }),
         ),
@@ -67,16 +67,16 @@ async fn cluster_v2_search_is_exact_enriched_and_reports_routed_positions() {
 #[tokio::test]
 async fn cluster_v2_search_supports_shared_url_controls_and_strict_errors() {
     let state = test_state(&[
-        (3, "topps chrome".to_string()),
-        (1, "topps chrome".to_string()),
-        (2, "topps chrome".to_string()),
+        (3, "acme chrome".to_string()),
+        (1, "acme chrome".to_string()),
+        (2, "acme chrome".to_string()),
     ]);
     let (status, json) = send(
         &state,
         req(
             "POST",
             "/v2/_search?size=1&_source=false&timeout=1s&track_total_hits=1",
-            &serde_json::json!({"document": {"title": "topps chrome"}}),
+            &serde_json::json!({"document": {"title": "acme chrome"}}),
         ),
     )
     .await;
@@ -92,13 +92,13 @@ async fn cluster_v2_search_supports_shared_url_controls_and_strict_errors() {
         (
             "unknown query parameter",
             "/v2/_search?preference=local",
-            serde_json::json!({"document": {"title": "topps chrome"}}),
+            serde_json::json!({"document": {"title": "acme chrome"}}),
         ),
         (
             "duplicate size",
             "/v2/_search?size=1",
             serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "size": 2
             }),
         ),
@@ -106,7 +106,7 @@ async fn cluster_v2_search_supports_shared_url_controls_and_strict_errors() {
             "unknown document field",
             "/v2/_search",
             serde_json::json!({
-                "document": {"title": "topps chrome", "sku": "ABC-1"}
+                "document": {"title": "acme chrome", "sku": "ABC-1"}
             }),
         ),
     ] {
@@ -120,9 +120,9 @@ async fn cluster_v2_search_supports_shared_url_controls_and_strict_errors() {
 #[tokio::test]
 async fn cluster_v2_mpercolate_is_exact_strict_and_compatibly_shaped() {
     let state = test_state(&[
-        (3, "topps chrome".to_string()),
-        (1, "topps chrome".to_string()),
-        (2, "topps chrome".to_string()),
+        (3, "acme chrome".to_string()),
+        (1, "acme chrome".to_string()),
+        (2, "acme chrome".to_string()),
     ]);
     let (status, json) = send(
         &state,
@@ -131,7 +131,7 @@ async fn cluster_v2_mpercolate_is_exact_strict_and_compatibly_shaped() {
             "/v2/_mpercolate",
             &serde_json::json!({
                 "documents": [
-                    {"title": "topps chrome"},
+                    {"title": "acme chrome"},
                     {"title": "no match"}
                 ],
                 "_source": false,
@@ -163,13 +163,13 @@ async fn cluster_v2_mpercolate_is_exact_strict_and_compatibly_shaped() {
         (
             "unknown query parameter",
             "/v2/_mpercolate?size=1",
-            serde_json::json!({"documents": [{"title": "topps chrome"}]}),
+            serde_json::json!({"documents": [{"title": "acme chrome"}]}),
         ),
         (
             "unknown top-level field",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome"}],
+                "documents": [{"title": "acme chrome"}],
                 "preference": "local"
             }),
         ),
@@ -177,7 +177,7 @@ async fn cluster_v2_mpercolate_is_exact_strict_and_compatibly_shaped() {
             "unknown document field",
             "/v2/_mpercolate",
             serde_json::json!({
-                "documents": [{"title": "topps chrome", "sku": "ABC-1"}]
+                "documents": [{"title": "acme chrome", "sku": "ABC-1"}]
             }),
         ),
     ] {
@@ -190,14 +190,14 @@ async fn cluster_v2_mpercolate_is_exact_strict_and_compatibly_shaped() {
 
 #[tokio::test]
 async fn cluster_v2_search_enforces_validation_deadline_and_enrichment_cap() {
-    let state = test_state(&[(1, "topps chrome".to_string())]);
+    let state = test_state(&[(1, "acme chrome".to_string())]);
     let (status, json) = send(
         &state,
         req(
             "POST",
             "/v2/_search",
             &serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "allow_partial_results": true
             }),
         ),
@@ -205,7 +205,7 @@ async fn cluster_v2_search_enforces_validation_deadline_and_enrichment_cap() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
 
-    let mut capped = test_state(&[(1, "topps chrome".to_string())]);
+    let mut capped = test_state(&[(1, "acme chrome".to_string())]);
     Arc::get_mut(&mut capped)
         .expect("unique state")
         .max_ranked_enrichment_bytes = 1;
@@ -214,14 +214,14 @@ async fn cluster_v2_search_enforces_validation_deadline_and_enrichment_cap() {
         req(
             "POST",
             "/v2/_search",
-            &serde_json::json!({"document": {"title": "topps chrome"}}),
+            &serde_json::json!({"document": {"title": "acme chrome"}}),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{json}");
     assert_eq!(json["error"]["type"], "rank_enrichment_limit");
 
-    let mut queued = test_state(&[(1, "topps chrome".to_string())]);
+    let mut queued = test_state(&[(1, "acme chrome".to_string())]);
     Arc::get_mut(&mut queued)
         .expect("unique state")
         .ranked_search_permits = Arc::new(tokio::sync::Semaphore::new(0));
@@ -231,7 +231,7 @@ async fn cluster_v2_search_enforces_validation_deadline_and_enrichment_cap() {
             "POST",
             "/v2/_search",
             &serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "timeout_ms": 1
             }),
         ),
@@ -298,7 +298,7 @@ async fn cluster_v2_missing_winner_source_is_a_no_partial_502() {
         let cluster = ClusterEngine::build(
             Normalizer::default_vocab().expect("vocab"),
             &cfg,
-            &[(1, "topps chrome".to_string())],
+            &[(1, "acme chrome".to_string())],
         )
         .expect("durable cluster");
         cluster.flush().expect("flush");
@@ -332,7 +332,7 @@ async fn cluster_v2_missing_winner_source_is_a_no_partial_502() {
         req(
             "POST",
             "/v2/_search",
-            &serde_json::json!({"document": {"title": "topps chrome"}}),
+            &serde_json::json!({"document": {"title": "acme chrome"}}),
         ),
     )
     .await;
@@ -346,7 +346,7 @@ async fn cluster_v2_missing_winner_source_is_a_no_partial_502() {
             "POST",
             "/_search",
             &serde_json::json!({
-                "document": {"title": "topps chrome"},
+                "document": {"title": "acme chrome"},
                 "include_source": true
             }),
         ),

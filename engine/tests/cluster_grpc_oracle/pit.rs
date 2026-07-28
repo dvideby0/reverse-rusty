@@ -21,9 +21,9 @@ use crate::harness::*;
 #[test]
 fn grpc_assembly_refuses_pit_typed_and_leaks_nothing() {
     let queries: Vec<(u64, String)> = vec![
-        (1, "michael jordan".to_string()),
-        (2, "jordan psa 10".to_string()),
-        (3, "topps chrome".to_string()),
+        (1, "wireless mouse".to_string()),
+        (2, "product gamma pro".to_string()),
+        (3, "acme chrome".to_string()),
     ];
     let norm = Arc::new(vocab());
     let dict = {
@@ -98,7 +98,7 @@ fn grpc_assembly_refuses_pit_typed_and_leaks_nothing() {
         .expect("program");
     let err = cluster
         .try_percolate_filtered_top_k(
-            "michael jordan",
+            "wireless mouse",
             &[],
             TopKOptions {
                 search_after: Some((0, 0)),
@@ -115,7 +115,7 @@ fn grpc_assembly_refuses_pit_typed_and_leaks_nothing() {
 
     // Normal current-view reads are untouched by the refusals.
     let live = cluster
-        .percolate("michael jordan psa 10")
+        .percolate("wireless mouse pro")
         .expect("current view");
     assert!(live.contains(&1) && live.contains(&2));
 }

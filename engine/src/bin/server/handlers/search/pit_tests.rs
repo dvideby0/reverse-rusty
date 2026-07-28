@@ -21,14 +21,14 @@ use reverse_rusty::{Normalizer, RankValues};
 mod close_route;
 mod open_route;
 
-/// 25 ranked queries all matching "2020 topps chrome update", with score ties
+/// 25 ranked queries all matching "2020 acme chrome update", with score ties
 /// so the id tie-break is exercised across page boundaries.
 fn ranked_corpus() -> Engine {
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     for id in 1..=25u64 {
         let priority = (id % 5) as i64 * 10;
         eng.try_insert_live_ranked(
-            "topps chrome",
+            "acme chrome",
             id,
             1,
             &[("priority".to_string(), priority.to_string())],
@@ -137,7 +137,7 @@ fn hits_of(json: &serde_json::Value) -> Vec<(u64, i64)> {
 
 fn base_body(size: usize, include_source: bool) -> serde_json::Value {
     serde_json::json!({
-        "document": {"title": "2020 topps chrome update"},
+        "document": {"title": "2020 acme chrome update"},
         "size": size,
         "include_source": include_source,
         "rank": {"priority_field": "priority"},
@@ -192,7 +192,7 @@ async fn pit_pages_concatenate_and_pin_across_mutation() {
             let mut eng = state.engine.lock();
             eng.delete_by_logical_id(pages[0].0).expect("delete");
             eng.try_insert_live_ranked(
-                "topps chrome",
+                "acme chrome",
                 fresh_id,
                 1,
                 &[("priority".to_string(), "990".to_string())],
@@ -457,7 +457,7 @@ async fn mpercolate_names_pit_and_cursor_rejects() {
     let state = state();
     for key in ["pit", "cursor"] {
         let mut body = serde_json::json!({
-            "documents": [{"title": "2020 topps chrome update"}],
+            "documents": [{"title": "2020 acme chrome update"}],
             "rank": {"priority_field": "priority"},
         });
         body[key] = serde_json::json!("anything");

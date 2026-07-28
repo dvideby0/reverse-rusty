@@ -26,19 +26,19 @@ const CLASS_D_ID: u64 = 1_000_000;
 fn grpc_class_d_is_coordinator_gated_despite_default_shard_config() {
     // A tiny corpus: class-A (anchored), class-C (broad), and ONE negation-only class-D query.
     let queries: Vec<(u64, String)> = vec![
-        (1, "1990 topps chrome".to_string()),
-        (2, "1986 fleer".to_string()),
-        (3, "psa 10".to_string()),
-        (CLASS_D_ID, "-reprint".to_string()),
+        (1, "1990 acme chrome".to_string()),
+        (2, "1986 vertex".to_string()),
+        (3, "pro".to_string()),
+        (CLASS_D_ID, "-replica".to_string()),
     ];
     // Two probe titles: one free of the forbidden term (class-D MUST match — an always-candidate)
     // and one that contains it (class-D MUST be excluded — the forbidden feature is enforced in
     // exact verification, over the wire).
-    let title_match = "1990 topps chrome psa 10";
-    let title_reject = "1990 topps chrome reprint";
+    let title_match = "1990 acme chrome pro";
+    let title_reject = "1990 acme chrome replica";
 
     // ONE authoritative frozen feature space, shared into every server AND the coordinator. Built
-    // over the queries (incl. `-reprint`), so "reprint" has a real feature id on both sides.
+    // over the queries (incl. `-replica`), so "replica" has a real feature id on both sides.
     let norm = Arc::new(vocab());
     let dict = frozen_dict_over(&queries, &norm);
 

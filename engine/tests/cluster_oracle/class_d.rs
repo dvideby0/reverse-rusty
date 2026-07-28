@@ -43,8 +43,8 @@ fn mixed_corpus(
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: 2_000,
-        num_sets: 1_000,
+        num_entities: 2_000,
+        num_collections: 1_000,
     });
     let class_d = gen_class_d_queries(seed ^ 0xD00D, n_class_d);
     let step = (n_regular / n_class_d.max(1)).max(1);
@@ -155,7 +155,7 @@ fn cluster_class_d_rejected_when_lane_off() {
         "no class-D stored with the lane off"
     );
     assert_eq!(
-        cluster.add_query(9_999_999, "-auto -signed").unwrap(),
+        cluster.add_query(9_999_999, "-manual -signed").unwrap(),
         AddOutcome::RejectedClassD,
         "a live negation-only add must reject with the lane off"
     );
@@ -192,7 +192,7 @@ fn empty_class_d_is_rejected_and_a_failed_upsert_never_deletes() {
     };
     cfg.per_shard.accept_class_d = true;
     let cluster =
-        ClusterEngine::build(vocab(), &cfg, &[(1, "1996 skybox".to_string())]).expect("build");
+        ClusterEngine::build(vocab(), &cfg, &[(1, "1996 vertex".to_string())]).expect("build");
 
     // An empty / whitespace-only add is rejected (class D, nothing to forbid), stores nothing.
     for empty in ["", "   "] {
@@ -206,7 +206,7 @@ fn empty_class_d_is_rejected_and_a_failed_upsert_never_deletes() {
 
     // Query 1 matches its title before the bad upsert.
     let before: HashSet<u64> = cluster
-        .percolate("1996 skybox premium")
+        .percolate("1996 vertex premium")
         .unwrap()
         .into_iter()
         .collect();
@@ -223,7 +223,7 @@ fn empty_class_d_is_rejected_and_a_failed_upsert_never_deletes() {
         "a rejected empty upsert must not tombstone the prior version"
     );
     let after: HashSet<u64> = cluster
-        .percolate("1996 skybox premium")
+        .percolate("1996 vertex premium")
         .unwrap()
         .into_iter()
         .collect();

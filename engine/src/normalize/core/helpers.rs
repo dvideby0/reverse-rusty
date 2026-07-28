@@ -4,7 +4,7 @@
 
 use crate::dict::FeatureKind;
 
-/// Fold common Latin diacritics to ASCII so "Jokić"->"jokic", "Acuña"->"acuna".
+/// Fold common Latin diacritics to ASCII so "Jokić"->"jokic", "Jalapeño"->"jalapeno".
 pub fn fold_diacritic(ch: char) -> char {
     match ch {
         'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ā' | 'ą' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => {

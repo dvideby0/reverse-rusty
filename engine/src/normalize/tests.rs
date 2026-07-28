@@ -46,10 +46,13 @@ fn sample_vocab() -> Normalizer {
 #[test]
 fn diacritics_fold_to_ascii() {
     let n = Normalizer::default_vocab().unwrap();
-    // normalization.md §4: Café->cafe, Jokić->jokic, Acuña->acuna (ñ no longer splits).
+    // normalization.md §4: Café->cafe, Jokić->jokic, Jalapeño->jalapeno (ñ no longer splits).
     assert_eq!(names(&n, "café"), s(&["term:cafe"]));
     assert_eq!(names(&n, "Jokić"), s(&["term:jokic"]));
-    assert_eq!(names(&n, "Ronald Acuña"), s(&["term:acuna", "term:ronald"]));
+    assert_eq!(
+        names(&n, "Ronald Jalapeño"),
+        s(&["term:jalapeno", "term:ronald"])
+    );
 }
 
 #[test]
@@ -139,7 +142,7 @@ fn query_side_collapses_whitespace_runs_only_when_aliases_active() {
     // quoted phrase's inner text to `compile_features` verbatim — so a whitespace run inside a
     // query phrase (`"new  york"`) would hide the alias from the query-side collapse: the query
     // compiles to component terms, equivalence expansion never reaches the group, and
-    // `"new  york" mets` misses a `ny mets` title (a false negative). With an alias active, the
+    // `"new  york" catalog` misses a `ny catalog` title (a false negative). With an alias active, the
     // QUERY side therefore collapses runs before the phrase scan. The title canonical view stays
     // verbatim (codex R8: persisted normalization never changes), and without an alias the query
     // side is byte-identical (`whitespace_runs_are_not_collapsed_in_canonical_features` above).
@@ -148,8 +151,8 @@ fn query_side_collapses_whitespace_runs_only_when_aliases_active() {
     let n = b.build().expect("alias normalizer");
 
     assert_eq!(
-        names(&n, "new  york mets"),
-        s(&["term:mets", "term:new_york"]),
+        names(&n, "new  york catalog"),
+        s(&["term:catalog", "term:new_york"]),
         "query side: a run inside the alias span still collapses to the entity"
     );
 
@@ -162,7 +165,7 @@ fn query_side_collapses_whitespace_runs_only_when_aliases_active() {
     let mut sc = super::NormScratch::new();
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
     n.match_features_dual(
-        "new  york mets",
+        "new  york catalog",
         &dict,
         &mut lc,
         &mut sc,
@@ -339,11 +342,11 @@ fn alias_phrase_collapses_on_query_overlaps_on_title() {
     let q = norm.compile_features_readonly("new york", &dict, &mut lc);
     assert_eq!(q, vec![ny], "query-side alias must collapse to one entity");
 
-    // Title side: dual view of "new york city yankees".
+    // Title side: dual view of "new york city inventory".
     let mut sc = super::NormScratch::new();
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
     norm.match_features_dual(
-        "new york city yankees",
+        "new york city inventory",
         &dict,
         &mut lc,
         &mut sc,

@@ -6,14 +6,14 @@ fn json_round_trips() {
     let dict = Dict::new();
     let mut reg = AliasRegistry::new();
     reg.add_classified(
-        &forms(&["refractor", "refractors"]),
+        &forms(&["premium", "premiums"]),
         AliasProvenance::LearnedFromQueries,
         0.5,
         &n,
         &dict,
     );
     reg.add_classified(
-        &forms(&["ud", "upper deck"]),
+        &forms(&["ns", "north star"]),
         AliasProvenance::DeclaredFile,
         1.0,
         &n,
@@ -27,7 +27,7 @@ fn json_round_trips() {
     // ADR-102: the distributional provenance round-trips (snake_case, one-directional compat —
     // an old binary cannot read this JSON, the repo's stated format-forward stance).
     reg.add_classified(
-        &forms(&["gem", "gemmint"]),
+        &forms(&["deluxe", "deluxeplus"]),
         AliasProvenance::LearnedDistributional,
         0.66,
         &n,
@@ -39,7 +39,7 @@ fn json_round_trips() {
     let e = back
         .entries()
         .iter()
-        .find(|e| e.forms == forms(&["gem", "gemmint"]))
+        .find(|e| e.forms == forms(&["deluxe", "deluxeplus"]))
         .expect("distributional entry survives the round-trip");
     assert_eq!(e.provenance, AliasProvenance::LearnedDistributional);
     assert_eq!(e.status, AliasStatus::Candidate);
@@ -54,7 +54,7 @@ fn record_feedback_stamps_evidence_and_maxes_confidence() {
     let d = Dict::new();
     let mut reg = AliasRegistry::default();
     reg.add_classified(
-        &forms(&["ud", "upperdeck"]),
+        &forms(&["ns", "northstar"]),
         AliasProvenance::LearnedDistributional,
         0.6,
         &n,
@@ -66,7 +66,7 @@ fn record_feedback_stamps_evidence_and_maxes_confidence() {
         titles_b: 90,
         queries_sampled: 40,
     };
-    assert!(reg.record_feedback(&forms(&["ud", "upperdeck"]), ev));
+    assert!(reg.record_feedback(&forms(&["ns", "northstar"]), ev));
     let e = &reg.entries()[0];
     assert_eq!(e.feedback, Some(ev));
     assert!(
@@ -83,7 +83,7 @@ fn record_feedback_stamps_evidence_and_maxes_confidence() {
         overlap: f64::NAN,
         ..ev
     };
-    assert!(reg.record_feedback(&forms(&["ud", "upperdeck"]), nan));
+    assert!(reg.record_feedback(&forms(&["ns", "northstar"]), nan));
     assert!((reg.entries()[0].confidence - 0.85).abs() < 1e-12);
     assert!(!reg.record_feedback(&forms(&["nope", "missing"]), ev));
 }
@@ -94,32 +94,32 @@ fn activate_validated_refuses_rejected_and_mixed_kind() {
     let d = Dict::new();
     let mut reg = AliasRegistry::default();
     reg.add_classified(
-        &forms(&["ud", "upperdeck"]),
+        &forms(&["ns", "northstar"]),
         AliasProvenance::LearnedDistributional,
         0.9,
         &n,
         &d,
     );
     reg.add_classified(
-        &forms(&["rc", "rookie"]),
+        &forms(&["pkg", "new"]),
         AliasProvenance::LearnedDistributional,
         0.9,
         &n,
         &d,
     );
-    assert!(reg.reject(&forms(&["rc", "rookie"])));
+    assert!(reg.reject(&forms(&["pkg", "new"])));
 
     // The automated path promotes a candidate…
-    assert!(reg.activate_validated(&forms(&["ud", "upperdeck"])));
+    assert!(reg.activate_validated(&forms(&["ns", "northstar"])));
     // …idempotently: an already-active entry reports false, so a racing second validate
     // pass never triggers a spurious full-recompile apply (codex).
-    assert!(!reg.activate_validated(&forms(&["ud", "upperdeck"])));
+    assert!(!reg.activate_validated(&forms(&["ns", "northstar"])));
     // …but must never resurrect an operator rejection (unlike the operator `activate`).
-    assert!(!reg.activate_validated(&forms(&["rc", "rookie"])));
+    assert!(!reg.activate_validated(&forms(&["pkg", "new"])));
     assert_eq!(
         reg.entries()
             .iter()
-            .find(|e| e.forms == forms(&["rc", "rookie"]))
+            .find(|e| e.forms == forms(&["new", "pkg"]))
             .unwrap()
             .status,
         AliasStatus::Rejected
@@ -133,7 +133,7 @@ fn feedback_field_round_trips_and_old_json_reads_none() {
     let d = Dict::new();
     let mut reg = AliasRegistry::default();
     reg.add_classified(
-        &forms(&["ud", "upperdeck"]),
+        &forms(&["ns", "northstar"]),
         AliasProvenance::LearnedDistributional,
         0.6,
         &n,
@@ -146,7 +146,7 @@ fn feedback_field_round_trips_and_old_json_reads_none() {
     assert_eq!(back.entries()[0].feedback, None);
     // Stamped evidence round-trips.
     reg.record_feedback(
-        &forms(&["ud", "upperdeck"]),
+        &forms(&["ns", "northstar"]),
         FeedbackEvidence {
             overlap: 0.7,
             titles_a: 60,

@@ -6,48 +6,48 @@ use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::{Engine, MatchScratch};
 use std::collections::HashSet;
 
-/// Equivalence learning via expansion-not-collapse (ADR-054): declaring `rc ≡ rookie` and
+/// Equivalence learning via expansion-not-collapse (ADR-054): declaring `pkg ≡ new` and
 /// applying it must make a query phrased with one form match a title bearing the other —
 /// while NEVER dropping a prior match (the match set only grows; FN-safe).
 #[test]
 fn equivalence_expansion_grows_matches_and_is_fn_safe() {
     use reverse_rusty::vocab::Vocab;
 
-    // A corpus where "rc" and "rookie" are distinct features (empty default vocab). Extra
+    // A corpus where "pkg" and "new" are distinct features (empty default vocab). Extra
     // queries ensure both tokens are interned in the dict.
     let mut queries: Vec<(u64, String)> = vec![
-        (1, "1994 fleer rc".into()),     // requires rc
-        (2, "1994 fleer rookie".into()), // requires rookie
+        (1, "1994 vertex pkg".into()), // requires pkg
+        (2, "1994 vertex new".into()), // requires new
     ];
     for i in 0..20u64 {
-        queries.push((100 + i, format!("rc card{i}")));
-        queries.push((200 + i, format!("rookie card{i}")));
+        queries.push((100 + i, format!("pkg item{i}")));
+        queries.push((200 + i, format!("new item{i}")));
     }
-    let rookie_title = "1994 fleer rookie psa 10"; // has rookie, NOT rc
+    let new_title = "1994 vertex new pro"; // has new, NOT pkg
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
 
     let mut s = MatchScratch::new();
     let mut out = Vec::new();
-    eng.match_title(rookie_title, &mut s, &mut out, true);
+    eng.match_title(new_title, &mut s, &mut out, true);
     let before: HashSet<u64> = out.iter().copied().collect();
     assert!(
         !before.contains(&1),
-        "before the equivalence, the rc-query must not match a rookie-only title"
+        "before the equivalence, the pkg-query must not match a new-only title"
     );
 
-    // Declare rc ≡ rookie and apply via expansion (set_vocab installs it; recompile expands).
+    // Declare pkg ≡ new and apply via expansion (set_vocab installs it; recompile expands).
     let mut v = Vocab::new();
-    v.add_equivalence(&["rc", "rookie"]);
+    v.add_equivalence(&["pkg", "new"]);
     eng.set_vocab(v).expect("set_vocab");
     eng.recompile_stale_segments();
 
-    eng.match_title(rookie_title, &mut s, &mut out, true);
+    eng.match_title(new_title, &mut s, &mut out, true);
     let after: HashSet<u64> = out.iter().copied().collect();
     assert!(
         after.contains(&1),
-        "after rc≡rookie, the rc-query matches a rookie title (expansion grew the match set)"
+        "after pkg≡new, the pkg-query matches a new title (expansion grew the match set)"
     );
     assert!(
         before.is_subset(&after),
@@ -69,8 +69,8 @@ fn wrong_equivalence_never_causes_false_negatives() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0BAD_0E00,
-        num_players: 600,
-        num_sets: 300,
+        num_entities: 600,
+        num_collections: 300,
     };
     let data = generate(&cfg);
 
@@ -124,24 +124,24 @@ fn wrong_equivalence_never_causes_false_negatives() {
 fn learned_equivalence_via_expansion_matches_both_forms() {
     use reverse_rusty::vocab::CorpusLearnConfig;
 
-    let mut queries: Vec<(u64, String)> = vec![(1, "1994 fleer rc".into())];
+    let mut queries: Vec<(u64, String)> = vec![(1, "1994 vertex pkg".into())];
     for i in 0..6u64 {
-        queries.push((100 + i, "(rc,rookie)".into())); // declare the any-of >= min_count
+        queries.push((100 + i, "(pkg,new)".into())); // declare the any-of >= min_count
     }
     for i in 0..20u64 {
-        queries.push((200 + i, format!("rookie u{i}")));
-        queries.push((300 + i, format!("rc u{i}")));
+        queries.push((200 + i, format!("new u{i}")));
+        queries.push((300 + i, format!("pkg u{i}")));
     }
-    let rookie_title = "1994 fleer rookie psa 10";
+    let new_title = "1994 vertex new pro";
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
     let mut s = MatchScratch::new();
     let mut out = Vec::new();
-    eng.match_title(rookie_title, &mut s, &mut out, true);
+    eng.match_title(new_title, &mut s, &mut out, true);
     assert!(
         !out.contains(&1),
-        "before learning, the rc-query must not match a rookie title"
+        "before learning, the pkg-query must not match a new title"
     );
 
     let cfg = CorpusLearnConfig {
@@ -156,10 +156,10 @@ fn learned_equivalence_via_expansion_matches_both_forms() {
         "an equivalence group must be learned from the any-of corpus"
     );
 
-    eng.match_title(rookie_title, &mut s, &mut out, true);
+    eng.match_title(new_title, &mut s, &mut out, true);
     assert!(
         out.contains(&1),
-        "after learning rc≡rookie via expansion, the rc-query matches a rookie title"
+        "after learning pkg≡new via expansion, the pkg-query matches a new title"
     );
 }
 
@@ -172,21 +172,21 @@ fn initial_build_applies_declared_equivalences() {
     use reverse_rusty::EngineConfig;
 
     let mut v = Vocab::new();
-    v.add_equivalence(&["rc", "rookie"]);
+    v.add_equivalence(&["pkg", "new"]);
     let mut eng = Engine::with_vocab(v, EngineConfig::default()).expect("with_vocab");
 
-    let mut queries: Vec<(u64, String)> = vec![(1, "1994 fleer rc".into())];
+    let mut queries: Vec<(u64, String)> = vec![(1, "1994 vertex pkg".into())];
     for i in 0..10u64 {
-        queries.push((100 + i, format!("rc u{i}")));
-        queries.push((200 + i, format!("rookie u{i}")));
+        queries.push((100 + i, format!("pkg u{i}")));
+        queries.push((200 + i, format!("new u{i}")));
     }
     eng.build_from_queries(&queries);
 
     let mut s = MatchScratch::new();
     let mut out = Vec::new();
-    eng.match_title("1994 fleer rookie psa 10", &mut s, &mut out, true);
+    eng.match_title("1994 vertex new pro", &mut s, &mut out, true);
     assert!(
         out.contains(&1),
-        "initial build must apply declared equivalences: the rc-query matches a rookie title"
+        "initial build must apply declared equivalences: the pkg-query matches a new title"
     );
 }

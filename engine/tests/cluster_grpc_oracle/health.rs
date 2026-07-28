@@ -96,8 +96,8 @@ fn shard_readiness_flips_to_serving_after_dict_adopt() {
     let norm = Arc::new(vocab());
     // A tiny authoritative frozen dict the coordinator ships to the pending shard.
     let queries = vec![
-        (1u64, "1994 upper deck".to_string()),
-        (2u64, "psa 10".to_string()),
+        (1u64, "1994 north star".to_string()),
+        (2u64, "pro".to_string()),
     ];
     let dict = frozen_dict_over(&queries, &norm);
 
@@ -157,7 +157,7 @@ fn shard_readiness_flips_to_serving_after_dict_adopt() {
     );
 
     // The adopted cluster still serves a real match (the readiness signal was truthful).
-    let hits = cluster.percolate("1994 upper deck").expect("percolate");
+    let hits = cluster.percolate("1994 north star").expect("percolate");
     assert!(
         hits.contains(&1),
         "the now-ready shard serves the matching query"

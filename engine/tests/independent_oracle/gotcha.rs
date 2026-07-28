@@ -103,7 +103,12 @@ fn negation_adjacency() {
         &[("foo bar", false), ("foo", false), ("foo baz", false)],
     );
     // A trailing dash is the same parse error -> dropped.
-    check(def_norm, def_vocab, "jordan -", &[("jordan", false)]);
+    check(
+        def_norm,
+        def_vocab,
+        "product gamma -",
+        &[("product gamma", false)],
+    );
 }
 
 #[test]
@@ -115,7 +120,7 @@ fn clause_boundaries_are_semantic_not_a_global_positive_stream() {
     check_with_ny_alias(
         "new -\"used item\" york",
         &[
-            ("new vintage collectible york", true),
+            ("new vintage product york", true),
             ("new used item york", false),
         ],
     );
@@ -126,15 +131,15 @@ fn clause_boundaries_are_semantic_not_a_global_positive_stream() {
     check_with_ny_alias(
         "new \"vintage\" york",
         &[
-            ("new vintage collectible york", true),
-            ("new collectible york", false),
+            ("new vintage product york", true),
+            ("new product york", false),
         ],
     );
     check_with_ny_alias(
         "new (vintage,modern) york",
         &[
-            ("new modern collectible york", true),
-            ("new collectible york", false),
+            ("new modern product york", true),
+            ("new product york", false),
         ],
     );
 }
@@ -191,10 +196,10 @@ fn diacritic_fold() {
             ("Jokić", true),
             ("JOKIĆ", true),
             ("jokic", true),
-            ("jordan", false),
+            ("product gamma", false),
         ],
     );
-    check(def_norm, def_vocab, "acuna", &[("Acuña rookie", true)]);
+    check(def_norm, def_vocab, "jalapeno", &[("Jalapeño new", true)]);
 }
 
 #[test]
@@ -222,13 +227,13 @@ fn any_of_groups() {
     check(
         def_norm,
         def_vocab,
-        "(upper deck,ud)",
+        "(north star,ns)",
         &[
-            ("upper deck card", true),
-            ("ud card", true),
-            ("upper card", false),
-            ("deck card", false),
-            ("topps card", false),
+            ("north star item", true),
+            ("ns item", true),
+            ("north item", false),
+            ("star item", false),
+            ("acme item", false),
         ],
     );
     // Distinct members can choose the same retrieval proxy; exact semantics must
@@ -290,20 +295,20 @@ fn number_typing_boundaries() {
         def_norm,
         def_vocab,
         "1900",
-        &[("card 1900", true), ("card 1899", false)],
+        &[("item 1900", true), ("item 1899", false)],
     );
     check(
         def_norm,
         def_vocab,
         "2099",
-        &[("card 2099", true), ("card 2100", false)],
+        &[("item 2099", true), ("item 2100", false)],
     );
     // 1899 is a generic term — matches a 1899 title, not a 1900 one.
     check(
         def_norm,
         def_vocab,
         "1899",
-        &[("card 1899", true), ("card 1900", false)],
+        &[("item 1899", true), ("item 1900", false)],
     );
 }
 
@@ -313,8 +318,8 @@ fn class_d_queries_are_dropped() {
     check(
         def_norm,
         def_vocab,
-        "-auto",
-        &[("auto card", false), ("card", false)],
+        "-manual",
+        &[("manual item", false), ("item", false)],
     );
     // An empty / whitespace-only query parses to zero clauses -> dropped.
     check(def_norm, def_vocab, "   ", &[("anything at all", false)]);

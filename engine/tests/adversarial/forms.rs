@@ -30,7 +30,7 @@ fn punctuation_fold_forms_all_cross_match() {
     let queries: Vec<(u64, String)> = forms
         .iter()
         .enumerate()
-        .map(|(i, f)| (i as u64 + 1, format!("{f} rookie")))
+        .map(|(i, f)| (i as u64 + 1, format!("{f} new")))
         .collect();
     let all_ids: Vec<u64> = queries.iter().map(|(id, _)| *id).collect();
 
@@ -40,7 +40,7 @@ fn punctuation_fold_forms_all_cross_match() {
     let mut rng = Rng::new(0xF07D_0001);
 
     for form in &forms {
-        let title = format!("1994 {form} rookie card");
+        let title = format!("1994 {form} new item");
         assert_eq!(
             matched(&eng, &mut s, &title),
             all_ids,
@@ -62,13 +62,13 @@ fn punctuation_fold_forms_all_cross_match() {
 #[test]
 fn equivalence_forms_cross_match_under_surface_noise() {
     let mut v = Vocab::new();
-    v.add_equivalence(&["rc", "rookie"]);
+    v.add_equivalence(&["pkg", "new"]);
     let mut queries: Vec<(u64, String)> =
-        vec![(1, "1994 fleer rc".into()), (2, "1994 fleer rookie".into())];
+        vec![(1, "1994 vertex pkg".into()), (2, "1994 vertex new".into())];
     // Intern both forms widely enough that the dict knows them (mirrors the ADR-054 tests).
     for i in 0..10u64 {
-        queries.push((100 + i, format!("rc filler{i}")));
-        queries.push((200 + i, format!("rookie filler{i}")));
+        queries.push((100 + i, format!("pkg filler{i}")));
+        queries.push((200 + i, format!("new filler{i}")));
     }
 
     let mut eng = Engine::with_vocab(v, EngineConfig::default()).expect("with_vocab");
@@ -76,16 +76,16 @@ fn equivalence_forms_cross_match_under_surface_noise() {
     let mut s = MatchScratch::new();
 
     for title in [
-        "1994 fleer rookie",
-        "1994 fleer rc",
-        "1994 FLEER  rookie!!",
-        "1994 fleer rc ™ zzjunk00aa11bb",
-        "1994 (fleer) RC,",
+        "1994 vertex new",
+        "1994 vertex pkg",
+        "1994 VERTEX  new!!",
+        "1994 vertex pkg ™ zzjunk00aa11bb",
+        "1994 (vertex) PKG,",
     ] {
         let out = matched(&eng, &mut s, title);
         assert!(
             out.binary_search(&1).is_ok() && out.binary_search(&2).is_ok(),
-            "EQUIV MATRIX: both the rc-query and the rookie-query must match `{title}`, got {out:?}"
+            "EQUIV MATRIX: both the pkg-query and the new-query must match `{title}`, got {out:?}"
         );
     }
 }
@@ -96,10 +96,10 @@ fn equivalence_forms_cross_match_under_surface_noise() {
 #[test]
 fn multiword_alias_forms_cross_match_despite_whitespace_runs() {
     let queries: Vec<(u64, String)> = vec![
-        (1, "ny mets".into()),
-        (2, "new york yankees".into()),
-        (3, "\"new  york\" knicks".into()), // run INSIDE a quoted phrase (R11)
-        (4, "(new  york,gotham) rangers".into()), // run inside an any-of member (R11)
+        (1, "ny catalog".into()),
+        (2, "new york inventory".into()),
+        (3, "\"new  york\" office".into()), // run INSIDE a quoted phrase (R11)
+        (4, "(new  york,gotham) directory".into()), // run inside an any-of member (R11)
     ];
     let mut eng =
         Engine::new(reverse_rusty::normalize::Normalizer::default_vocab().expect("vocab"));
@@ -109,15 +109,15 @@ fn multiword_alias_forms_cross_match_despite_whitespace_runs() {
     let mut s = MatchScratch::new();
 
     let must_match: &[(u64, &str)] = &[
-        (1, "new york mets"),    // alias forward: ny query → new york title
-        (1, "NEW  YORK mets"),   // + case + title-side run (positive-view overlap scan)
-        (2, "ny yankees"),       // alias reverse: new york query → ny title
-        (3, "ny knicks"),        // R11: run-in-phrase query still reaches the alias
-        (3, "new york knicks"),  // and still matches the literal form
-        (3, "new  york knicks"), // run on BOTH sides
-        (4, "ny rangers"),       // R11: run-in-any-of-member still reaches the alias
-        (4, "gotham rangers"),   // the other member still works
-        (4, "new york rangers"), // the literal multi-word member still works
+        (1, "new york catalog"),   // alias forward: ny query → new york title
+        (1, "NEW  YORK catalog"),  // + case + title-side run (positive-view overlap scan)
+        (2, "ny inventory"),       // alias reverse: new york query → ny title
+        (3, "ny office"),          // R11: run-in-phrase query still reaches the alias
+        (3, "new york office"),    // and still matches the literal form
+        (3, "new  york office"),   // run on BOTH sides
+        (4, "ny directory"),       // R11: run-in-any-of-member still reaches the alias
+        (4, "gotham directory"),   // the other member still works
+        (4, "new york directory"), // the literal multi-word member still works
     ];
     for (id, title) in must_match {
         let out = matched(&eng, &mut s, title);

@@ -82,8 +82,8 @@ fn armed_deadline_actually_stops_broad_batch_work() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xADC_099,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     };
     let data = generate(&cfg);
     let mut eng = Engine::new(make_norm());
@@ -144,8 +144,8 @@ fn armed_deadline_actually_stops_par_work() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xADC_099,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     };
     let data = generate(&cfg);
     let mut eng = Engine::new(make_norm());

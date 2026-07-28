@@ -19,10 +19,10 @@ fn declared_alias_survives_reopen() {
     let (mut queries, titles) = build_corpus();
     let q_abbr = 8_100_001u64;
     let q_canon = 8_100_002u64;
-    queries.push((q_abbr, "1994 fleer zzabbr".into()));
-    queries.push((q_canon, "1994 fleer zzcanon".into()));
-    let title_abbr = "1994 fleer zzabbr psa 10";
-    let title_canon = "1994 fleer zzcanon psa 10";
+    queries.push((q_abbr, "1994 vertex zzabbr".into()));
+    queries.push((q_canon, "1994 vertex zzcanon".into()));
+    let title_abbr = "1994 vertex zzabbr pro";
+    let title_canon = "1994 vertex zzcanon pro";
     // Titles snapshotted + compared across the restart: the alias forms + a corpus sample.
     let check: Vec<String> = [title_abbr.to_string(), title_canon.to_string()]
         .into_iter()
@@ -112,14 +112,14 @@ fn declared_equivalence_survives_reopen() {
     let (mut queries, titles) = build_corpus();
     let q_abbr = 8_600_001u64;
     let q_canon = 8_600_002u64;
-    queries.push((q_abbr, "1994 fleer zzabbr".into()));
-    queries.push((q_canon, "1994 fleer zzcanon".into()));
+    queries.push((q_abbr, "1994 vertex zzabbr".into()));
+    queries.push((q_canon, "1994 vertex zzcanon".into()));
     for i in 0..30u64 {
         queries.push((8_600_100 + i, format!("zzabbr u{i}")));
         queries.push((8_600_200 + i, format!("zzcanon u{i}")));
     }
-    let title_abbr = "1994 fleer zzabbr psa 10";
-    let title_canon = "1994 fleer zzcanon psa 10";
+    let title_abbr = "1994 vertex zzabbr pro";
+    let title_canon = "1994 vertex zzcanon pro";
     let check: Vec<String> = [title_abbr.to_string(), title_canon.to_string()]
         .into_iter()
         .chain(titles.iter().take(80).cloned())
@@ -188,7 +188,7 @@ fn tagged_set_vocab_carries_tags_across_checkpoint_reopen_and_rebuild() {
     // A tagged query in the ALIAS surface form: its extraction (hence possibly its shard)
     // changes under the vocab change — its tags must follow it.
     let q_alias = 9_400_001u64;
-    queries.push((q_alias, "1994 fleer zzabbr".into()));
+    queries.push((q_alias, "1994 vertex zzabbr".into()));
     let tags = tags_parallel(&queries);
 
     // "region" never appears in the corpus tag keys ⇒ guaranteed post-freeze synthetic.
@@ -236,7 +236,7 @@ fn tagged_set_vocab_carries_tags_across_checkpoint_reopen_and_rebuild() {
     );
     let mut blc = String::new();
     let mut bfeats = Vec::new();
-    let title_canon = "1994 fleer zzcanon psa 10";
+    let title_canon = "1994 vertex zzcanon pro";
     let region = vec![("region".to_string(), vec!["emea".to_string()])];
 
     let check_cluster = |cluster: &ClusterEngine,
@@ -317,9 +317,9 @@ fn set_vocab_after_reopen_rebuilds_from_persisted_sources() {
     // path), which is why no other oracle caught it. Untagged on purpose — the bug
     // predates tags.
     let queries = vec![
-        (1u64, "1994 topps zzplayerone".to_string()),
-        (2u64, "1995 fleer zzplayertwo".to_string()),
-        (3u64, "1996 upper deck zzplayerthree".to_string()),
+        (1u64, "1994 acme zzentityone".to_string()),
+        (2u64, "1995 vertex zzentitytwo".to_string()),
+        (3u64, "1996 north star zzentitythree".to_string()),
     ];
     let dir = unique_dir("reopen_then_set_vocab");
     {
@@ -363,8 +363,8 @@ fn set_vocab_after_delete_and_checkpoint_does_not_resurrect() {
     // the caller deleted it). The checkpoint seal now persists the source store even when
     // the memtable is empty.
     let queries = vec![
-        (1u64, "1994 topps zzplayerone".to_string()),
-        (2u64, "1995 fleer zzplayertwo".to_string()),
+        (1u64, "1994 acme zzentityone".to_string()),
+        (2u64, "1995 vertex zzentitytwo".to_string()),
     ];
     let dir = unique_dir("delete_then_set_vocab");
     {
@@ -379,7 +379,7 @@ fn set_vocab_after_delete_and_checkpoint_does_not_resurrect() {
     let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
     assert!(
         !reopened
-            .percolate("1995 fleer zzplayertwo psa")
+            .percolate("1995 vertex zzentitytwo alpha")
             .unwrap()
             .contains(&2),
         "deleted query must stay deleted after reopen"
@@ -390,14 +390,14 @@ fn set_vocab_after_delete_and_checkpoint_does_not_resurrect() {
     assert_eq!(rebuilt, 1, "only the live query rebuilds — no resurrection");
     assert!(
         !reopened
-            .percolate("1995 fleer zzplayertwo psa")
+            .percolate("1995 vertex zzentitytwo alpha")
             .unwrap()
             .contains(&2),
         "the vocabulary rebuild must NOT resurrect a deleted query"
     );
     assert!(
         reopened
-            .percolate("1994 topps zzplayerone psa")
+            .percolate("1994 acme zzentityone alpha")
             .unwrap()
             .contains(&1),
         "the live query survives the rebuild"
@@ -414,7 +414,7 @@ fn synthetic_only_tags_survive_set_vocab_after_reopen() {
     // dropped the tags (a filtered-read recall loss no oracle covered). With the carry-through,
     // the latch is no longer load-bearing: tags ride the stored `TagId`s regardless.
     let dir = unique_dir("synthonly_set_vocab");
-    let seed = vec![(1u64, "1994 topps".to_string())];
+    let seed = vec![(1u64, "1994 acme".to_string())];
     {
         let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &seed)
             .expect("untagged durable build");
@@ -422,7 +422,7 @@ fn synthetic_only_tags_survive_set_vocab_after_reopen() {
             .add_query_with_tags(
                 100,
                 "zzrarelivetag",
-                &[("category".to_string(), "cards".to_string())],
+                &[("category".to_string(), "items".to_string())],
             )
             .expect("synthetic-tagged live add");
         cluster.checkpoint().expect("checkpoint");
@@ -438,15 +438,15 @@ fn synthetic_only_tags_survive_set_vocab_after_reopen() {
         .expect("synthetic-tagged source");
     assert_eq!(
         source.tags(),
-        [("category".to_string(), "cards".to_string())],
+        [("category".to_string(), "items".to_string())],
         "raw read-back metadata must survive the same reopen + rebuild"
     );
 
-    let cards = vec![("category".to_string(), vec!["cards".to_string()])];
+    let items = vec![("category".to_string(), vec!["items".to_string()])];
     let coins = vec![("category".to_string(), vec!["coins".to_string()])];
     assert!(
         reopened
-            .percolate_filtered("zzrarelivetag", &cards)
+            .percolate_filtered("zzrarelivetag", &items)
             .unwrap()
             .contains(&100),
         "a synthetic-only tag must survive reopen + set_vocab (the old guard's blind spot)"
@@ -468,11 +468,11 @@ fn declared_alias_rebind_survives_reopen() {
     // rebuilds, and that live_sources de-dups correctly across the accumulated state.
     let (mut queries, _titles) = build_corpus();
     let qid = 8_200_001u64;
-    queries.push((qid, "1994 fleer zzabbr".into()));
+    queries.push((qid, "1994 vertex zzabbr".into()));
 
     let dir = unique_dir("alias_rebind");
-    let title_one = "1994 fleer zzone psa 10";
-    let title_two = "1994 fleer zztwo psa 10";
+    let title_one = "1994 vertex zzone pro";
+    let title_two = "1994 vertex zztwo pro";
 
     {
         let mut cluster =

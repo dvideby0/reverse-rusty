@@ -127,9 +127,9 @@ fn committed_assignment_drives_routing_to_the_assigned_endpoint() {
     // shard→node map. Without routing-by-assignments the resolution path would be inert and both would
     // hit the same endpoint.
     let sentinel = 9_000_001u64;
-    let sentinel_title = "1994 upper deck rareplayer0 psa 10";
+    let sentinel_title = "1994 north star rareentity0 pro";
     coord_a
-        .add_query(sentinel, "1994 upper deck rareplayer0")
+        .add_query(sentinel, "1994 north star rareentity0")
         .expect("add sentinel query to A");
     assert!(
         coord_a

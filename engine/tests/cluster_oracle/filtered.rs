@@ -114,7 +114,7 @@ fn live_tagged_add_is_filterable_with_post_freeze_tag() {
     };
     // Build untagged so the tag space is empty + frozen; the live adds introduce all tags as
     // post-freeze (synthetic) ids — the strongest cross-shard-consistency case.
-    let seed = vec![(1u64, "1994 topps".to_string())];
+    let seed = vec![(1u64, "1994 acme".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
 
     // Two class-A live adds on distinct rare anchors (distinct shards), with distinct categories.
@@ -122,7 +122,7 @@ fn live_tagged_add_is_filterable_with_post_freeze_tag() {
         .add_query_with_tags(
             100,
             "zzrarealpha",
-            &[("category".to_string(), "cards".to_string())],
+            &[("category".to_string(), "items".to_string())],
         )
         .expect("tagged live add");
     cluster
@@ -133,7 +133,7 @@ fn live_tagged_add_is_filterable_with_post_freeze_tag() {
         )
         .expect("tagged live add");
 
-    let cards = vec![("category".to_string(), vec!["cards".to_string()])];
+    let items = vec![("category".to_string(), vec!["items".to_string()])];
     let coins = vec![("category".to_string(), vec!["coins".to_string()])];
 
     // Each title matches its query unfiltered; the category filter keeps only the matching one.
@@ -143,14 +143,14 @@ fn live_tagged_add_is_filterable_with_post_freeze_tag() {
         .into_iter()
         .collect();
     assert!(a_un.contains(&100), "unfiltered must match the live add");
-    let a_cards: HashSet<u64> = cluster
-        .percolate_filtered("zzrarealpha", &cards)
+    let a_items: HashSet<u64> = cluster
+        .percolate_filtered("zzrarealpha", &items)
         .unwrap()
         .into_iter()
         .collect();
     assert!(
-        a_cards.contains(&100),
-        "the cards filter keeps the cards-tagged live add (zero FN on a synthetic tag)"
+        a_items.contains(&100),
+        "the items filter keeps the items-tagged live add (zero FN on a synthetic tag)"
     );
     let a_coins: HashSet<u64> = cluster
         .percolate_filtered("zzrarealpha", &coins)
@@ -159,7 +159,7 @@ fn live_tagged_add_is_filterable_with_post_freeze_tag() {
         .collect();
     assert!(
         !a_coins.contains(&100),
-        "the coins filter removes the cards-tagged add"
+        "the coins filter removes the items-tagged add"
     );
     // The other query, filtered to its own category.
     assert!(cluster
@@ -181,13 +181,13 @@ fn set_vocab_carries_live_synthetic_tags_through_rebuild() {
         ..ClusterConfig::default()
     };
     // Built UNTAGGED ⇒ tag_dict stays empty + frozen ⇒ every live tag below is synthetic.
-    let seed = vec![(1u64, "1994 topps".to_string())];
+    let seed = vec![(1u64, "1994 acme".to_string())];
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
     cluster
         .add_query_with_tags(
             100,
             "zzrarelivetag",
-            &[("category".to_string(), "cards".to_string())],
+            &[("category".to_string(), "items".to_string())],
         )
         .expect("tagged live add");
     cluster
@@ -210,7 +210,7 @@ fn set_vocab_carries_live_synthetic_tags_through_rebuild() {
     );
     assert_eq!(rebuilt, 3, "the seed + both live adds rebuild");
 
-    let cards = vec![("category".to_string(), vec!["cards".to_string()])];
+    let items = vec![("category".to_string(), vec!["items".to_string()])];
     let coins = vec![("category".to_string(), vec!["coins".to_string()])];
     // Each query still matches unfiltered, still passes its OWN tag's filter (the synthetic id
     // was carried, not dropped), and is still removed by the other filter (it was carried
@@ -218,7 +218,7 @@ fn set_vocab_carries_live_synthetic_tags_through_rebuild() {
     assert!(cluster.percolate("zzrarelivetag").unwrap().contains(&100));
     assert!(
         cluster
-            .percolate_filtered("zzrarelivetag", &cards)
+            .percolate_filtered("zzrarelivetag", &items)
             .unwrap()
             .contains(&100),
         "a post-freeze synthetic tag must survive the vocab rebuild (filtered-read recall)"
@@ -235,7 +235,7 @@ fn set_vocab_carries_live_synthetic_tags_through_rebuild() {
         .unwrap()
         .contains(&200));
     assert!(!cluster
-        .percolate_filtered("zzotherlivetag", &cards)
+        .percolate_filtered("zzotherlivetag", &items)
         .unwrap()
         .contains(&200));
 
@@ -246,7 +246,7 @@ fn set_vocab_carries_live_synthetic_tags_through_rebuild() {
         .expect("learn_and_apply must succeed on a tagged cluster (ADR-074)");
     assert!(
         cluster
-            .percolate_filtered("zzrarelivetag", &cards)
+            .percolate_filtered("zzrarelivetag", &items)
             .unwrap()
             .contains(&100),
         "tags survive a second (learn-driven) rebuild"
@@ -264,7 +264,7 @@ fn set_vocab_preserves_tags_through_tagged_rebuild() {
     // A tagged query written in the ALIAS surface form: post-alias its extraction (and
     // possibly its anchor/shard) changes, so its tags must travel with the re-placement.
     let q_alias = 9_300_001u64;
-    queries.push((q_alias, "1994 fleer zzabbr".into()));
+    queries.push((q_alias, "1994 vertex zzabbr".into()));
     let tags = tags_parallel(&queries);
 
     // The live add's tag key never appears in the corpus tags ⇒ guaranteed synthetic.
@@ -296,7 +296,7 @@ fn set_vocab_preserves_tags_through_tagged_rebuild() {
     let mut blc = String::new();
     let mut bfeats = Vec::new();
 
-    let title_canon = "1994 fleer zzcanon psa 10";
+    let title_canon = "1994 vertex zzcanon pro";
     for &k in &[1usize, 3, 8] {
         let cfg = ClusterConfig {
             num_shards: k,

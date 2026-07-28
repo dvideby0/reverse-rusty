@@ -124,13 +124,13 @@ fn replicated_live_add_and_remove() {
     let c1 = mk(1);
     let c2 = mk(2);
     let qid = 7_777_778u64;
-    let dsl = "1994 upper deck rareplayer0";
+    let dsl = "1994 north star rareentity0";
 
     assert!(
         matches!(c2.add_query(qid, dsl).unwrap(), AddOutcome::Placed { .. }),
         "class-A live add should be Placed"
     );
-    let title = "1994 upper deck rareplayer0 psa 10";
+    let title = "1994 north star rareentity0 pro";
     assert!(
         c2.percolate(title).unwrap().contains(&qid),
         "a live-added query must be findable at rf=2 (write fanned to the replica)"

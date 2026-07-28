@@ -206,8 +206,8 @@ async fn send_raw(
 
 fn seed() -> Vec<(u64, String)> {
     vec![
-        (1, "1994 topps".to_string()),
-        (2, "1995 fleer".to_string()),
+        (1, "1994 acme".to_string()),
+        (2, "1995 vertex".to_string()),
         (3, "(rarezza,uniquor)".to_string()),
     ]
 }

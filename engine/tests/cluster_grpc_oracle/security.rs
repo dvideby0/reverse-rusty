@@ -63,8 +63,8 @@ fn small_corpus() -> (Vec<(u64, String)>, Vec<String>) {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x5EC2_2E71,
-        num_players: 300,
-        num_sets: 150,
+        num_entities: 300,
+        num_collections: 150,
     };
     let data = generate(&cfg);
     (data.queries, data.titles)
@@ -139,10 +139,10 @@ fn grpc_secured_cluster_matches_oracle_and_serves_live_writes() {
     // Live write + read over the secured link.
     let next = queries.iter().map(|(id, _)| *id).max().unwrap_or(0) + 1;
     cluster
-        .add_query(next, "zzsecured gem mint")
+        .add_query(next, "zzsecured deluxe premium")
         .expect("secured live add");
     assert!(cluster
-        .percolate("zzsecured gem mint psa 10")
+        .percolate("zzsecured deluxe premium pro")
         .expect("secured percolate")
         .contains(&next));
 }
@@ -154,7 +154,7 @@ fn grpc_wrong_or_missing_token_is_rejected_loud() {
     let endpoints = spawn_secured_servers(&rt, 1, &cert_pem, &key_pem);
 
     let norm = Arc::new(vocab());
-    let queries = vec![(1u64, "1994 topps".to_string())];
+    let queries = vec![(1u64, "1994 acme".to_string())];
     let dict = frozen_dict_over(&queries, &norm);
     let cfg = ClusterConfig {
         num_shards: 1,
@@ -204,7 +204,7 @@ fn grpc_plaintext_client_to_tls_server_fails_loud() {
     let plaintext = endpoints[0].replace("https://", "http://");
 
     let norm = Arc::new(vocab());
-    let queries = vec![(1u64, "1994 topps".to_string())];
+    let queries = vec![(1u64, "1994 acme".to_string())];
     let dict = frozen_dict_over(&queries, &norm);
     let cfg = ClusterConfig {
         num_shards: 1,

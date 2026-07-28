@@ -57,7 +57,7 @@ async fn stats_health_shards_and_cluster_ops() {
         req(
             "POST",
             "/_search",
-            &serde_json::json!({"document": {"title": "1994 topps"}}),
+            &serde_json::json!({"document": {"title": "1994 acme"}}),
         ),
     )
     .await;
@@ -131,9 +131,9 @@ async fn cluster_cat_segments_is_strict_and_fails_with_an_alternative() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vocab_alias_makes_both_forms_match() {
     let state = test_state(&seed());
-    // Declare an equivalence (ADR-054 expansion): ud ≡ upperdeck.
+    // Declare an equivalence (ADR-054 expansion): ns ≡ northstar.
     let vocab = serde_json::json!({
-        "equivalences": [["ud", "upperdeck"]]
+        "equivalences": [["ns", "northstar"]]
     });
     let (status, body) = send(&state, req("PUT", "/_vocab", &vocab)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -145,7 +145,7 @@ async fn vocab_alias_makes_both_forms_match() {
         req(
             "PUT",
             "/_doc/30",
-            &serde_json::json!({"query": "upperdeck 1994"}),
+            &serde_json::json!({"query": "northstar 1994"}),
         ),
     )
     .await;
@@ -155,7 +155,7 @@ async fn vocab_alias_makes_both_forms_match() {
         req(
             "POST",
             "/_search",
-            &serde_json::json!({"document": {"title": "ud 1994"}}),
+            &serde_json::json!({"document": {"title": "ns 1994"}}),
         ),
     )
     .await;
@@ -184,7 +184,7 @@ async fn filtered_search_narrows_by_tags() {
         req(
             "PUT",
             "/_doc/41",
-            &serde_json::json!({"query": "1994 topps", "tags": {"category": "cards"}}),
+            &serde_json::json!({"query": "1994 acme", "tags": {"category": "items"}}),
         ),
     )
     .await;
@@ -194,7 +194,7 @@ async fn filtered_search_narrows_by_tags() {
         req(
             "PUT",
             "/_doc/42",
-            &serde_json::json!({"query": "1994 topps", "tags": {"category": "comics"}}),
+            &serde_json::json!({"query": "1994 acme", "tags": {"category": "comics"}}),
         ),
     )
     .await;
@@ -206,7 +206,7 @@ async fn filtered_search_narrows_by_tags() {
         req(
             "POST",
             "/_search",
-            &serde_json::json!({"document": {"title": "1994 topps"}}),
+            &serde_json::json!({"document": {"title": "1994 acme"}}),
         ),
     )
     .await;
@@ -217,8 +217,8 @@ async fn filtered_search_narrows_by_tags() {
             "POST",
             "/_search",
             &serde_json::json!({
-                "document": {"title": "1994 topps"},
-                "filter": {"category": "cards"}
+                "document": {"title": "1994 acme"},
+                "filter": {"category": "items"}
             }),
         ),
     )
@@ -244,8 +244,8 @@ async fn filtered_search_narrows_by_tags() {
             "POST",
             "/_search",
             &serde_json::json!({
-                "document": {"title": "1994 topps"},
-                "filter": {"category": "cards"}
+                "document": {"title": "1994 acme"},
+                "filter": {"category": "items"}
             }),
         ),
     )

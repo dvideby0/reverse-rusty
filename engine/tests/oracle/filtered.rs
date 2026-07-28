@@ -6,7 +6,7 @@ use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::{Engine, MatchScratch};
 use std::collections::HashSet;
 
-const CATEGORIES: [&str; 6] = ["cards", "coins", "stamps", "comics", "toys", "art"];
+const CATEGORIES: [&str; 6] = ["items", "coins", "stamps", "comics", "toys", "art"];
 const STATUSES: [&str; 3] = ["active", "inactive", "archived"];
 
 /// Deterministic per-query tags, a pure function of the logical id so the engine and the
@@ -56,14 +56,14 @@ fn filtered_percolation_matches_oracle_and_only_removes() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0049_0049,
-        num_players: 2_500,
-        num_sets: 1_000,
+        num_entities: 2_500,
+        num_collections: 1_000,
     };
     let data = generate(&cfg);
 
     // engine, built WITH per-query tags (parallel to data.queries)
     let tags: Vec<Vec<(String, String)>> = data.queries.iter().map(|(l, _)| tags_for(*l)).collect();
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.try_build_from_queries_with_tags(&data.queries, &tags)
         .expect("tagged build");
     let snap = eng.snapshot();

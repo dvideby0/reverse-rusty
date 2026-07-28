@@ -89,30 +89,26 @@ mod tests {
             .phrase("new york", "term:new_york", PhraseMode::Alias)
             .equivalence(&["new york", "ny"]);
         let cases = [
-            (
-                "negated term",
-                "new -used york",
-                "new vintage collectible york",
-            ),
+            ("negated term", "new -used york", "new vintage product york"),
             (
                 "negated phrase",
                 "new -\"used item\" york",
-                "new vintage collectible york",
+                "new vintage product york",
             ),
             (
                 "negated any-of",
                 "new -(used,damaged) york",
-                "new vintage collectible york",
+                "new vintage product york",
             ),
             (
                 "positive phrase",
                 "new \"vintage\" york",
-                "new vintage collectible york",
+                "new vintage product york",
             ),
             (
                 "positive any-of",
                 "new (vintage,modern) york",
-                "new vintage collectible york",
+                "new vintage product york",
             ),
         ];
 

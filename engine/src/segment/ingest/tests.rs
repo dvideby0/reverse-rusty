@@ -4,16 +4,16 @@ use super::*;
 fn extracted_ingest_rejects_a_merged_tag_column_over_u16() {
     let mut engine =
         Engine::new(crate::normalize::Normalizer::default_vocab().expect("normalizer"));
-    let seed = vec![(1, "1994 upper deck".to_string())];
+    let seed = vec![(1, "1994 north star".to_string())];
     assert_eq!(engine.build_from_queries(&seed).ingested, 1);
 
-    let ast = crate::dsl::parse("1994 upper deck").expect("parse");
+    let ast = crate::dsl::parse("1994 north star").expect("parse");
     let mut lc = String::new();
     let ex = crate::compile::extract_readonly(&ast, &engine.norm, &engine.dict, &mut lc);
     let item = PlacedQuery {
         logical: 2,
         ex,
-        dsl: "1994 upper deck".into(),
+        dsl: "1994 north star".into(),
         version: 1,
         source_generation: None,
         tags: Vec::new(),

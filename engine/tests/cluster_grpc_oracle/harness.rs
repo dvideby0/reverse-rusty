@@ -19,7 +19,7 @@ use reverse_rusty::tagdict::TagDict;
 use tonic::transport::server::TcpIncoming;
 
 pub(crate) fn vocab() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 /// Independent ground-truth matcher (same structure as `cluster_oracle.rs::Brute`;
@@ -97,17 +97,17 @@ pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x9119_57A1,
-        num_players: 900,
-        num_sets: 400,
+        num_entities: 900,
+        num_collections: 400,
     };
     let data = generate(&cfg);
     let mut queries = data.queries;
     let mut titles = data.titles;
     let mut next_id = queries.iter().map(|(id, _)| *id).max().unwrap_or(0) + 1;
 
-    // class-B any-of: pure any-of of two rare players.
+    // class-B any-of: pure any-of of two rare entities.
     for i in 0..120u64 {
-        queries.push((next_id, format!("(rareplayer{i},rareplayer{})", i + 1000)));
+        queries.push((next_id, format!("(rareentity{i},rareentity{})", i + 1000)));
         next_id += 1;
     }
     // class-B arity-2: all-hot required (year + brand) → replicated lane.
@@ -117,20 +117,20 @@ pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
         queries.push((next_id, format!("{year} {brand}")));
         next_id += 1;
     }
-    // class-A anchored on injected rare players, so multi-entity titles match.
+    // class-A anchored on injected rare entities, so multi-entity titles match.
     for i in 0..120u64 {
         let year = 1986 + (i % 39);
         let brand = BRANDS[(i % BRANDS.len() as u64) as usize];
-        queries.push((next_id, format!("{year} {brand} rareplayer{i}")));
+        queries.push((next_id, format!("{year} {brand} rareentity{i}")));
         next_id += 1;
     }
-    // multi-entity titles: two rare players → fan out to two selective shards + lane 0.
+    // multi-entity titles: two rare entities → fan out to two selective shards + lane 0.
     for i in 0..120u64 {
         let year = 1986 + (i % 39);
         let brand = BRANDS[(i % BRANDS.len() as u64) as usize];
         let a = i % 120;
         titles.push(format!(
-            "{year} {brand} rareplayer{a} rareplayer{} psa 10",
+            "{year} {brand} rareentity{a} rareentity{} pro",
             a + 1000
         ));
     }
@@ -159,7 +159,7 @@ pub(crate) fn empty_tag_dict() -> Arc<TagDict> {
 }
 
 // ---- per-query tags + filtered percolation (ADR-049/055), mirroring `tests/oracle/` ----
-pub(crate) const CATEGORIES: [&str; 6] = ["cards", "coins", "stamps", "comics", "toys", "art"];
+pub(crate) const CATEGORIES: [&str; 6] = ["items", "coins", "stamps", "comics", "toys", "art"];
 pub(crate) const STATUSES: [&str; 3] = ["active", "inactive", "archived"];
 
 pub(crate) fn tags_for(logical: u64) -> Vec<(String, String)> {
@@ -242,7 +242,7 @@ pub(crate) fn wait_until_listening(addr: SocketAddr) {
 pub(crate) fn frozen_dict_with(extra: &[&str], norm: &Normalizer) -> Arc<Dict> {
     let mut d = Dict::new();
     let mut lc = String::new();
-    let base = ["1994 upper deck", "psa 10", "topps chrome"];
+    let base = ["1994 north star", "pro", "acme chrome"];
     for q in base.iter().copied().chain(extra.iter().copied()) {
         if let Ok(ast) = reverse_rusty::dsl::parse(q) {
             let _ = extract(&ast, norm, &mut d, &mut lc);

@@ -18,7 +18,7 @@ fn durable_reopen_recompiles_legacy_clause_boundary_semantics() {
         let mut engine = Engine::with_vocab(vocab.clone(), config.clone()).expect("with_vocab");
         engine.build_from_queries(&[(1, "new -used york".into())]);
         assert!(
-            match_ids(&engine, "new vintage collectible york").contains(&1),
+            match_ids(&engine, "new vintage product york").contains(&1),
             "current compiler respects the negated-clause boundary"
         );
     }
@@ -61,7 +61,7 @@ fn durable_reopen_recompiles_legacy_clause_boundary_semantics() {
         let reopened =
             Engine::open_with_vocab(vocab.clone(), config.clone()).expect("migrating reopen");
         assert!(
-            match_ids(&reopened, "new vintage collectible york").contains(&1),
+            match_ids(&reopened, "new vintage product york").contains(&1),
             "recompiled query must retain the clause-boundary match"
         );
         let current_manifest =
@@ -81,7 +81,7 @@ fn durable_reopen_recompiles_legacy_clause_boundary_semantics() {
     // serves the already-rebuilt materialization.
     let reopened = Engine::open_with_vocab(vocab, config).expect("second reopen");
     assert!(
-        match_ids(&reopened, "new vintage collectible york").contains(&1),
+        match_ids(&reopened, "new vintage product york").contains(&1),
         "second reopen keeps the migrated result"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -113,7 +113,7 @@ fn durable_reopen_migrates_legacy_context_without_aliases() {
         stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
     }
 
-    // The old joint stream could also leak grader/number context across a
+    // The old joint stream could also leak provider/number context across a
     // clause, so semantics-v0 is rebuilt even without any alias vocabulary.
     let reopened = Engine::open(Normalizer::default_vocab().expect("normalizer"), config)
         .expect("context-sensitive migration");
@@ -266,8 +266,8 @@ fn legacy_migration_then_vocab_adoption_recompiles_equivalences() {
 
     {
         let mut engine = Engine::with_vocab(vocab.clone(), config.clone()).expect("with_vocab");
-        engine.build_from_queries(&[(1, "new york yankees".into())]);
-        assert!(match_ids(&engine, "ny yankees").contains(&1));
+        engine.build_from_queries(&[(1, "new york inventory".into())]);
+        assert!(match_ids(&engine, "ny inventory").contains(&1));
     }
     let manifest =
         reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
@@ -287,13 +287,13 @@ fn legacy_migration_then_vocab_adoption_recompiles_equivalences() {
         .adopt_vocab(vocab.clone())
         .expect("equivalence-aware adoption");
     assert!(
-        match_ids(&reopened, "ny yankees").contains(&1),
+        match_ids(&reopened, "ny inventory").contains(&1),
         "FN: adoption left the migrated predicate without alias expansion"
     );
     drop(reopened);
 
     let reopened = Engine::open_with_vocab(vocab, config).expect("second reopen");
-    assert!(match_ids(&reopened, "ny yankees").contains(&1));
+    assert!(match_ids(&reopened, "ny inventory").contains(&1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

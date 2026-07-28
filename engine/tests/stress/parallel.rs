@@ -18,8 +18,8 @@ fn burst_writes_with_parallel_reads() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xBE_EF_CA_FE,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     };
     let data = generate(&cfg);
     let q = &data.queries;
@@ -136,8 +136,8 @@ fn high_volume_parallel_read_after_mutations() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xFACE_B00C,
-        num_players: 5_000,
-        num_sets: 2_000,
+        num_entities: 5_000,
+        num_collections: 2_000,
     };
     let data = generate(&cfg);
     let q = &data.queries;
@@ -264,8 +264,8 @@ fn broad_batch_equals_per_title_under_churn() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xBA7C_8027,
-        num_players: 4_000,
-        num_sets: 1_500,
+        num_entities: 4_000,
+        num_collections: 1_500,
     };
     let data = generate(&cfg);
     let q = &data.queries;

@@ -23,9 +23,9 @@ fn durable_reopen_preserves_multiword_alias() {
     // Build durable with the alias active, store a `new york` query, flush, close.
     {
         let mut eng = Engine::with_vocab(vocab.clone(), config.clone()).expect("with_vocab");
-        eng.build_from_queries(&[(1, "new york yankees".into())]);
+        eng.build_from_queries(&[(1, "new york inventory".into())]);
         assert!(
-            match_ids(&eng, "ny yankees").contains(&1),
+            match_ids(&eng, "ny inventory").contains(&1),
             "pre-persist: ny title reaches the new york query"
         );
         eng.flush();
@@ -39,15 +39,15 @@ fn durable_reopen_preserves_multiword_alias() {
 
     // Existing query keeps the alias across reopen.
     assert!(
-        match_ids(&eng, "ny yankees").contains(&1),
+        match_ids(&eng, "ny inventory").contains(&1),
         "FN: existing multi-word alias query lost its reach after durable reopen"
     );
     // A post-reopen live insert gains the alias too (recovered-engine resolve-as-is keys the map on
     // the same dense id the title side resolves).
-    eng.try_insert_live("ny mets", 2, 1)
+    eng.try_insert_live("ny catalog", 2, 1)
         .expect("post-reopen insert");
     assert!(
-        match_ids(&eng, "new york mets").contains(&2),
+        match_ids(&eng, "new york catalog").contains(&2),
         "FN: post-reopen ny insert did not gain the multi-word alias"
     );
 

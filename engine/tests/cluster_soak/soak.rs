@@ -36,8 +36,8 @@ fn twenty_million_multi_shard_soak() {
         seed: 0x2000_0000,
         // Pool sizes follow the clusterbench convention so the fan-out numbers
         // are comparable (in convention) to the pinned 100k invariants.
-        num_players: (cfg.num_queries / 40).max(2_000),
-        num_sets: (cfg.num_queries / 100).max(1_000),
+        num_entities: (cfg.num_queries / 40).max(2_000),
+        num_collections: (cfg.num_queries / 100).max(1_000),
     };
     let mut data = generate(&gen_cfg);
     let n_sent = cfg.num_sentinels();

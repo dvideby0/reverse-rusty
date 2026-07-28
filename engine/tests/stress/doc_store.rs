@@ -26,11 +26,11 @@ fn doc_store_consistent_through_lifecycle() {
     let batch: Vec<(u64, String)> = (0..500)
         .map(|i| {
             let text = match i % 5 {
-                0 => format!("player{i} 1994 upper deck basketball card"),
-                1 => format!("player{i} (topps,fleer,bowman) rookie -(auto)"),
-                2 => format!("player{i} 1986 fleer (psa,bgs) -(reprint,lot)"),
-                3 => format!("(player{i},athlete{i}) topps 1997 card"),
-                _ => format!("player{i} basketball card"),
+                0 => format!("entity{i} 1994 north star appliance item"),
+                1 => format!("entity{i} (acme,vertex,summit) new -(manual)"),
+                2 => format!("entity{i} 1986 vertex (alpha,beta) -(replica,lot)"),
+                3 => format!("(entity{i},entity{i}) acme 1997 item"),
+                _ => format!("entity{i} appliance item"),
             };
             (i as u64, text)
         })
@@ -52,7 +52,7 @@ fn doc_store_consistent_through_lifecycle() {
     // Phase 2: Live inserts — verify source available immediately
     eprintln!("  Phase 2: live inserts with source checks");
     for i in 500..700u64 {
-        let text = format!("live{} michael jordan {} fleer", i, 1980 + (i % 20));
+        let text = format!("live{} wireless mouse {} vertex", i, 1980 + (i % 20));
         eng.insert_live(&text, i, 1);
         let src = eng.get_query_source(i);
         assert!(
@@ -117,7 +117,7 @@ fn doc_store_consistent_through_lifecycle() {
     // Phase 6: Update (delete + re-insert) — source should reflect new text
     eprintln!("  Phase 6: update + source verification");
     for id in 200..250u64 {
-        let new_text = format!("UPDATED player{id} 2024 panini prizm basketball");
+        let new_text = format!("UPDATED entity{id} 2024 orbit contoso appliance");
         let _ = eng.delete_by_logical_id(id);
         eng.insert_live(&new_text, id, 2);
         let src = eng
@@ -131,11 +131,11 @@ fn doc_store_consistent_through_lifecycle() {
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
     let test_titles = [
-        "player250 1994 upper deck basketball card psa 10",
-        "live550 michael jordan 1990 fleer card",
-        "UPDATED player220 2024 panini prizm basketball card",
-        "player400 topps 1997 card basketball",
-        "michael jordan 1986 fleer rookie card",
+        "entity250 1994 north star appliance item pro",
+        "live550 wireless mouse 1990 vertex item",
+        "UPDATED entity220 2024 orbit contoso appliance item",
+        "entity400 acme 1997 item appliance",
+        "wireless mouse 1986 vertex new item",
     ];
 
     for title in &test_titles {
@@ -173,8 +173,8 @@ fn simulate_live_server_traffic() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x5E_2F_1C,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     };
     let data = generate(&cfg);
 
@@ -375,7 +375,7 @@ fn update_storm_same_ids() {
     // Build initial versions
     let initial: Vec<(u64, String)> = base_ids
         .iter()
-        .map(|&id| (id, format!("player{id} 1994 upper deck basketball card")))
+        .map(|&id| (id, format!("entity{id} 1994 north star appliance item")))
         .collect();
     eng.build_from_queries(&initial);
     eprintln!("  initial: {} queries", initial.len());
@@ -383,15 +383,15 @@ fn update_storm_same_ids() {
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
 
-    let brands = ["topps", "bowman", "fleer", "panini", "donruss", "hoops"];
+    let brands = ["acme", "summit", "vertex", "orbit", "harbor", "hoops"];
     let years = [1986, 1990, 1993, 1996, 1997, 2003, 2010, 2020, 2024];
     let suffixes = [
-        "rookie card",
-        "card psa 10",
-        "basketball card",
-        "card bgs 9.5",
-        "chrome refractor",
-        "prizm silver",
+        "new item",
+        "item pro",
+        "appliance item",
+        "item basic",
+        "chrome premium",
+        "contoso silver",
     ];
 
     // 20 rounds of updates across all 50 IDs
@@ -402,7 +402,7 @@ fn update_storm_same_ids() {
             let brand = brands[(id as usize + round as usize) % brands.len()];
             let year = years[(id as usize + round as usize * 3) % years.len()];
             let suffix = suffixes[(id as usize + round as usize * 7) % suffixes.len()];
-            let new_text = format!("player{id} {year} {brand} {suffix}");
+            let new_text = format!("entity{id} {year} {brand} {suffix}");
 
             let _ = eng.delete_by_logical_id(id);
             eng.insert_live(&new_text, id, version);
@@ -416,10 +416,10 @@ fn update_storm_same_ids() {
 
         // Match a few titles between each update round
         let test_titles = [
-            "player10 1993 topps rookie card psa 10",
-            "player25 2003 bowman chrome refractor card",
-            "player1 1986 fleer basketball card psa 10",
-            "player50 2024 panini prizm silver basketball",
+            "entity10 1993 acme new item pro",
+            "entity25 2003 summit chrome premium item",
+            "entity1 1986 vertex appliance item pro",
+            "entity50 2024 orbit contoso silver appliance",
         ];
         for title in &test_titles {
             eng.match_title(title, &mut scratch, &mut out, true);
@@ -446,7 +446,7 @@ fn update_storm_same_ids() {
     // After compact, tombstones reclaimed — but total queries may be
     // higher than 50 due to multi-version duplication being cleaned up
     // during compaction. The key invariant: each logical ID matches at most once.
-    let title = "player10 1993 topps rookie card bowman fleer panini prizm";
+    let title = "entity10 1993 acme new item summit vertex orbit contoso";
     eng.match_title(title, &mut scratch, &mut out, true);
     let mut seen_ids: HashSet<u64> = HashSet::new();
     for &id in &out {

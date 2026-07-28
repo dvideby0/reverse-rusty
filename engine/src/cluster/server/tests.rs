@@ -29,7 +29,7 @@ fn placed_at(shard_id: u32, num_shards: u32) -> proto::QueryPlacement {
 }
 
 fn norm() -> Arc<Normalizer> {
-    Arc::new(Normalizer::default_vocab().expect("built-in vocab"))
+    Arc::new(Normalizer::default_vocab().expect("default vocabulary"))
 }
 
 /// A frozen dict interned over `snips` in order (mirrors the gRPC oracle helper).

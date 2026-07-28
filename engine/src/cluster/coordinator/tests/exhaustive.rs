@@ -10,7 +10,7 @@ fn exhaustive_refuses_after_partial_bulk_ingest_without_a_repair_record() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let norm = Arc::clone(&real.norm);
     let dict = Arc::clone(&real.dict);
@@ -148,7 +148,7 @@ fn exhaustive_blocks_successful_replacement_until_the_stream_finishes() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster");
 
     let mut by_position = vec![None; cfg.num_shards];
@@ -233,11 +233,11 @@ fn consistent_read_view_blocks_direct_replacement_until_source_is_read() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(5u64, "1994 topps".to_string())];
+    let seed = vec![(5u64, "1994 acme".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster");
     let view = cluster.consistent_read_view();
     let (ids, _) = view
-        .percolate_filtered_with_stats("1994 topps card", &[], false)
+        .percolate_filtered_with_stats("1994 acme item", &[], false)
         .expect("old-view match");
     assert_eq!(ids, vec![5]);
 
@@ -246,7 +246,7 @@ fn consistent_read_view_blocks_direct_replacement_until_source_is_read() {
     std::thread::scope(|scope| {
         let write = scope.spawn(|| {
             write_started_tx.send(()).expect("signal writer");
-            let result = cluster.upsert_query(5, "1995 fleer", 2);
+            let result = cluster.upsert_query(5, "1995 vertex", 2);
             write_done_tx.send(()).expect("signal completion");
             result
         });
@@ -259,7 +259,7 @@ fn consistent_read_view_blocks_direct_replacement_until_source_is_read() {
         );
         assert_eq!(
             view.get_source(5).expect("old-view source").as_deref(),
-            Some("1994 topps")
+            Some("1994 acme")
         );
         drop(view);
         write.join().expect("writer thread").expect("upsert");
@@ -267,10 +267,10 @@ fn consistent_read_view_blocks_direct_replacement_until_source_is_read() {
 
     assert_eq!(
         cluster.get_source(5).expect("new source").as_deref(),
-        Some("1995 fleer")
+        Some("1995 vertex")
     );
     assert!(!cluster
-        .percolate("1994 topps card")
+        .percolate("1994 acme item")
         .expect("new-view match")
         .contains(&5));
 }
@@ -284,7 +284,7 @@ fn consistent_read_view_fences_ranked_match_and_source_fetch() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(5u64, "1994 topps".to_string())];
+    let seed = vec![(5u64, "1994 acme".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster");
     let program = cluster
         .compile_rank_program(&crate::rank::RankProgramSpec::default())
@@ -292,7 +292,7 @@ fn consistent_read_view_fences_ranked_match_and_source_fetch() {
     let view = cluster.consistent_read_view();
     let ranked = view
         .try_percolate_filtered_top_k(
-            "1994 topps card",
+            "1994 acme item",
             &[],
             crate::result::TopKOptions::default(),
             &program,
@@ -313,7 +313,7 @@ fn consistent_read_view_fences_ranked_match_and_source_fetch() {
     std::thread::scope(|scope| {
         let write = scope.spawn(|| {
             write_started_tx.send(()).expect("signal writer");
-            let result = cluster.upsert_query(5, "1995 fleer", 2);
+            let result = cluster.upsert_query(5, "1995 vertex", 2);
             write_done_tx.send(()).expect("signal completion");
             result
         });
@@ -327,7 +327,7 @@ fn consistent_read_view_fences_ranked_match_and_source_fetch() {
         assert_eq!(
             view.fetch_ranked_sources_bounded(&ranked, 1_024, None)
                 .expect("old-view winner sources"),
-            vec!["1994 topps".to_string()]
+            vec!["1994 acme".to_string()]
         );
         drop(view);
         write.join().expect("writer thread").expect("upsert");
@@ -335,10 +335,10 @@ fn consistent_read_view_fences_ranked_match_and_source_fetch() {
 
     assert_eq!(
         cluster.get_source(5).expect("new source").as_deref(),
-        Some("1995 fleer")
+        Some("1995 vertex")
     );
     assert!(!cluster
-        .percolate("1994 topps card")
+        .percolate("1994 acme item")
         .expect("new-view match")
         .contains(&5));
 }
@@ -355,7 +355,7 @@ fn exhaustive_refuses_pending_repair_overlap_until_resync() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let norm = Arc::clone(&real.norm);
     let dict = Arc::clone(&real.dict);
@@ -498,7 +498,7 @@ fn live_mutation_takes_view_barrier_before_logical_stripe() {
             num_shards: 2,
             ..Default::default()
         },
-        &[(1, "1994 topps".to_string())],
+        &[(1, "1994 acme".to_string())],
     )
     .expect("cluster");
     let logical = cluster.logical_write_guard(2);
@@ -508,7 +508,7 @@ fn live_mutation_takes_view_barrier_before_logical_stripe() {
         let cluster_ref = &cluster;
         let mutation = scope.spawn(move || {
             started_tx.send(()).expect("signal mutation");
-            cluster_ref.add_query(2, "1994 topps")
+            cluster_ref.add_query(2, "1994 acme")
         });
         started_rx.recv().expect("mutation started");
 

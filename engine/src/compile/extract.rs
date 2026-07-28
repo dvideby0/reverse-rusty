@@ -118,7 +118,7 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
     let mut forbidden_phrases = Vec::new();
 
     // Consecutive positive bare words are normalized JOINTLY (in original order)
-    // so multiword entities ("michael jordan", "psa 10") are recognized exactly
+    // so multiword entities ("wireless mouse", "pro") are recognized exactly
     // as they are in titles. Without this the query and title feature spaces
     // would disagree and we'd get false negatives.
     let mut pos_words: Vec<&str> = Vec::new();

@@ -4,7 +4,7 @@ use super::*;
 async fn put_doc_typed_priority_reaches_bounded_ranker_and_errors_are_structured() {
     let state = state();
     let body: super::super::PutDocBody = serde_json::from_value(serde_json::json!({
-        "query": "topps chrome",
+        "query": "acme chrome",
         "rank_fields": {"priority": 50}
     }))
     .expect("typed body");
@@ -24,7 +24,7 @@ async fn put_doc_typed_priority_reaches_bounded_ranker_and_errors_are_structured
         .expect("priority program");
     let ranked = snap
         .try_match_title_top_k(
-            "2020 topps chrome",
+            "2020 acme chrome",
             reverse_rusty::TopKOptions::default(),
             &program,
             &reverse_rusty::exact::TagPredicate::empty(),
@@ -41,7 +41,7 @@ async fn put_doc_typed_priority_reaches_bounded_ranker_and_errors_are_structured
     );
 
     let invalid: super::super::PutDocBody = serde_json::from_value(serde_json::json!({
-        "query": "topps chrome",
+        "query": "acme chrome",
         "rank_fields": {"priority": 1.5}
     }))
     .expect("invalid rank still decodes at DTO layer");
@@ -83,7 +83,7 @@ fn structured_tag_values_fail_loud() {
 async fn put_doc_rejects_structured_tag_value_with_400() {
     let state = state();
     let body: super::super::PutDocBody = serde_json::from_value(serde_json::json!({
-        "query": "michael jordan",
+        "query": "wireless mouse",
         "tags": {"meta": {"x": 1}},
     }))
     .expect("body deserializes");
@@ -97,25 +97,25 @@ async fn put_doc_rejects_structured_tag_value_with_400() {
     .into_response();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     // Nothing was ingested: the engine never saw the doc.
-    assert!(matches_in_snapshot(&state, "1986 fleer michael jordan rookie").is_empty());
+    assert!(matches_in_snapshot(&state, "1986 vertex wireless mouse new").is_empty());
 }
 
 #[tokio::test]
 async fn rejected_reput_leaves_old_version_live() {
     let state = state();
-    do_put(&state, 7, "michael jordan").await;
+    do_put(&state, 7, "wireless mouse").await;
 
     // A parse error never reaches the engine; the old version stays live.
     let (status, _) = do_put(&state, 7, "(").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&7));
+    assert!(matches_in_snapshot(&state, "1986 vertex wireless mouse new").contains(&7));
 
     // A class-D rejection (negation-only) also leaves the old version live.
-    let (status, body) = do_put(&state, 7, "-graded").await;
+    let (status, body) = do_put(&state, 7, "-damaged").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["result"], "rejected");
     assert!(
-        matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&7),
+        matches_in_snapshot(&state, "1986 vertex wireless mouse new").contains(&7),
         "a failed replace must never delete"
     );
 }

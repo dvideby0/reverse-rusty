@@ -13,9 +13,9 @@ async fn cluster_bulk_shares_index_create_version_and_response_contract() {
     let state = test_state(&seed());
     let body = concat!(
         "{\"index\":{\"_index\":\"queries\",\"_id\":\"1\"}}\n",
-        "{\"query\":\"1994 topps gold\",\"version\":7,\"rank_fields\":{\"priority\":50}}\n",
+        "{\"query\":\"1994 acme gold\",\"version\":7,\"rank_fields\":{\"priority\":50}}\n",
         "{\"create\":{\"_id\":10,\"_require_alias\":false}}\n",
-        "{\"query\":\"1996 skybox\",\"version\":3}\n",
+        "{\"query\":\"1996 vertex\",\"version\":3}\n",
         "{\"create\":{\"_id\":1}}\n",
         "{\"query\":\"must not replace\",\"version\":9}\n",
     );
@@ -53,7 +53,7 @@ async fn cluster_bulk_shares_index_create_version_and_response_contract() {
     .await;
     assert_eq!(status, StatusCode::OK, "{document}");
     assert_eq!(document["_version"], 7);
-    assert_eq!(document["_source"]["query"], "1994 topps gold");
+    assert_eq!(document["_source"]["query"], "1994 acme gold");
 
     let (status, search) = send(
         &state,
@@ -61,7 +61,7 @@ async fn cluster_bulk_shares_index_create_version_and_response_contract() {
             "POST",
             "/_search",
             &serde_json::json!({
-                "document": {"title": "1994 topps"},
+                "document": {"title": "1994 acme"},
                 "rank": {"priority_key": "priority"}
             }),
         ),
@@ -83,7 +83,7 @@ async fn cluster_bulk_shares_index_create_version_and_response_contract() {
             "POST",
             "/v2/_search",
             &serde_json::json!({
-                "document": {"title": "1994 topps gold"},
+                "document": {"title": "1994 acme gold"},
                 "include_source": false
             }),
         ),
@@ -102,7 +102,7 @@ async fn cluster_bulk_shares_index_create_version_and_response_contract() {
 #[tokio::test]
 async fn cluster_bulk_uses_the_shared_strict_transport_contract() {
     let state = test_state(&seed());
-    let valid = "{\"index\":{\"_id\":10}}\n{\"query\":\"1996 skybox\"}\n";
+    let valid = "{\"index\":{\"_id\":10}}\n{\"query\":\"1996 vertex\"}\n";
     for (label, request, expected) in [
         (
             "missing content type",

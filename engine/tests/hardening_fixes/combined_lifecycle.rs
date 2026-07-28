@@ -26,7 +26,7 @@ fn full_lifecycle_vocab_delete_persist_compact() {
 
     // Phase 2: live inserts (some will auto-flush due to threshold=5)
     for i in 20..30 {
-        engine.insert_live(&format!("topps chrome {i} base"), i, 1);
+        engine.insert_live(&format!("acme chrome {i} base"), i, 1);
     }
 
     let metrics_mid = engine.metrics();
@@ -38,8 +38,8 @@ fn full_lifecycle_vocab_delete_persist_compact() {
     // Phase 3: change vocab — everything becomes stale
     let mut vocab = Vocab::new();
     vocab.add_synonym(
-        "rc",
-        "term:rookie",
+        "pkg",
+        "term:new",
         reverse_rusty::dict::FeatureKind::Category,
     );
     let stale = engine.set_vocab(vocab).unwrap();
@@ -53,8 +53,8 @@ fn full_lifecycle_vocab_delete_persist_compact() {
     assert!(del2 > 0);
 
     // Phase 5: new inserts at the new vocab epoch
-    engine.insert_live("lebron james rookie card 2003", 50, 1);
-    engine.insert_live("michael jordan 1997 topps chrome", 51, 1);
+    engine.insert_live("mechanical keyboard new item 2003", 50, 1);
+    engine.insert_live("wireless mouse 1997 acme chrome", 51, 1);
     engine.flush();
 
     // The new segment should NOT be stale
@@ -78,7 +78,7 @@ fn full_lifecycle_vocab_delete_persist_compact() {
     assert!(engine.has_stale_segments());
 
     // Phase 7: verify matching still works correctly
-    let deleted_match = match_ids(&engine, "michael jordan 1986 fleer rookie");
+    let deleted_match = match_ids(&engine, "wireless mouse 1986 vertex new");
     assert!(
         !deleted_match.contains(&1),
         "deleted query should not match"
@@ -88,7 +88,7 @@ fn full_lifecycle_vocab_delete_persist_compact() {
         "deleted query should not match"
     );
 
-    let new_match = match_ids(&engine, "lebron james rookie card 2003 topps");
+    let new_match = match_ids(&engine, "mechanical keyboard new item 2003 acme");
     assert!(new_match.contains(&50), "newly inserted query should match");
 
     // Phase 8: persist and reopen
@@ -97,13 +97,13 @@ fn full_lifecycle_vocab_delete_persist_compact() {
     let reopened = Engine::open(norm2, config).expect("reopen should succeed");
 
     // Verify same match results after reopen
-    let post_reopen = match_ids(&reopened, "lebron james rookie card 2003 topps");
+    let post_reopen = match_ids(&reopened, "mechanical keyboard new item 2003 acme");
     assert!(
         post_reopen.contains(&50),
         "match results should survive reopen"
     );
 
-    let post_del = match_ids(&reopened, "michael jordan 1986 fleer rookie");
+    let post_del = match_ids(&reopened, "wireless mouse 1986 vertex new");
     assert!(
         !post_del.contains(&1),
         "deleted query should stay deleted after reopen"
@@ -120,7 +120,7 @@ fn interleaved_delete_insert_flush_compact_stress() {
     for i in 0..100 {
         queries.push((
             i,
-            format!("player{} team{} 2024 topps chrome", i % 20, i % 5),
+            format!("entity{} group{} 2024 acme chrome", i % 20, i % 5),
         ));
     }
     engine.build_from_queries(&queries);
@@ -134,7 +134,11 @@ fn interleaved_delete_insert_flush_compact_stress() {
         // Insert new queries
         for i in 0..10 {
             let id = 1000 + round * 10 + i;
-            engine.insert_live(&format!("newplayer{} team{} 2025 prizm", id, i % 3), id, 1);
+            engine.insert_live(
+                &format!("newentity{} group{} 2025 contoso", id, i % 3),
+                id,
+                1,
+            );
         }
         // Flush every other round
         if round % 2 == 0 {
@@ -158,7 +162,7 @@ fn interleaved_delete_insert_flush_compact_stress() {
             if del_id < 100 {
                 engine.match_title(
                     &format!(
-                        "player{} team{} 2024 topps chrome refractor",
+                        "entity{} group{} 2024 acme chrome premium",
                         del_id % 20,
                         del_id % 5
                     ),
@@ -181,7 +185,7 @@ fn interleaved_delete_insert_flush_compact_stress() {
         for i in 0..10u64 {
             let id = 1000 + round * 10 + i;
             engine.match_title(
-                &format!("newplayer{} team{} 2025 prizm silver", id, i % 3),
+                &format!("newentity{} group{} 2025 contoso silver", id, i % 3),
                 &mut scratch,
                 &mut out,
                 true,
@@ -224,14 +228,14 @@ fn persistence_round_trip_with_reverse_index() {
     let reopened = Engine::open(norm2, config).expect("reopen");
 
     // The deleted ID should not match
-    let results = match_ids(&reopened, "kobe bryant psa 10 gem mint");
+    let results = match_ids(&reopened, "noise cancelling headphones pro deluxe premium");
     assert!(
         !results.contains(&3),
         "deleted query should stay deleted after reopen"
     );
 
     // Other queries should still work
-    let results2 = match_ids(&reopened, "mike trout 2011 topps update us175");
+    let results2 = match_ids(&reopened, "air purifier 2011 acme update us175");
     assert!(results2.contains(&4), "surviving query should still match");
 
     // Delete via reverse index should work on reopened mmap segments

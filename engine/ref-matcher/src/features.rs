@@ -16,7 +16,7 @@ pub struct Feature(pub String);
 impl Feature {
     /// A feature whose canonical name is given verbatim — used for vocabulary-supplied
     /// canonicals (a synonym's or phrase's `canonical`, which is already kind-prefixed, e.g.
-    /// `term:upper_deck`).
+    /// `term:north_star`).
     #[must_use]
     pub fn raw(canonical: impl Into<String>) -> Self {
         Feature(canonical.into())

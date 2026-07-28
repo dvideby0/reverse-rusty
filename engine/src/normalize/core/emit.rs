@@ -57,7 +57,7 @@ impl Normalizer {
         // Phrase patterns are registered single-spaced. ADR-061 collapses query
         // whitespace while aliases are active; ADR-120 does the same for BOTH
         // sides of every positioned graph so a forbidden phrase observes
-        // `"upper  deck"` exactly as it observes `"upper deck"`. Flat,
+        // `"north  star"` exactly as it observes `"north star"`. Flat,
         // alias-free analysis retains its historical byte-identical behavior.
         if retain_positioned_starts || (side == Side::Query && self.has_multiword_aliases) {
             collapse_ws_runs_in_place(lc);

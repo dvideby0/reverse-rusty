@@ -38,7 +38,7 @@ fn durability_failure_surfaces_as_event() {
     let seg_dir = dir.join("segments");
     let orig = std::fs::metadata(&seg_dir).unwrap().permissions();
     std::fs::set_permissions(&seg_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-    engine.insert_live("michael jordan 1986 fleer", 1, 1);
+    engine.insert_live("wireless mouse 1986 vertex", 1, 1);
     engine.flush();
 
     // Restore perms BEFORE asserting so temp-dir cleanup always works.
@@ -84,14 +84,14 @@ fn failed_flush_retains_data_in_wal_and_recovers_on_reopen() {
         ..EngineConfig::default()
     };
 
-    let t_jordan = "Michael Jordan 1986 Fleer Rookie PSA 10";
-    let t_pippen = "Scottie Pippen 1988 Fleer";
+    let t_mouse = "Wireless Mouse 1986 Vertex New PRO";
+    let t_pippen = "Scottie Pippen 1988 Vertex";
     {
         let mut engine = Engine::with_config(make_norm(), config.clone());
         // A durable base segment (writes a manifest), then a live insert that lives
         // only in the WAL + memtable until the (about-to-fail) flush.
-        engine.build_from_queries(&[(1, "michael jordan 1986 fleer".into())]);
-        engine.insert_live("scottie pippen 1988 fleer", 2, 1);
+        engine.build_from_queries(&[(1, "wireless mouse 1986 vertex".into())]);
+        engine.insert_live("scottie pippen 1988 vertex", 2, 1);
         assert_eq!(
             match_ids(&engine, t_pippen),
             vec![2],
@@ -122,7 +122,7 @@ fn failed_flush_retains_data_in_wal_and_recovers_on_reopen() {
     // so recovery replays it. This is the durability guarantee the fix restores.
     let engine2 = Engine::open(make_norm(), config).expect("reopen after failed flush");
     assert_eq!(
-        match_ids(&engine2, t_jordan),
+        match_ids(&engine2, t_mouse),
         vec![1],
         "the durably-committed query survives reopen"
     );
@@ -154,16 +154,16 @@ fn failed_compaction_rolls_back_and_keeps_segments_on_disk() {
     };
     let mut engine = Engine::with_config(make_norm(), config.clone());
     // Two durable base segments.
-    engine.build_from_queries(&[(1, "michael jordan 1986 fleer".into())]);
-    engine.bulk_ingest(&[(2, "scottie pippen 1988 fleer".into())]);
+    engine.build_from_queries(&[(1, "wireless mouse 1986 vertex".into())]);
+    engine.bulk_ingest(&[(2, "scottie pippen 1988 vertex".into())]);
     assert_eq!(
         engine.metrics().base_segments,
         2,
         "two base segments before compaction"
     );
 
-    let t1 = "Michael Jordan 1986 Fleer";
-    let t2 = "Scottie Pippen 1988 Fleer";
+    let t1 = "Wireless Mouse 1986 Vertex";
+    let t2 = "Scottie Pippen 1988 Vertex";
     assert_eq!(match_ids(&engine, t1), vec![1]);
     assert_eq!(match_ids(&engine, t2), vec![2]);
 
@@ -247,7 +247,7 @@ fn recovery_diagnostics_buffered_until_observer_attaches() {
             ..EngineConfig::default()
         };
         let mut eng = Engine::with_config(make_norm(), config);
-        eng.insert_live("michael jordan 1986 fleer", 1, 1);
+        eng.insert_live("wireless mouse 1986 vertex", 1, 1);
         eng.flush();
         assert!(eng.num_segments() >= 1, "expected a flushed base segment");
     }

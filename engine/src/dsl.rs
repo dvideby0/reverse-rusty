@@ -217,26 +217,20 @@ mod tests {
 
     #[test]
     fn parses_spec_example() {
-        let q = "1994 (upper deck,UD) michael jordan sp (preview,previews) \
-                 -(next,checklist,checklists,heroes,long,count) \
-                 -(minor,minors,top,classic,alumni) \
-                 -(auto,autograph,autographs,autographed,signed,dna,signature) \
-                 PSA 10 -(sgc,bgs)";
+        let q = "2024 (north star,northstar) wireless mouse \
+                 (compact,portable) pro -(damaged,parts,replica,manual)";
         let ast = parse(q).unwrap();
         // a few sanity checks
         assert!(ast
             .clauses
             .iter()
-            .any(|c| !c.negated && c.atom == Atom::Term("1994".into())));
+            .any(|c| !c.negated && c.atom == Atom::Term("2024".into())));
         assert!(ast
             .clauses
             .iter()
-            .any(|c| matches!(&c.atom, Atom::AnyOf(m) if m.contains(&"upper deck".to_string()))));
-        assert!(ast
-            .clauses
-            .iter()
-            .any(|c| c.negated
-                && matches!(&c.atom, Atom::AnyOf(m) if m.contains(&"bgs".to_string()))));
+            .any(|c| matches!(&c.atom, Atom::AnyOf(m) if m.contains(&"north star".to_string()))));
+        assert!(ast.clauses.iter().any(|c| c.negated
+            && matches!(&c.atom, Atom::AnyOf(m) if m.contains(&"damaged".to_string()))));
     }
 
     #[test]
@@ -247,9 +241,9 @@ mod tests {
 
     #[test]
     fn trailing_dash_errors_at_dash() {
-        let e = parse("jordan -").unwrap_err();
+        let e = parse("product gamma -").unwrap_err();
         assert_eq!(e.kind, ParseErrorKind::TrailingDash);
-        assert_eq!(e.pos, 7); // index of the '-'
+        assert_eq!(e.pos, 14); // index of the '-'
     }
 
     #[test]
@@ -279,23 +273,23 @@ mod tests {
 
     #[test]
     fn unclosed_group_errors_at_open_paren() {
-        let e = parse("jordan (upper deck,ud").unwrap_err();
+        let e = parse("product gamma (north star,ns").unwrap_err();
         assert_eq!(e.kind, ParseErrorKind::UnclosedGroup);
-        assert_eq!(e.pos, 7); // index of the '('
+        assert_eq!(e.pos, 14); // index of the '('
     }
 
     #[test]
     fn empty_group_errors_at_open_paren() {
-        let e = parse("jordan ()").unwrap_err();
+        let e = parse("product gamma ()").unwrap_err();
         assert_eq!(e.kind, ParseErrorKind::EmptyAnyOfGroup);
-        assert_eq!(e.pos, 7);
+        assert_eq!(e.pos, 14);
     }
 
     #[test]
     fn unclosed_quote_errors_at_open_quote() {
-        let e = parse("jordan \"upper deck").unwrap_err();
+        let e = parse("product gamma \"north star").unwrap_err();
         assert_eq!(e.kind, ParseErrorKind::UnclosedQuote);
-        assert_eq!(e.pos, 7); // index of the opening quote
+        assert_eq!(e.pos, 14); // index of the opening quote
     }
 
     #[test]

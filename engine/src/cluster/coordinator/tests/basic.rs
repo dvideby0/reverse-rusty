@@ -9,13 +9,13 @@ fn add_query_is_fail_closed_when_log_append_fails() {
         ..Default::default()
     };
     // Build over a seed corpus so the frozen dict knows these tokens.
-    let seed = vec![(1u64, "1994 topps".to_string())];
+    let seed = vec![(1u64, "1994 acme".to_string())];
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("durable cluster builds");
     let before = cluster.num_queries().expect("count");
 
     // Break the durable log, then attempt an add of an in-vocabulary query.
     cluster.log.break_writes_for_test();
-    let res = cluster.add_query(2, "1995 fleer");
+    let res = cluster.add_query(2, "1995 vertex");
     assert!(
         matches!(res, Err(ShardError::Log(_))),
         "expected Log error, got {res:?}"
@@ -23,7 +23,7 @@ fn add_query_is_fail_closed_when_log_append_fails() {
 
     // No shard was mutated: count unchanged and id 2 is not matchable.
     assert_eq!(cluster.num_queries().expect("count"), before);
-    let hits = cluster.percolate("1995 fleer").expect("percolate");
+    let hits = cluster.percolate("1995 vertex").expect("percolate");
     assert!(
         !hits.contains(&2),
         "rejected add must not be matchable: {hits:?}"
@@ -41,7 +41,7 @@ fn create_waits_for_a_provisional_reservation_to_commit_or_roll_back() {
         num_shards: 3,
         ..Default::default()
     };
-    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let norm = Arc::clone(&real.norm);
     let dict = Arc::clone(&real.dict);
@@ -80,7 +80,7 @@ fn create_waits_for_a_provisional_reservation_to_commit_or_roll_back() {
 
     let first_cluster = Arc::clone(&cluster);
     let first =
-        std::thread::spawn(move || first_cluster.create_query_with_tags(91, "1994 topps", 7, &[]));
+        std::thread::spawn(move || first_cluster.create_query_with_tags(91, "1994 acme", 7, &[]));
     gate.wait_until_entered();
 
     let (started_tx, started_rx) = mpsc::channel();
@@ -88,7 +88,7 @@ fn create_waits_for_a_provisional_reservation_to_commit_or_roll_back() {
     let second_cluster = Arc::clone(&cluster);
     let second = std::thread::spawn(move || {
         started_tx.send(()).expect("signal second start");
-        let result = second_cluster.create_query_with_tags(91, "1995 fleer", 8, &[]);
+        let result = second_cluster.create_query_with_tags(91, "1995 vertex", 8, &[]);
         result_tx.send(result).expect("send second result");
     });
     started_rx
@@ -124,7 +124,7 @@ fn create_waits_for_a_provisional_reservation_to_commit_or_roll_back() {
         .get_document(91)
         .expect("source lookup")
         .expect("second create is live");
-    assert_eq!(source.query(), "1995 fleer");
+    assert_eq!(source.query(), "1995 vertex");
     assert_eq!(source.version(), 8);
 }
 
@@ -137,7 +137,7 @@ fn create_waits_for_a_provisional_reservation_to_commit_or_roll_back() {
 #[test]
 fn open_rejects_manifest_with_divergent_dict_fingerprint() {
     let dir = scratch_dir("fpmismatch");
-    let seed = vec![(1u64, "1994 topps".to_string())];
+    let seed = vec![(1u64, "1994 acme".to_string())];
     let cfg = ClusterConfig {
         num_shards: 3,
         data_dir: Some(dir.clone()),

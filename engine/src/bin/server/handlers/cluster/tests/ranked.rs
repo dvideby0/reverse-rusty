@@ -7,7 +7,7 @@ async fn cluster_get_search_shares_strict_compatibility_controls() {
         "query": {
             "percolate": {
                 "field": "query",
-                "document": {"title": "1994 topps"}
+                "document": {"title": "1994 acme"}
             }
         }
     });
@@ -25,7 +25,7 @@ async fn cluster_get_search_shares_strict_compatibility_controls() {
     assert!(body["took"].is_u64(), "{body}");
     assert!(body["took_ms"].is_f64(), "{body}");
     assert_eq!(body["hits"]["hits"][0]["_index"], "queries");
-    assert_eq!(body["hits"]["hits"][0]["_source"]["query"], "1994 topps");
+    assert_eq!(body["hits"]["hits"][0]["_source"]["query"], "1994 acme");
     assert!(body["profile"].is_object(), "{body}");
 
     let (status, body) = send(
@@ -35,8 +35,8 @@ async fn cluster_get_search_shares_strict_compatibility_controls() {
             "/_search",
             &serde_json::json!({
                 "documents": [
-                    {"title": "1994 topps"},
-                    {"title": "1995 fleer"}
+                    {"title": "1994 acme"},
+                    {"title": "1995 vertex"}
                 ],
                 "include_source": true,
                 "size": 1
@@ -64,12 +64,12 @@ async fn cluster_get_search_shares_strict_compatibility_controls() {
         (
             "duplicate size",
             "/_search?size=1",
-            serde_json::json!({"document": {"title": "1994 topps"}, "size": 2}),
+            serde_json::json!({"document": {"title": "1994 acme"}, "size": 2}),
         ),
         (
             "unsupported explain",
             "/_search?explain=true",
-            serde_json::json!({"document": {"title": "1994 topps"}}),
+            serde_json::json!({"document": {"title": "1994 acme"}}),
         ),
     ] {
         let (status, body) = send(&state, req("POST", path, &request)).await;
@@ -83,7 +83,7 @@ async fn cluster_search_preserves_content_type_and_body_limit_statuses() {
     use axum::extract::DefaultBodyLimit;
 
     let state = test_state(&seed());
-    let body = serde_json::json!({"document": {"title": "1994 topps"}});
+    let body = serde_json::json!({"document": {"title": "1994 acme"}});
     let request = Request::post("/_search")
         .body(Body::from(body.to_string()))
         .expect("request");
@@ -124,8 +124,8 @@ async fn cluster_search_enforces_multi_document_admission_before_matching() {
             "/_search",
             &serde_json::json!({
                 "documents": [
-                    {"title": "1994 topps"},
-                    {"title": "1995 fleer"}
+                    {"title": "1994 acme"},
+                    {"title": "1995 vertex"}
                 ]
             }),
         ),
@@ -149,9 +149,9 @@ async fn ranked_search_orders_by_score() {
     // stays byte-identical (no `_score`, ascending ids).
     let state = test_state(&[]);
     for (id, q, tier) in [
-        (41u64, "1994 topps", "gold"),
-        (42, "1994 topps", "silver"),
-        (43, "1994 topps", "bronze"),
+        (41u64, "1994 acme", "gold"),
+        (42, "1994 acme", "silver"),
+        (43, "1994 acme", "bronze"),
     ] {
         let (status, _) = send(
             &state,
@@ -174,7 +174,7 @@ async fn ranked_search_orders_by_score() {
         req(
             "POST",
             "/_search",
-            &serde_json::json!({"document": {"title": "1994 topps"}, "rank": rank}),
+            &serde_json::json!({"document": {"title": "1994 acme"}, "rank": rank}),
         ),
     )
     .await;
@@ -202,7 +202,7 @@ async fn ranked_search_orders_by_score() {
             "POST",
             "/_search",
             &serde_json::json!({
-                "document": {"title": "1994 topps"},
+                "document": {"title": "1994 acme"},
                 "rank": rank, "from": 1, "size": 1
             }),
         ),
@@ -216,7 +216,7 @@ async fn ranked_search_orders_by_score() {
         req(
             "POST",
             "/_search",
-            &serde_json::json!({"document": {"title": "1994 topps"}}),
+            &serde_json::json!({"document": {"title": "1994 acme"}}),
         ),
     )
     .await;
@@ -234,7 +234,7 @@ async fn ranked_search_orders_by_score() {
             "POST",
             "/_mpercolate",
             &serde_json::json!({
-                "documents": [{"title": "1994 topps"}],
+                "documents": [{"title": "1994 acme"}],
                 "rank": rank
             }),
         ),
@@ -252,7 +252,7 @@ async fn ranked_search_orders_by_score() {
             req(
                 "POST",
                 "/_search",
-                &serde_json::json!({"document": {"title": "1994 topps"}, "rank": noop}),
+                &serde_json::json!({"document": {"title": "1994 acme"}, "rank": noop}),
             ),
         )
         .await;
@@ -274,11 +274,11 @@ async fn bulk_mixes_upserts_and_statuses() {
     let state = test_state(&seed());
     let body = concat!(
         "{\"index\":{\"_id\":21}}\n",
-        "{\"query\":\"1996 skybox\"}\n",
+        "{\"query\":\"1996 vertex\"}\n",
         "{\"index\":{\"_id\":22}}\n",
         "{\"query\":\"(((\"}\n",
         "{\"index\":{\"_id\":1}}\n",
-        "{\"query\":\"1994 topps gold\"}\n",
+        "{\"query\":\"1994 acme gold\"}\n",
     );
     let r = Request::builder()
         .method("POST")
@@ -301,7 +301,7 @@ async fn bulk_mixes_upserts_and_statuses() {
         req(
             "POST",
             "/_search",
-            &serde_json::json!({"document": {"title": "1994 topps"}}),
+            &serde_json::json!({"document": {"title": "1994 acme"}}),
         ),
     )
     .await;
@@ -326,8 +326,8 @@ async fn mpercolate_returns_per_document_responses() {
             "POST",
             "/_mpercolate",
             &serde_json::json!({"documents": [
-                {"title": "1994 topps"},
-                {"title": "1995 fleer ultra"},
+                {"title": "1994 acme"},
+                {"title": "1995 vertex ultra"},
                 {"title": "nothing here"}
             ], "include_source": true}),
         ),
@@ -345,11 +345,11 @@ async fn mpercolate_returns_per_document_responses() {
     assert_eq!(responses[2]["hits"]["total"], 0);
     assert_eq!(
         responses[0]["hits"]["hits"][0]["_source"]["query"],
-        "1994 topps"
+        "1994 acme"
     );
     assert_eq!(
         responses[1]["hits"]["hits"][0]["_source"]["query"],
-        "1995 fleer"
+        "1995 vertex"
     );
 }
 
@@ -366,7 +366,7 @@ async fn cluster_mpercolate_is_strict_and_names_profile_limit() {
                 "query": {
                     "percolate": {
                         "field": "query",
-                        "documents": [{"title": "1994 topps"}]
+                        "documents": [{"title": "1994 acme"}]
                     }
                 },
                 "_source": false,

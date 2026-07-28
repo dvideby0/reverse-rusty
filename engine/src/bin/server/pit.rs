@@ -162,7 +162,7 @@ impl PitTokens {
 ///
 /// The title component hashes the MATCHER's exact input — both ADR-061 feature
 /// views (`N(T)`/`P(T)`) plus ADR-120 canonical/positive position graphs — not surface tokens: with
-/// a collapsing phrase configured, `upper deck` and `upper  deck` clean to the
+/// a collapsing phrase configured, `north star` and `north  star` clean to the
 /// same tokens but emit different feature sets (whitespace runs are
 /// phrase-significant), and the fingerprint must distinguish exactly what the
 /// matcher distinguishes (codex review). Boosts are reduced to their EFFECTIVE
@@ -429,38 +429,38 @@ mod tests {
             boosts: vec![("tier".into(), "gold".into(), 100)],
         };
         let filter = vec![("tier".to_string(), vec!["gold".to_string()])];
-        let base = fp("topps chrome", QueryScope::Standard, &rank, &filter);
+        let base = fp("acme chrome", QueryScope::Standard, &rank, &filter);
 
         // Same request → same fingerprint; surface-noise title variants that
         // produce the same match features also match.
         assert_eq!(
             base,
-            fp("topps chrome", QueryScope::Standard, &rank, &filter)
+            fp("acme chrome", QueryScope::Standard, &rank, &filter)
         );
         assert_eq!(
             base,
-            fp("  Topps   CHROME ", QueryScope::Standard, &rank, &filter)
+            fp("  Acme   CHROME ", QueryScope::Standard, &rank, &filter)
         );
 
         // Every covered component moves it.
         assert_ne!(
             base,
-            fp("topps finest", QueryScope::Standard, &rank, &filter)
+            fp("acme finest", QueryScope::Standard, &rank, &filter)
         );
         assert_ne!(
             base,
-            fp("topps chrome", QueryScope::WithBroad, &rank, &filter)
+            fp("acme chrome", QueryScope::WithBroad, &rank, &filter)
         );
         assert_ne!(
             base,
             fp(
-                "topps chrome",
+                "acme chrome",
                 QueryScope::Standard,
                 &RankProgramSpec::default(),
                 &filter
             )
         );
-        assert_ne!(base, fp("topps chrome", QueryScope::Standard, &rank, &[]));
+        assert_ne!(base, fp("acme chrome", QueryScope::Standard, &rank, &[]));
         assert_ne!(
             fp("red shoe", QueryScope::Standard, &rank, &filter),
             fp("shoe red", QueryScope::Standard, &rank, &filter),
@@ -477,8 +477,8 @@ mod tests {
             vec!["silver".to_string(), "gold".to_string()],
         )];
         assert_eq!(
-            fp("topps chrome", QueryScope::Standard, &rank, &two),
-            fp("topps chrome", QueryScope::Standard, &rank, &two_rev)
+            fp("acme chrome", QueryScope::Standard, &rank, &two),
+            fp("acme chrome", QueryScope::Standard, &rank, &two_rev)
         );
     }
 
@@ -550,12 +550,12 @@ mod tests {
         );
 
         // (3) With a collapsing phrase active, whitespace runs are
-        // phrase-significant: `upper deck` (phrase feature) and `upper  deck`
+        // phrase-significant: `north star` (phrase feature) and `north  star`
         // (component features) must fingerprint differently — the matcher
         // sees different feature sets even though the cleaned tokens agree.
         let mut vocab = reverse_rusty::vocab::Vocab::new();
         vocab.aliases_mut().add_classified(
-            &["ud".into(), "upper deck".into()],
+            &["ns".into(), "north star".into()],
             reverse_rusty::vocab::AliasProvenance::DeclaredFile,
             1.0,
             &norm,
@@ -566,7 +566,7 @@ mod tests {
             request_fingerprint(
                 &phrased,
                 &dict,
-                "upper deck",
+                "north star",
                 QueryScope::Standard,
                 &plain,
                 &[]
@@ -574,7 +574,7 @@ mod tests {
             request_fingerprint(
                 &phrased,
                 &dict,
-                "upper  deck",
+                "north  star",
                 QueryScope::Standard,
                 &plain,
                 &[]

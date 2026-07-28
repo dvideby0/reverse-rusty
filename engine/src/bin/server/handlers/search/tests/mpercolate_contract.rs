@@ -34,9 +34,7 @@ async fn routed_mpercolate(
 #[tokio::test]
 async fn accepts_truthful_es_controls_and_returns_batch_metadata() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
-    engine
-        .try_insert_live("topps chrome", 7, 1)
-        .expect("insert");
+    engine.try_insert_live("acme chrome", 7, 1).expect("insert");
     let state = state_with(engine, false);
     let (status, response) = routed_mpercolate(
         &state,
@@ -45,7 +43,7 @@ async fn accepts_truthful_es_controls_and_returns_batch_metadata() {
             "query": {
                 "percolate": {
                     "field": "query",
-                    "documents": [{"title": "2020 topps chrome"}]
+                    "documents": [{"title": "2020 acme chrome"}]
                 }
             },
             "_source": false,
@@ -169,7 +167,7 @@ async fn returns_structured_extractor_errors_and_post_only_allow() {
         Engine::new(Normalizer::default_vocab().expect("vocab")),
         false,
     );
-    let body = serde_json::json!({"documents": [{"title": "topps chrome"}]}).to_string();
+    let body = serde_json::json!({"documents": [{"title": "acme chrome"}]}).to_string();
 
     let app = Router::new()
         .route("/_mpercolate", post(mpercolate_route))
@@ -272,9 +270,7 @@ async fn fails_loud_when_a_matched_source_is_unavailable() {
     {
         let mut engine =
             Engine::with_config(Normalizer::default_vocab().expect("vocab"), config.clone());
-        engine
-            .try_insert_live("topps chrome", 7, 1)
-            .expect("insert");
+        engine.try_insert_live("acme chrome", 7, 1).expect("insert");
         engine.flush();
     }
     let source_name = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin"))
@@ -285,7 +281,7 @@ async fn fails_loud_when_a_matched_source_is_unavailable() {
     assert!(engine.snapshot().has_live_query(7));
     let state = state_with(engine, false);
     let request: MPercolateBody = serde_json::from_value(serde_json::json!({
-        "documents": [{"title": "topps chrome"}]
+        "documents": [{"title": "acme chrome"}]
     }))
     .expect("body");
     let error = mpercolate(State(state), Json(request))

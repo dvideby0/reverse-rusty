@@ -11,7 +11,7 @@ fn same_version_stale_source_sidecar_fails_loud_after_reopen() {
         let mut engine = Engine::with_config(make_norm(), cfg());
         engine
             .try_upsert_live_with_tags(
-                "1994 topps",
+                "1994 acme",
                 7,
                 1,
                 &[("status".to_string(), "old".to_string())],
@@ -23,7 +23,7 @@ fn same_version_stale_source_sidecar_fails_loud_after_reopen() {
 
         engine
             .try_upsert_live_with_tags(
-                "1995 fleer",
+                "1995 vertex",
                 7,
                 1,
                 &[("status".to_string(), "new".to_string())],
@@ -59,13 +59,13 @@ fn live_then_bulk_same_id_keeps_newer_source_across_reopen_and_rebuild() {
         let mut engine = Engine::with_config(make_norm(), cfg());
         engine
             .try_insert_live_with_tags(
-                "1994 topps",
+                "1994 acme",
                 7,
                 1,
                 &[("status".to_string(), "old".to_string())],
             )
             .expect("live insert");
-        let rows = [(7, "1995 fleer".to_string())];
+        let rows = [(7, "1995 vertex".to_string())];
         let tags = [vec![("status".to_string(), "new".to_string())]];
         let (report, _) = engine
             .try_bulk_ingest_detailed_with_tags(&rows, &tags)
@@ -77,7 +77,7 @@ fn live_then_bulk_same_id_keeps_newer_source_across_reopen_and_rebuild() {
                 .get_query_document(7)
                 .expect("newest live document")
                 .query(),
-            "1995 fleer"
+            "1995 vertex"
         );
         // Crash/drop without flushing the older WAL-backed memtable row.
     }
@@ -87,16 +87,16 @@ fn live_then_bulk_same_id_keeps_newer_source_across_reopen_and_rebuild() {
         .snapshot()
         .get_query_document(7)
         .expect("bulk source must still pair with the newer base exact row");
-    assert_eq!(document.query(), "1995 fleer");
+    assert_eq!(document.query(), "1995 vertex");
     assert_eq!(document.tags(), [("status".to_string(), "new".to_string())]);
 
     reopened
         .set_vocab(reverse_rusty::vocab::Vocab::default())
         .expect("coherent reopened corpus remains rebuildable");
     assert_eq!(reopened.recompile_stale_segments(), 1);
-    assert!(match_ids(&reopened, "1995 fleer").contains(&7));
+    assert!(match_ids(&reopened, "1995 vertex").contains(&7));
     assert!(
-        !match_ids(&reopened, "1994 topps").contains(&7),
+        !match_ids(&reopened, "1994 acme").contains(&7),
         "the older replayed source must not replace the bulk document during rebuild"
     );
 
@@ -113,14 +113,14 @@ fn missing_source_store_blocks_vocab_change_without_dropping_live_rows() {
     {
         let mut engine = Engine::with_config(make_norm(), cfg());
         engine
-            .try_insert_live("1995 fleer", 7, 1)
+            .try_insert_live("1995 vertex", 7, 1)
             .expect("live insert");
         engine.flush();
     }
     std::fs::remove_file(committed_source_path(&dir)).expect("remove source store");
 
     let mut reopened = Engine::open(make_norm(), cfg()).expect("reopen");
-    assert!(match_ids(&reopened, "1995 fleer").contains(&7));
+    assert!(match_ids(&reopened, "1995 vertex").contains(&7));
     let epoch = reopened.vocab_epoch();
     let error = reopened
         .set_vocab(reverse_rusty::vocab::Vocab::default())
@@ -133,7 +133,7 @@ fn missing_source_store_blocks_vocab_change_without_dropping_live_rows() {
     assert_eq!(reopened.vocab_epoch(), epoch);
     assert!(!reopened.has_stale_segments());
     assert!(
-        match_ids(&reopened, "1995 fleer").contains(&7),
+        match_ids(&reopened, "1995 vertex").contains(&7),
         "a rejected vocabulary change must leave acknowledged matching state intact"
     );
 

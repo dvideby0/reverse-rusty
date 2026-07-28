@@ -8,10 +8,10 @@ fn batch_equals_scalar_under_tag_filter_including_materialized_pure_anchors() {
     let eng = build_single_tagged(&data);
 
     let filters: [Vec<(String, Vec<String>)>; 3] = [
-        vec![("category".to_string(), vec!["cards".to_string()])],
+        vec![("category".to_string(), vec!["items".to_string()])],
         vec![(
             "category".to_string(),
-            vec!["cards".to_string(), "coins".to_string()],
+            vec!["items".to_string(), "coins".to_string()],
         )],
         // a value never ingested ⇒ ∅ on both paths
         vec![("category".to_string(), vec!["nonexistent".to_string()])],

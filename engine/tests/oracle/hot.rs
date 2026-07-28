@@ -26,7 +26,7 @@ use reverse_rusty::segment::{BatchMatchOptions, BroadStrategy, Engine, MatchScra
 use std::collections::HashSet;
 
 /// A θ that lands between the generated corpus's long-tail anchors and its
-/// Zipf-head players at this scale, so the corpus classifies as a genuine A/H
+/// Zipf-head entities at this scale, so the corpus classifies as a genuine A/H
 /// mix (asserted, not assumed — see the non-degeneracy checks).
 const THETA: u32 = 64;
 
@@ -38,8 +38,8 @@ fn gen_corpus(seed: u64) -> Dataset {
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: 2_000,
-        num_sets: 1_000,
+        num_entities: 2_000,
+        num_collections: 1_000,
     })
 }
 

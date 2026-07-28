@@ -20,13 +20,13 @@ use std::path::Path;
 
 use crate::harness::{make_norm, match_ids, test_dir};
 
-/// Queries where query `i` matches exactly the title "rookie card player{i} unique{i}".
+/// Queries where query `i` matches exactly the title "new item entity{i} unique{i}".
 fn distinct_queries(range: std::ops::RangeInclusive<u64>) -> Vec<(u64, String)> {
-    range.map(|i| (i, format!("player{i} unique{i}"))).collect()
+    range.map(|i| (i, format!("entity{i} unique{i}"))).collect()
 }
 
 fn title_for(i: u64) -> String {
-    format!("rookie card player{i} unique{i}")
+    format!("new item entity{i} unique{i}")
 }
 
 fn no_compaction_cfg(dir: &Path) -> EngineConfig {
@@ -59,7 +59,7 @@ fn base_tombstone_survives_flush_and_reopen() {
         assert!(match_ids(&eng, &title_for(1)).contains(&1));
         assert!(eng.delete_by_logical_id(1).expect("delete") >= 1);
         // A live insert so the flush has something to seal.
-        eng.insert_live("kobe bryant", 100, 1);
+        eng.insert_live("noise cancelling headphones", 100, 1);
         eng.flush();
         assert!(!match_ids(&eng, &title_for(1)).contains(&1));
     }
@@ -89,7 +89,7 @@ fn base_tombstone_survives_flush_and_reopen_default_config() {
         let mut eng = Engine::with_config(make_norm(), cfg());
         eng.build_from_queries(&distinct_queries(1..=20));
         assert!(eng.delete_by_logical_id(1).expect("delete") >= 1);
-        eng.insert_live("kobe bryant", 100, 1);
+        eng.insert_live("noise cancelling headphones", 100, 1);
         eng.flush();
     }
     let eng = Engine::open(make_norm(), cfg()).expect("reopen");
@@ -228,7 +228,7 @@ fn failed_flush_rejects_the_uncommitted_generation_but_keeps_old_addresses_safe(
             .segment_address(0, 0, 1)
             .expect("resolve committed q1 address");
 
-        eng.try_insert_live("player2 unique2", 2, 1)
+        eng.try_insert_live("entity2 unique2", 2, 1)
             .expect("WAL-backed q2 insert");
         // Force the flush to install a coherent Memory fallback that is served
         // live but absent from the still-current manifest.
@@ -463,7 +463,7 @@ fn delete_then_commit_then_reinsert_replays_in_order() {
         // Manifest commit between the delete and the re-insert (bulk ingest commits).
         eng.bulk_ingest(&distinct_queries(21..=25));
         // Re-insert logical 4 with NEW semantics.
-        eng.insert_live("player4b unique4b", 4, 2);
+        eng.insert_live("entity4b unique4b", 4, 2);
         // crash
     }
     let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
@@ -472,7 +472,7 @@ fn delete_then_commit_then_reinsert_replays_in_order() {
         "old q4 semantics must stay deleted"
     );
     assert!(
-        match_ids(&eng, "rookie card player4b unique4b").contains(&4),
+        match_ids(&eng, "new item entity4b unique4b").contains(&4),
         "re-inserted q4 must survive via the WAL tail"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -491,13 +491,13 @@ fn delete_then_bulk_reinsert_same_id_survives_crash() {
         assert!(eng.delete_by_logical_id(2).expect("delete") >= 1);
         // Re-add logical 2 with NEW semantics via the WAL-less bulk path (its
         // segment + manifest commit is the durable record, ADR-017).
-        eng.bulk_ingest(&[(2, "player2b unique2b".to_string())]);
-        assert!(match_ids(&eng, "rookie card player2b unique2b").contains(&2));
+        eng.bulk_ingest(&[(2, "entity2b unique2b".to_string())]);
+        assert!(match_ids(&eng, "new item entity2b unique2b").contains(&2));
         // crash with the delete frame still in the WAL
     }
     let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
     assert!(
-        match_ids(&eng, "rookie card player2b unique2b").contains(&2),
+        match_ids(&eng, "new item entity2b unique2b").contains(&2),
         "the bulk-ingested replacement must NOT be erased by the older delete frame"
     );
     assert!(

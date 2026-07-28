@@ -27,8 +27,8 @@ fn no_compaction_cfg(dir: &Path) -> EngineConfig {
     }
 }
 
-const OLD_TITLE: &str = "1986 fleer michael jordan rookie";
-const NEW_TITLE: &str = "2003 topps lebron james rookie";
+const OLD_TITLE: &str = "1986 vertex wireless mouse new";
+const NEW_TITLE: &str = "2003 acme mechanical keyboard new";
 
 /// The ADR-064 acceptance pin: re-PUT a NARROWER query — the old semantics must stop
 /// matching immediately (no "matches under either version" window), and a subsequent
@@ -39,7 +39,7 @@ fn reput_replaces_atomically_and_delete_count_is_one() {
     let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
 
     let first = eng
-        .try_upsert_live("michael jordan", 1, 1)
+        .try_upsert_live("wireless mouse", 1, 1)
         .expect("first put");
     assert!(
         matches!(first, UpsertOutcome::Created(_)),
@@ -47,7 +47,9 @@ fn reput_replaces_atomically_and_delete_count_is_one() {
     );
     assert!(match_ids(&eng, OLD_TITLE).contains(&1));
 
-    let second = eng.try_upsert_live("lebron james", 1, 2).expect("re-put");
+    let second = eng
+        .try_upsert_live("mechanical keyboard", 1, 2)
+        .expect("re-put");
     assert!(
         matches!(second, UpsertOutcome::Updated { replaced: 1, .. }),
         "re-put ⇒ Updated with exactly 1 prior copy, got {second:?}"
@@ -77,16 +79,18 @@ fn upsert_tombstones_all_prior_copies() {
     let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
     // Two additive copies (the pre-ADR-067 re-PUT behavior), one in a base
     // segment, one in the memtable.
-    eng.build_from_queries(&[(1, "michael jordan".to_string())]);
-    eng.insert_live("michael jordan fleer", 1, 2);
+    eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
+    eng.insert_live("wireless mouse vertex", 1, 2);
 
-    let out = eng.try_upsert_live("lebron james", 1, 3).expect("upsert");
+    let out = eng
+        .try_upsert_live("mechanical keyboard", 1, 3)
+        .expect("upsert");
     assert!(
         matches!(out, UpsertOutcome::Updated { replaced: 2, .. }),
         "both prior copies tombstoned, got {out:?}"
     );
     assert!(!match_ids(&eng, OLD_TITLE).contains(&1));
-    assert!(!match_ids(&eng, "1986 fleer michael jordan").contains(&1));
+    assert!(!match_ids(&eng, "1986 vertex wireless mouse").contains(&1));
     assert!(match_ids(&eng, NEW_TITLE).contains(&1));
     assert_eq!(eng.delete_by_logical_id(1).expect("delete"), 1);
     let _ = std::fs::remove_dir_all(&dir);
@@ -100,8 +104,9 @@ fn upsert_survives_wal_tail_crash() {
     let dir = test_dir("upsert_wal_tail");
     {
         let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
-        eng.build_from_queries(&[(1, "michael jordan".to_string())]);
-        eng.try_upsert_live("lebron james", 1, 2).expect("upsert");
+        eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
+        eng.try_upsert_live("mechanical keyboard", 1, 2)
+            .expect("upsert");
         // crash: the upsert exists only as the WAL frame
     }
     let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
@@ -124,8 +129,9 @@ fn upsert_survives_flush_and_reopen() {
     let dir = test_dir("upsert_flush_reopen");
     {
         let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
-        eng.build_from_queries(&[(1, "michael jordan".to_string())]);
-        eng.try_upsert_live("lebron james", 1, 2).expect("upsert");
+        eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
+        eng.try_upsert_live("mechanical keyboard", 1, 2)
+            .expect("upsert");
         eng.flush(); // manifest bitmaps + WAL reset
     }
     let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
@@ -146,15 +152,16 @@ fn upsert_then_bulk_same_id_survives_crash() {
     let dir = test_dir("upsert_bulk_same_id");
     {
         let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
-        eng.build_from_queries(&[(1, "michael jordan".to_string())]);
-        eng.try_upsert_live("lebron james", 1, 2).expect("upsert");
+        eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
+        eng.try_upsert_live("mechanical keyboard", 1, 2)
+            .expect("upsert");
         // Bulk re-add of the same id, with a manifest commit covering the frame.
-        eng.bulk_ingest(&[(1, "kobe bryant".to_string())]);
+        eng.bulk_ingest(&[(1, "noise cancelling headphones".to_string())]);
         // crash
     }
     let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
     assert!(
-        match_ids(&eng, "2008 topps kobe bryant").contains(&1),
+        match_ids(&eng, "2008 acme noise cancelling headphones").contains(&1),
         "the bulk-ingested copy must NOT be erased by the older upsert frame"
     );
     assert!(
@@ -176,10 +183,11 @@ fn upsert_retombstones_memtable_prior_despite_watermark() {
     let dir = test_dir("upsert_memtable_prior");
     {
         let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
-        eng.insert_live("michael jordan", 1, 1); // memtable copy, WAL frame
-        eng.try_upsert_live("lebron james", 1, 2).expect("upsert");
+        eng.insert_live("wireless mouse", 1, 1); // memtable copy, WAL frame
+        eng.try_upsert_live("mechanical keyboard", 1, 2)
+            .expect("upsert");
         // A manifest commit (unrelated bulk) covers both frames with its watermark.
-        eng.bulk_ingest(&[(50, "wander franco".to_string())]);
+        eng.bulk_ingest(&[(50, "product omega".to_string())]);
         // crash
     }
     let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
@@ -199,9 +207,9 @@ fn upsert_classd_rejection_leaves_old_live() {
     let dir = test_dir("upsert_classd");
     {
         let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
-        eng.build_from_queries(&[(1, "michael jordan".to_string())]);
+        eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
         let out = eng
-            .try_upsert_live("-graded", 1, 2)
+            .try_upsert_live("-damaged", 1, 2)
             .expect("a negation-only query parses; it is rejected at classification");
         assert!(matches!(out, UpsertOutcome::RejectedClassD), "got {out:?}");
         assert!(
@@ -226,13 +234,14 @@ fn upsert_after_reopen_with_reset_wal_survives_second_crash() {
     let dir = test_dir("upsert_seq_across_reopen");
     {
         let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
-        eng.build_from_queries(&[(1, "michael jordan".to_string())]);
+        eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
         eng.insert_live("filler", 50, 1);
         eng.flush(); // non-zero watermark; WAL reset
     }
     {
         let mut eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen 1");
-        eng.try_upsert_live("lebron james", 1, 2).expect("upsert");
+        eng.try_upsert_live("mechanical keyboard", 1, 2)
+            .expect("upsert");
         // crash
     }
     let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen 2");
@@ -252,12 +261,12 @@ fn rejected_upsert_counter_does_not_double_count_across_restart() {
     let dir = test_dir("upsert_classd_counter");
     {
         let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
-        eng.build_from_queries(&[(1, "michael jordan".to_string())]);
-        let out = eng.try_upsert_live("-graded", 1, 2).expect("upsert");
+        eng.build_from_queries(&[(1, "wireless mouse".to_string())]);
+        let out = eng.try_upsert_live("-damaged", 1, 2).expect("upsert");
         assert!(matches!(out, UpsertOutcome::RejectedClassD));
         assert_eq!(eng.rejected_class_d(), 1, "counted once, live");
         // A manifest commit persists the counter while the frame stays in the WAL.
-        eng.bulk_ingest(&[(2, "kobe bryant".to_string())]);
+        eng.bulk_ingest(&[(2, "noise cancelling headphones".to_string())]);
         assert_eq!(eng.rejected_class_d(), 1);
         // crash
     }
@@ -278,14 +287,14 @@ fn upsert_tags_survive_recovery() {
     {
         let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
         eng.try_upsert_live_with_tags(
-            "michael jordan",
+            "wireless mouse",
             1,
             1,
-            &[("category".to_string(), "cards".to_string())],
+            &[("category".to_string(), "items".to_string())],
         )
         .expect("put");
         eng.try_upsert_live_with_tags(
-            "lebron james",
+            "mechanical keyboard",
             1,
             2,
             &[("category".to_string(), "modern".to_string())],
@@ -304,7 +313,7 @@ fn upsert_tags_survive_recovery() {
     // The OLD tag no longer reaches anything for this id.
     let mut out_old = Vec::new();
     let pred_old =
-        snap.compile_tag_predicate(&[("category".to_string(), vec!["cards".to_string()])]);
+        snap.compile_tag_predicate(&[("category".to_string(), vec!["items".to_string()])]);
     snap.match_title_filtered(NEW_TITLE, &mut s, &mut out_old, true, &pred_old);
     assert!(
         !out_old.contains(&1),

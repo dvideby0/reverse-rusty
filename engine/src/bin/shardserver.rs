@@ -204,8 +204,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x5EED_5417,
-        num_players: 600,
-        num_sets: 300,
+        num_entities: 600,
+        num_collections: 300,
     };
     let queries = generate(&cfg).queries;
 

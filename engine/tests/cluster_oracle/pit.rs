@@ -14,7 +14,7 @@ use reverse_rusty::{PitConfig, PitError, QueryScope, RankProgramSpec, TopKOption
 fn rank_program() -> RankProgramSpec {
     RankProgramSpec {
         priority_field: Some("priority".to_string()),
-        boosts: vec![("category".to_string(), "cards".to_string(), 1_000)],
+        boosts: vec![("category".to_string(), "items".to_string(), 1_000)],
     }
 }
 
@@ -203,7 +203,7 @@ fn pit_pages_concatenate_pin_across_mutation_and_match_single_node() {
                     );
                 }
                 cluster
-                    .add_query(fresh_id, "jordan chrome refractor")
+                    .add_query(fresh_id, "product gamma chrome premium")
                     .expect("fresh add");
                 fresh_id += 1;
             }
@@ -268,7 +268,7 @@ fn boundary_and_lifecycle_failures_are_typed() {
     // generations, and a remote wire could not even carry it).
     let err = cluster
         .try_percolate_filtered_top_k(
-            "michael jordan",
+            "wireless mouse",
             &[],
             options(5, QueryScope::Standard, Some((0, 0))),
             &program,
@@ -284,7 +284,7 @@ fn boundary_and_lifecycle_failures_are_typed() {
     let err = cluster
         .try_percolate_filtered_top_k_pit(
             reverse_rusty::PitId(999),
-            "michael jordan",
+            "wireless mouse",
             &[],
             options(5, QueryScope::Standard, None),
             &program,
@@ -304,7 +304,7 @@ fn boundary_and_lifecycle_failures_are_typed() {
     let err = cluster
         .try_percolate_filtered_top_k_pit(
             pit,
-            "michael jordan",
+            "wireless mouse",
             &[],
             options(5, QueryScope::Standard, None),
             &program,
@@ -377,7 +377,7 @@ fn batch_boundary_rejects_at_entry_and_close_reaps_expired() {
     ));
     let err = cluster
         .try_percolate_filtered_top_k_batch(
-            &["michael jordan"],
+            &["wireless mouse"],
             &[],
             options(5, QueryScope::Standard, Some((0, 0))),
             &program,
@@ -425,16 +425,16 @@ fn pit_open_is_atomic_against_concurrent_replacing_upserts() {
     };
     // A tiny corpus: the flipping query + two stable anchors.
     let queries: Vec<(u64, String)> = vec![
-        (999, "michael jordan".to_string()),
-        (1, "topps chrome".to_string()),
-        (2, "lebron james".to_string()),
+        (999, "wireless mouse".to_string()),
+        (1, "acme chrome".to_string()),
+        (2, "mechanical keyboard".to_string()),
     ];
     let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
     let program = cluster
         .compile_rank_program(&RankProgramSpec::default())
         .expect("program");
     // Matches BOTH versions of query 999 plus the stable anchors.
-    let title = "michael jordan lebron james topps chrome rookie";
+    let title = "wireless mouse mechanical keyboard acme chrome new";
 
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
@@ -442,9 +442,9 @@ fn pit_open_is_atomic_against_concurrent_replacing_upserts() {
             let mut flip = false;
             while !stop.load(Ordering::Relaxed) {
                 let dsl = if flip {
-                    "lebron james"
+                    "mechanical keyboard"
                 } else {
-                    "michael jordan"
+                    "wireless mouse"
                 };
                 flip = !flip;
                 // Re-anchoring upsert: the tombstone/insert two-pass moves the
@@ -515,7 +515,7 @@ fn resize_set_vocab_and_reopen_stale_open_pits() {
     let err = cluster
         .try_percolate_filtered_top_k_pit(
             pit,
-            "michael jordan",
+            "wireless mouse",
             &[],
             options(5, QueryScope::Standard, None),
             &program,
@@ -537,7 +537,7 @@ fn resize_set_vocab_and_reopen_stale_open_pits() {
     cluster
         .try_percolate_filtered_top_k_pit(
             fresh,
-            "michael jordan",
+            "wireless mouse",
             &[],
             options(5, QueryScope::Standard, None),
             &program,
@@ -561,7 +561,7 @@ fn resize_set_vocab_and_reopen_stale_open_pits() {
     let err = cluster
         .try_percolate_filtered_top_k_pit(
             pit,
-            "michael jordan",
+            "wireless mouse",
             &[],
             options(5, QueryScope::Standard, None),
             &program,
@@ -594,7 +594,7 @@ fn resize_set_vocab_and_reopen_stale_open_pits() {
     let err = cluster
         .try_percolate_filtered_top_k_pit(
             pit,
-            "michael jordan",
+            "wireless mouse",
             &[],
             options(5, QueryScope::Standard, None),
             &program,

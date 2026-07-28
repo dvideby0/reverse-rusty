@@ -7,7 +7,7 @@ use super::*;
 fn fence_rejects_writes_but_serves_reads() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["1994 upper deck", "psa 10"], &n);
+    let d = frozen_dict(&["1994 north star", "pro"], &n);
     let fp = d.fingerprint();
     // ADR-077: `ShardServer::new` starts with the FINALIZED empty tag space; fences
     // must present its fingerprint exactly like the dict's.
@@ -17,10 +17,10 @@ fn fence_rejects_writes_but_serves_reads() {
         td.fingerprint()
     };
     let srv = ShardServer::new(Arc::clone(&n), Arc::new(d), EngineConfig::default());
-    srv.ingest_dsl(&[(1u64, "1994 upper deck".to_string())]);
+    srv.ingest_dsl(&[(1u64, "1994 north star".to_string())]);
 
     // Before the fence: a write succeeds.
-    rt.block_on(srv.insert_extracted(insert_req_single(2, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req_single(2, "pro")))
         .expect("insert before fence");
 
     // Fence at generation 5.
@@ -40,7 +40,7 @@ fn fence_rejects_writes_but_serves_reads() {
 
     // After the fence: every data-mutating write is rejected.
     assert_eq!(
-        rt.block_on(srv.insert_extracted(insert_req_single(3, "psa 10")))
+        rt.block_on(srv.insert_extracted(insert_req_single(3, "pro")))
             .expect_err("insert after fence")
             .code(),
         Code::FailedPrecondition
@@ -75,7 +75,7 @@ fn fence_rejects_writes_but_serves_reads() {
     assert!(cnt >= 1, "reads stay served while fenced: {cnt}");
     rt.block_on(
         srv.percolate(Request::new(proto::PercolateRequest {
-            title: "1994 upper deck".to_string(),
+            title: "1994 north star".to_string(),
             include_broad: false,
             filter: Vec::new(),
             rank: None,
@@ -108,7 +108,7 @@ fn fence_rejects_writes_but_serves_reads() {
         .fenced_at_generation;
     assert_eq!(after_stale, 5, "a lower-gen fence must not lower the fence");
     assert_eq!(
-        rt.block_on(srv.insert_extracted(insert_req_single(4, "psa 10")))
+        rt.block_on(srv.insert_extracted(insert_req_single(4, "pro")))
             .expect_err("still fenced after a stale fence")
             .code(),
         Code::FailedPrecondition
@@ -138,7 +138,7 @@ fn fence_rejects_writes_but_serves_reads() {
 fn per_shard_fence_isolation() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d = frozen_dict(&["1994 upper deck", "psa 10"], &n);
+    let d = frozen_dict(&["1994 north star", "pro"], &n);
     let fp = d.fingerprint();
     let tag_fp = empty_tag_fp();
 
@@ -151,9 +151,9 @@ fn per_shard_fence_isolation() {
         .expect("adopt slot 1");
 
     // Seed each slot with one query via the insert handler.
-    rt.block_on(srv.insert_extracted(insert_req(0, 10, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req(0, 10, "pro")))
         .expect("write slot 0");
-    rt.block_on(srv.insert_extracted(insert_req(1, 11, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req(1, 11, "pro")))
         .expect("write slot 1");
 
     // Fence ONLY shard 0.
@@ -173,13 +173,13 @@ fn per_shard_fence_isolation() {
 
     // Slot 0 writes are now rejected...
     assert_eq!(
-        rt.block_on(srv.insert_extracted(insert_req(0, 12, "psa 10")))
+        rt.block_on(srv.insert_extracted(insert_req(0, 12, "pro")))
             .expect_err("slot 0 is fenced")
             .code(),
         Code::FailedPrecondition
     );
     // ...but slot 1 stays writable — THE per-shard-fence isolation (codex P1 fixed).
-    rt.block_on(srv.insert_extracted(insert_req(1, 13, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req(1, 13, "pro")))
         .expect("slot 1 must stay writable while slot 0 is fenced");
 
     // Un-fence slot 0 → both writable again.
@@ -196,6 +196,6 @@ fn per_shard_fence_isolation() {
         .into_inner()
         .fenced_at_generation;
     assert_eq!(now, 0, "slot 0 is un-fenced");
-    rt.block_on(srv.insert_extracted(insert_req(0, 14, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req(0, 14, "pro")))
         .expect("slot 0 writable after unfence");
 }

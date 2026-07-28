@@ -18,8 +18,8 @@ fn declared_alias_makes_both_surface_forms_match() {
     let (mut queries, titles) = build_corpus();
     let q_abbr = 8_000_001u64;
     let q_canon = 8_000_002u64;
-    queries.push((q_abbr, "1994 fleer zzabbr".into()));
-    queries.push((q_canon, "1994 fleer zzcanon".into()));
+    queries.push((q_abbr, "1994 vertex zzabbr".into()));
+    queries.push((q_canon, "1994 vertex zzcanon".into()));
 
     // The declared alias as a Vocab — built manually (keeping this gate orthogonal
     // to the learning heuristic). Rebuilt per use: set_vocab and the oracle each
@@ -34,8 +34,8 @@ fn declared_alias_makes_both_surface_forms_match() {
         v
     };
 
-    let title_abbr = "1994 fleer zzabbr psa 10";
-    let title_canon = "1994 fleer zzcanon psa 10";
+    let title_abbr = "1994 vertex zzabbr pro";
+    let title_canon = "1994 vertex zzcanon pro";
 
     for &k in &[1usize, 3, 8, 16] {
         let cfg = ClusterConfig {
@@ -108,15 +108,15 @@ fn declared_alias_makes_both_surface_forms_match() {
 #[test]
 fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
     // ADR-046 mechanism (2) auto-learning (ADR-015): the cluster learns a synonym from its
-    // OWN corpus's any-of groups — `(rookie,rc)` seen ≥ min_count ⇒ `rc → rookie` — and
+    // OWN corpus's any-of groups — `(new,pkg)` seen ≥ min_count ⇒ `pkg → new` — and
     // applies it. A query phrased with the abbreviation then matches a title written with
     // the canonical form (zero FN). The learned rule merges under the current vocabulary.
     let (mut queries, _titles) = build_corpus();
     let q_rc = 8_300_001u64;
-    queries.push((q_rc, "1994 fleer rc".into())); // a query phrased with the abbreviation
-                                                  // Plant ≥ min_count any-of groups so the learner discovers rc → rookie.
+    queries.push((q_rc, "1994 vertex pkg".into())); // a query phrased with the abbreviation
+                                                    // Plant ≥ min_count any-of groups so the learner discovers pkg → new.
     for i in 0..4u64 {
-        queries.push((8_300_100 + i, "(rookie,rc)".into()));
+        queries.push((8_300_100 + i, "(new,pkg)".into()));
     }
 
     let cfg = ClusterConfig {
@@ -126,25 +126,25 @@ fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
     };
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
 
-    let title_rookie = "1994 fleer rookie psa 10";
-    // Before learning, "rc" and "rookie" are distinct features (the default vocab is empty).
+    let title_new = "1994 vertex new pro";
+    // Before learning, "pkg" and "new" are distinct features (the default vocab is empty).
     assert!(
-        !cluster.percolate(title_rookie).unwrap().contains(&q_rc),
-        "before learning, a rookie title must not match the rc-phrased query"
+        !cluster.percolate(title_new).unwrap().contains(&q_rc),
+        "before learning, a new title must not match the pkg-phrased query"
     );
 
     // Learn from the corpus's any-of groups (min_count = 2) and apply.
     let rebuilt = cluster.learn_and_apply(2).expect("learn_and_apply");
     assert!(rebuilt > 100, "learn_and_apply rebuilds the whole corpus");
 
-    // After learning rc → rookie, both surface forms match the rc-phrased query (zero FN).
+    // After learning pkg → new, both surface forms match the pkg-phrased query (zero FN).
     assert!(
-        cluster.percolate(title_rookie).unwrap().contains(&q_rc),
-        "after learning rc→rookie, a rookie title matches the rc-phrased query"
+        cluster.percolate(title_new).unwrap().contains(&q_rc),
+        "after learning pkg→new, a new title matches the pkg-phrased query"
     );
     assert!(
         cluster
-            .percolate("1994 fleer rc psa 10")
+            .percolate("1994 vertex pkg pro")
             .unwrap()
             .contains(&q_rc),
         "the abbreviation form still matches after learning"
@@ -153,8 +153,8 @@ fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
     assert!(
         cluster
             .vocab()
-            .is_some_and(|v| v.synonyms().iter().any(|s| s.token == "rc")),
-        "the learned rc→rookie synonym is recorded in the cluster vocab"
+            .is_some_and(|v| v.synonyms().iter().any(|s| s.token == "pkg")),
+        "the learned pkg→new synonym is recorded in the cluster vocab"
     );
 }
 
@@ -168,11 +168,11 @@ fn learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives() {
     // shard), so this exercises re-placement under an induced feature.
     let (mut queries, titles) = build_corpus();
     let q_plant = 8_400_001u64;
-    queries.push((q_plant, "1994 fleer zenith zonk".into())); // requires the adjacent pair
+    queries.push((q_plant, "1994 vertex zenith zonk".into())); // requires the adjacent pair
     for id in 8_400_100u64..8_400_140 {
         queries.push((id, "zenith zonk".into())); // plant a strong collocation
     }
-    let plant_title = "1994 fleer zenith zonk psa 10";
+    let plant_title = "1994 vertex zenith zonk pro";
 
     let learn_cfg = reverse_rusty::vocab::CorpusLearnConfig {
         corpus_phrases: true,
@@ -268,8 +268,8 @@ fn set_vocab_activates_multiword_alias_with_pt_aware_routing() {
     let q_alias = 9_600_001u64;
     queries.push((q_alias, "ny".into()));
 
-    let title_direct = "ny psa 10";
-    let title_full = "new york psa 10";
+    let title_direct = "ny pro";
+    let title_full = "new york pro";
 
     for &k in &[1usize, 3, 8] {
         let cfg = ClusterConfig {
@@ -338,7 +338,7 @@ fn build_with_vocab_activates_multiword_alias() {
         cluster.vocab().is_some(),
         "the vocab is installed on the engine (GET /_vocab serves it)"
     );
-    for title in ["ny psa 10", "new york psa 10"] {
+    for title in ["ny pro", "new york pro"] {
         assert!(
             cluster.percolate(title).unwrap().contains(&1),
             "{title:?} must match the alias-anchored query on a built-with-vocab cluster"
@@ -383,7 +383,7 @@ fn overlapping_aliases_match_nested_entity_titles_across_the_cluster() {
     queries.push((q_inner, "ny".into())); // the INNER alias's query form
                                           // The nested-entity title: leftmost-longest takes `new york city` (the outer
                                           // alias); the inner `new york` entity lives only in P(T).
-    let title_nested = "new york city psa 10";
+    let title_nested = "new york city pro";
 
     for &k in &[1usize, 3, 8] {
         let cfg = ClusterConfig {
@@ -500,7 +500,7 @@ fn bare_normalizer_build_matches_single_node_semantics() {
     let snap = reference.snapshot();
     let mut s = reverse_rusty::segment::MatchScratch::new();
     let mut out = Vec::new();
-    for title in ["ny psa 10", "new york psa 10"] {
+    for title in ["ny pro", "new york pro"] {
         let got: std::collections::HashSet<u64> =
             cluster.percolate(title).unwrap().into_iter().collect();
         snap.match_title(title, &mut s, &mut out, true);
@@ -518,8 +518,8 @@ fn declared_equivalence_expands_across_shards_with_zero_false_negatives() {
     let (mut queries, titles) = build_corpus();
     let q_abbr = 8_500_001u64;
     let q_canon = 8_500_002u64;
-    queries.push((q_abbr, "1994 fleer zzabbr".into()));
-    queries.push((q_canon, "1994 fleer zzcanon".into()));
+    queries.push((q_abbr, "1994 vertex zzabbr".into()));
+    queries.push((q_canon, "1994 vertex zzcanon".into()));
     // Intern both tokens widely so they resolve to real (non-synthetic) feature ids.
     for i in 0..30u64 {
         queries.push((8_500_100 + i, format!("zzabbr u{i}")));
@@ -531,8 +531,8 @@ fn declared_equivalence_expands_across_shards_with_zero_false_negatives() {
         v.add_equivalence(&["zzabbr", "zzcanon"]);
         v
     };
-    let title_abbr = "1994 fleer zzabbr psa 10";
-    let title_canon = "1994 fleer zzcanon psa 10";
+    let title_abbr = "1994 vertex zzabbr pro";
+    let title_canon = "1994 vertex zzcanon pro";
 
     for &k in &[1usize, 3, 8] {
         let cfg = ClusterConfig {

@@ -34,7 +34,7 @@ async fn put_search_delete_round_trip() {
         req(
             "PUT",
             "/_doc/10",
-            &serde_json::json!({"query": "1996 skybox"}),
+            &serde_json::json!({"query": "1996 vertex"}),
         ),
     )
     .await;
@@ -51,7 +51,7 @@ async fn put_search_delete_round_trip() {
         req(
             "POST",
             "/_search",
-            &serde_json::json!({"document": {"title": "1996 skybox premium"}, "include_broad": true}),
+            &serde_json::json!({"document": {"title": "1996 vertex premium"}, "include_broad": true}),
         ),
     )
     .await;
@@ -83,7 +83,7 @@ async fn put_search_delete_round_trip() {
         req(
             "POST",
             "/_search",
-            &serde_json::json!({"document": {"title": "1996 skybox premium"}}),
+            &serde_json::json!({"document": {"title": "1996 vertex premium"}}),
         ),
     )
     .await;
@@ -154,7 +154,7 @@ async fn delete_doc_matches_single_node_contract_and_rejects_controls_before_mut
         req(
             "PUT",
             "/_doc/90",
-            &serde_json::json!({"query":"wayne gretzky"}),
+            &serde_json::json!({"query":"espresso machine"}),
         ),
     )
     .await;
@@ -184,7 +184,7 @@ async fn put_doc_create_only_and_query_parameter_contract_match_single_node() {
         req(
             "PUT",
             "/_doc/70?op_type=create&refresh=wait_for",
-            &serde_json::json!({"query":"michael jordan","version":7}),
+            &serde_json::json!({"query":"wireless mouse","version":7}),
         ),
     );
     let second = send(
@@ -192,7 +192,7 @@ async fn put_doc_create_only_and_query_parameter_contract_match_single_node() {
         req(
             "PUT",
             "/_doc/70?op_type=create&refresh=true",
-            &serde_json::json!({"query":"lebron james","version":8}),
+            &serde_json::json!({"query":"mechanical keyboard","version":8}),
         ),
     );
     let (a, b) = tokio::join!(first, second);
@@ -217,8 +217,8 @@ async fn put_doc_create_only_and_query_parameter_contract_match_single_node() {
     let (status, current) = send(&state, req_empty("GET", "/_doc/70")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        current["_source"]["query"] == "michael jordan"
-            || current["_source"]["query"] == "lebron james",
+        current["_source"]["query"] == "wireless mouse"
+            || current["_source"]["query"] == "mechanical keyboard",
         "one complete create body wins"
     );
     assert_eq!(current["_version"], created["_version"]);
@@ -243,7 +243,7 @@ async fn put_doc_create_only_and_query_parameter_contract_match_single_node() {
         req(
             "PUT",
             "/_doc/71?routing=custom",
-            &serde_json::json!({"query":"wayne gretzky"}),
+            &serde_json::json!({"query":"espresso machine"}),
         ),
     )
     .await;
@@ -269,7 +269,7 @@ async fn get_doc_reads_back_post_freeze_tags_filters_and_head_status() {
             "PUT",
             "/_doc/71",
             &serde_json::json!({
-                "query": "topps chrome",
+                "query": "acme chrome",
                 "version": 9,
                 "tags": {"tenant": "acme", "colors": ["red", "blue"]}
             }),
@@ -282,7 +282,7 @@ async fn get_doc_reads_back_post_freeze_tags_filters_and_head_status() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["_index"], "queries");
     assert_eq!(body["_version"], 9);
-    assert_eq!(body["_source"]["query"], "topps chrome");
+    assert_eq!(body["_source"]["query"], "acme chrome");
     assert_eq!(body["_source"]["tags"]["tenant"], "acme");
     assert_eq!(
         body["_source"]["tags"]["colors"],

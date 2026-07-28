@@ -11,7 +11,7 @@ fn cluster_flush_surfaces_a_local_shard_persistence_failure() {
     let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &[])
         .expect("durable cluster");
     cluster
-        .add_query(7, "1994 topps")
+        .add_query(7, "1994 acme")
         .expect("WAL-backed live add");
 
     let mut original = Vec::new();
@@ -33,7 +33,7 @@ fn cluster_flush_surfaces_a_local_shard_persistence_failure() {
     let error = result.expect_err("the durable shard failure must cross the cluster seam");
     assert!(matches!(error, ShardError::Log(_)), "{error}");
     assert!(
-        cluster.percolate("1994 topps").expect("read").contains(&7),
+        cluster.percolate("1994 acme").expect("read").contains(&7),
         "the failed durable flush must keep the in-memory fallback readable"
     );
 

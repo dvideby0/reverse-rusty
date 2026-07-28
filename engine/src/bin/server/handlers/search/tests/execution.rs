@@ -81,7 +81,7 @@ async fn numeric_tag_ingest_meets_numeric_filter() {
         false,
     );
     let body: crate::handlers::doc::PutDocBody = serde_json::from_value(serde_json::json!({
-        "query": "michael jordan",
+        "query": "wireless mouse",
         "tags": {"category": 7, "active": true},
     }))
     .expect("body deserializes");
@@ -97,7 +97,7 @@ async fn numeric_tag_ingest_meets_numeric_filter() {
     .into_response();
     assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
 
-    let title = serde_json::json!({"title": "1986 fleer michael jordan rookie"});
+    let title = serde_json::json!({"title": "1986 vertex wireless mouse new"});
     // Native filter, number and string forms, plus the coerced bool.
     for filter in [
         serde_json::json!({"category": 7}),
@@ -285,9 +285,7 @@ async fn search_enrichment_never_splices_a_newer_source_onto_an_older_match() {
     use std::task::{Context, Poll, Waker};
 
     let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
-    engine
-        .try_insert_live("topps chrome", 7, 1)
-        .expect("insert");
+    engine.try_insert_live("acme chrome", 7, 1).expect("insert");
     let mut state = state_with(engine, false);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
     let held = Arc::clone(&semaphore)
@@ -299,7 +297,7 @@ async fn search_enrichment_never_splices_a_newer_source_onto_an_older_match() {
         .search_permits = Some(semaphore);
 
     let request: SearchBody = serde_json::from_value(serde_json::json!({
-        "document": {"title": "2020 topps chrome"}
+        "document": {"title": "2020 acme chrome"}
     }))
     .expect("body");
     let task_state = Arc::clone(&state);
@@ -316,7 +314,7 @@ async fn search_enrichment_never_splices_a_newer_source_onto_an_older_match() {
     {
         let mut engine = state.engine.lock();
         engine
-            .try_upsert_live("michael jordan", 7, 2)
+            .try_upsert_live("wireless mouse", 7, 2)
             .expect("replace query");
         state.snapshot.store(Arc::new(engine.snapshot()));
     }
@@ -330,7 +328,7 @@ async fn search_enrichment_never_splices_a_newer_source_onto_an_older_match() {
     let json = serde_json::to_value(error.1 .0).expect("serialize error");
     assert_eq!(json["error"]["type"], "source_unavailable");
     assert!(
-        !json.to_string().contains("michael jordan"),
+        !json.to_string().contains("wireless mouse"),
         "the replacement source must never be attached to the older match"
     );
 }
@@ -341,9 +339,7 @@ async fn mpercolate_enrichment_never_splices_a_newer_source_onto_an_older_match(
     use std::task::{Context, Poll, Waker};
 
     let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
-    engine
-        .try_insert_live("topps chrome", 7, 1)
-        .expect("insert");
+    engine.try_insert_live("acme chrome", 7, 1).expect("insert");
     let mut state = state_with(engine, false);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
     let held = Arc::clone(&semaphore)
@@ -355,7 +351,7 @@ async fn mpercolate_enrichment_never_splices_a_newer_source_onto_an_older_match(
         .search_permits = Some(semaphore);
 
     let request: MPercolateBody = serde_json::from_value(serde_json::json!({
-        "documents": [{"title": "2020 topps chrome"}]
+        "documents": [{"title": "2020 acme chrome"}]
     }))
     .expect("body");
     let task_state = Arc::clone(&state);
@@ -372,7 +368,7 @@ async fn mpercolate_enrichment_never_splices_a_newer_source_onto_an_older_match(
     {
         let mut engine = state.engine.lock();
         engine
-            .try_upsert_live("michael jordan", 7, 2)
+            .try_upsert_live("wireless mouse", 7, 2)
             .expect("replace query");
         state.snapshot.store(Arc::new(engine.snapshot()));
     }
@@ -386,7 +382,7 @@ async fn mpercolate_enrichment_never_splices_a_newer_source_onto_an_older_match(
     let json = serde_json::to_value(error.1 .0).expect("serialize error");
     assert_eq!(json["error"]["type"], "source_unavailable");
     assert!(
-        !json.to_string().contains("michael jordan"),
+        !json.to_string().contains("wireless mouse"),
         "the replacement source must never be attached to the older match"
     );
 }

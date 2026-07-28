@@ -319,7 +319,7 @@ mod tests {
         let mutation = ClusterMutation::Add {
             logical: 8,
             version: 2,
-            dsl: "psa 10".into(),
+            dsl: "pro".into(),
             tags: Vec::new(),
             placement,
         };

@@ -1,6 +1,6 @@
 //! Title introspection: run real titles through the normalizer and print the
-//! features it extracts. Reveals what the current (hand-vocab) normalizer
-//! catches and — more importantly — what it misses on real eBay data.
+//! features it extracts. Reveals what the current configured normalizer catches
+//! and—more importantly—what it misses on real marketplace data.
 //!
 //! Usage: norm <file-with-one-title-per-line>
 
@@ -10,7 +10,7 @@ use reverse_rusty::normalize::Normalizer;
 fn main() {
     let path = std::env::args().nth(1).expect("usage: norm <titles.txt>");
     let text = std::fs::read_to_string(&path).expect("read titles file");
-    let norm = Normalizer::default_vocab().expect("built-in vocab");
+    let norm = Normalizer::default_vocab().expect("default vocabulary");
 
     for line in text.lines() {
         let line = line.trim();

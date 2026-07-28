@@ -81,7 +81,7 @@ fn migration_interns_features_exposed_by_splitting_the_legacy_stream() {
         reopened.dict().get("term:york").is_some(),
         "every separated component must be dense before commit"
     );
-    assert!(matches(&reopened, "new vintage collectible york", 1));
+    assert!(matches(&reopened, "new vintage product york", 1));
 
     // A later standalone insert uses the same dense ID; it cannot turn the
     // migrated row's synthetic feature into an unreachable split brain.
@@ -89,7 +89,7 @@ fn migration_interns_features_exposed_by_splitting_the_legacy_stream() {
         .try_insert_live("new", 2, 1)
         .expect("post-migration insert");
     assert_eq!(reopened.dict().get("term:new"), Some(new_id));
-    assert!(matches(&reopened, "new vintage collectible york", 1));
+    assert!(matches(&reopened, "new vintage product york", 1));
 
     drop(reopened);
     std::fs::remove_dir_all(dir).expect("cleanup");

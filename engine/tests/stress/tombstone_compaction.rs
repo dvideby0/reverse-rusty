@@ -26,7 +26,7 @@ fn rapid_insert_delete_flush_cycles() {
 
     // Seed a base segment
     let seed_queries: Vec<(u64, String)> = (0..500)
-        .map(|i| (i, format!("player{i} 1994 upper deck basketball")))
+        .map(|i| (i, format!("entity{i} 1994 north star appliance")))
         .collect();
     eng.build_from_queries(&seed_queries);
 
@@ -43,7 +43,7 @@ fn rapid_insert_delete_flush_cycles() {
             let id = next_id;
             next_id += 1;
             let text = format!(
-                "round{} player{} {} fleer basketball card",
+                "round{} entity{} {} vertex appliance item",
                 round,
                 id % 200,
                 1990 + (id % 30)
@@ -82,7 +82,7 @@ fn rapid_insert_delete_flush_cycles() {
         // Read sweep — verify no deleted IDs
         let mut scratch = MatchScratch::new();
         let mut out = Vec::new();
-        let test_title = "player5 1994 upper deck fleer basketball card round3";
+        let test_title = "entity5 1994 north star vertex appliance item round3";
         eng.match_title(test_title, &mut scratch, &mut out, true);
 
         for id in &out {
@@ -136,8 +136,8 @@ fn metrics_stay_consistent_under_churn() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xDEAD_C0DE,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
 
@@ -161,7 +161,7 @@ fn metrics_stay_consistent_under_churn() {
         // Insert 200
         let mut inserted = 0usize;
         for _ in 0..200 {
-            let text = format!("round{round} player{next_id} 1994 topps");
+            let text = format!("round{round} entity{next_id} 1994 acme");
             if eng.insert_live(&text, next_id, 1).is_some() {
                 inserted += 1;
             }
@@ -252,7 +252,7 @@ fn auto_compaction_triggers_correctly() {
         let queries: Vec<(u64, String)> = (0..400)
             .map(|i| {
                 let id = (batch * 1000 + i) as u64;
-                (id, format!("batch{batch} player{i} 1994 topps card"))
+                (id, format!("batch{batch} entity{i} 1994 acme item"))
             })
             .collect();
 
@@ -308,8 +308,8 @@ fn delete_heavy_workload() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xDE_1E_7E,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
 
@@ -342,7 +342,7 @@ fn delete_heavy_workload() {
     // Insert replacements
     eprintln!("  inserting {} replacements", delete_count / 2);
     for i in 0..delete_count / 2 {
-        let text = format!("replacement{i} michael jordan 1994 upper deck");
+        let text = format!("replacement{i} wireless mouse 1994 north star");
         eng.insert_live(&text, 10_000_000 + i as u64, 1);
     }
     eng.flush();

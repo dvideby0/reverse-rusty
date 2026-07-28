@@ -10,10 +10,11 @@ use reverse_rusty::gen::{generate, GenConfig};
 use reverse_rusty::normalize::Normalizer;
 
 fn main() {
-    let norm = Normalizer::default_vocab().expect("built-in vocab");
+    let norm = Normalizer::default_vocab().expect("default vocabulary");
 
-    // A realistic corpus so hotness is meaningful: years/brands/grades recur (hot,
-    // never sole anchors), players/sets are rare (the features we shard on).
+    // A realistic corpus so hotness is meaningful: years/brands/variants recur
+    // (hot, never sole anchors), entities/collections are rare (the features
+    // we shard on).
     let cfg = GenConfig {
         num_queries: 3_000,
         num_titles: 0,
@@ -21,18 +22,18 @@ fn main() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x00C0_FFEE,
-        num_players: 800,
-        num_sets: 400,
+        num_entities: 800,
+        num_collections: 400,
     };
     let mut queries = generate(&cfg).queries;
 
-    // Seed three rare "demo" players so the illustrative calls below resolve
-    // against the frozen dict (any real rare player would work too).
+    // Seed three rare "demo" entities so the illustrative calls below resolve
+    // against the frozen dict (any real rare entity would work too).
     let mut id = 9_000_000u64;
     for s in [
-        "1994 upper deck demoplayer1",
-        "2003 topps demoplayer2 rookie",
-        "1995 fleer demoplayer3 sp",
+        "1994 north star demoentity1",
+        "2003 acme demoentity2 new",
+        "1995 vertex demoentity3 limited",
     ] {
         queries.push((id, s.to_string()));
         id += 1;
@@ -59,10 +60,10 @@ fn main() {
     // ---- placement by cost class ----
     println!("\n===== PLACEMENT (add_query → where it lands) =====");
     let examples = [
-        ("class A  (rare anchor)     ", "1994 upper deck demoplayer1"),
-        ("class B  (any-of, rare)    ", "(demoplayer2,demoplayer3)"),
-        ("class B  (arity-2, all hot)", "1994 upper deck"),
-        ("class C  (broad, hot only) ", "rookie"),
+        ("class A  (rare anchor)     ", "1994 north star demoentity1"),
+        ("class B  (any-of, rare)    ", "(demoentity2,demoentity3)"),
+        ("class B  (arity-2, all hot)", "1994 north star"),
+        ("class C  (broad, hot only) ", "standard"),
     ];
     for (label, dsl) in examples {
         id += 1;
@@ -79,9 +80,9 @@ fn main() {
     // ---- routing + merge ----
     println!("\n===== PERCOLATE (route → probe shards → union) =====");
     let titles = [
-        "1994 upper deck demoplayer1 psa 10",
-        "2003 topps demoplayer2 rookie psa 10",
-        "1994 upper deck demoplayer2 demoplayer3 sp", // multi-entity → wider fan-out
+        "1994 north star demoentity1 pro",
+        "2003 acme demoentity2 new pro",
+        "1994 north star demoentity2 demoentity3 limited", // multi-entity → wider fan-out
     ];
     for t in titles {
         let fanout = cluster.shard_fanout(t);

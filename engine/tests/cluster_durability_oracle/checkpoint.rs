@@ -12,10 +12,10 @@ fn tagged_cluster_survives_checkpoint_and_reopen() {
     let tags = tags_parallel(&queries);
     let dir = unique_dir("tags_reopen");
 
-    // The live add's id + tag (category=cards, a corpus value ⇒ a dense id shared with the corpus).
+    // The live add's id + tag (category=items, a corpus value ⇒ a dense id shared with the corpus).
     let live_id = 9_000_001u64;
     let live_dsl = "zzrarelivetag";
-    let live_tag = || vec![("category".to_string(), "cards".to_string())];
+    let live_tag = || vec![("category".to_string(), "items".to_string())];
 
     {
         let cluster = ClusterEngine::build_with_tags(
@@ -85,14 +85,14 @@ fn tagged_cluster_survives_checkpoint_and_reopen() {
         }
     }
     // The live tagged add specifically survives reopen and filters by its own tag.
-    let cards = vec![("category".to_string(), vec!["cards".to_string()])];
+    let items = vec![("category".to_string(), vec!["items".to_string()])];
     let coins = vec![("category".to_string(), vec!["coins".to_string()])];
     assert!(
         reopened
-            .percolate_filtered(live_dsl, &cards)
+            .percolate_filtered(live_dsl, &items)
             .unwrap()
             .contains(&live_id),
-        "the live tagged add must survive reopen and pass its own (cards) filter"
+        "the live tagged add must survive reopen and pass its own (items) filter"
     );
     assert!(
         !reopened
@@ -140,7 +140,7 @@ fn checkpoint_then_reopen_matches_oracle() {
     let post_id = added.iter().map(|(id, _)| *id).max().unwrap_or(0) + 100;
     let post_dsl = queries
         .iter()
-        .find(|(_, t)| t.contains("rareplayer") && !t.starts_with('('))
+        .find(|(_, t)| t.contains("rareentity") && !t.starts_with('('))
         .map(|(_, t)| t.clone())
         .expect("a class-A query");
     cluster.add_query(post_id, &post_dsl).expect("post add");
@@ -173,9 +173,9 @@ fn checkpoint_then_reopen_matches_oracle() {
 #[test]
 fn ranked_percolate_after_reopen() {
     let queries = vec![
-        (1u64, "1994 topps zzrankone".to_string()),
-        (2, "1994 topps zzranktwo".to_string()),
-        (3, "1994 topps zzrankthree".to_string()),
+        (1u64, "1994 acme zzrankone".to_string()),
+        (2, "1994 acme zzranktwo".to_string()),
+        (3, "1994 acme zzrankthree".to_string()),
     ];
     let tags = vec![
         vec![
@@ -204,9 +204,9 @@ fn ranked_percolate_after_reopen() {
     };
     // Each query matches its own title; scores read the reopened tag columns.
     for (title, id, want_score) in [
-        ("1994 topps zzrankone psa", 1u64, 105i64), // gold(100) + priority 5
-        ("1994 topps zzranktwo psa", 2, 0),         // silver: unboosted, no priority
-        ("1994 topps zzrankthree psa", 3, 7),       // priority only
+        ("1994 acme zzrankone alpha", 1u64, 105i64), // gold(100) + priority 5
+        ("1994 acme zzranktwo alpha", 2, 0),         // silver: unboosted, no priority
+        ("1994 acme zzrankthree alpha", 3, 7),       // priority only
     ] {
         let (scored, _) = reopened
             .percolate_filtered_ranked(title, &[], true, &spec)

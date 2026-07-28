@@ -162,7 +162,7 @@ mod tests {
         let norm = crate::normalize::Normalizer::default_vocab().expect("normalizer");
         let mut dict = crate::dict::Dict::new();
         let mut lc = String::new();
-        let ast = crate::dsl::parse("1994 topps").expect("query");
+        let ast = crate::dsl::parse("1994 acme").expect("query");
         let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
         dict.finalize_mask();
         let placement = crate::ownership::QueryPlacement::selective(
@@ -205,7 +205,7 @@ mod tests {
         let norm = crate::normalize::Normalizer::default_vocab().expect("normalizer");
         let mut dict = crate::dict::Dict::new();
         let mut lc = String::new();
-        let ast = crate::dsl::parse("1994 topps").expect("query");
+        let ast = crate::dsl::parse("1994 acme").expect("query");
         let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
         dict.finalize_mask();
         let mut segment = crate::segment::Segment::new();

@@ -68,7 +68,7 @@ fn bench_bulk_persist_cost() {
 fn wal_insert_failure_is_rejected_not_acknowledged() {
     let mut eng = engine_with_wal("insert_fail");
     assert!(matches!(
-        eng.try_insert_live("michael jordan", 1, 1),
+        eng.try_insert_live("wireless mouse", 1, 1),
         Ok(InsertOutcome::Inserted(_))
     ));
     let before = eng.num_queries();
@@ -99,7 +99,7 @@ fn wal_insert_failure_is_rejected_not_acknowledged() {
 #[test]
 fn wal_delete_failure_is_rejected_not_acknowledged() {
     let mut eng = engine_with_wal("delete_fail");
-    eng.try_insert_live("michael jordan", 1, 1).unwrap();
+    eng.try_insert_live("wireless mouse", 1, 1).unwrap();
     assert!(eng.get_query_source(1).is_some());
 
     eng.wal.as_mut().unwrap().break_writes_for_test();
@@ -123,7 +123,7 @@ fn wal_state(eng: &Engine) -> (u64, u64, u64) {
 fn stale_positional_tombstones_are_typed_and_never_reach_the_wal() {
     let mut eng = engine_with_wal("stale_positional");
     assert_eq!(
-        eng.build_from_queries(&[(1, "michael jordan".to_string())])
+        eng.build_from_queries(&[(1, "wireless mouse".to_string())])
             .ingested,
         1
     );
@@ -186,7 +186,7 @@ fn stale_positional_tombstones_are_typed_and_never_reach_the_wal() {
 fn positional_tombstone_wal_failure_leaves_the_valid_row_alive() {
     let mut eng = engine_with_wal("positional_wal_fail");
     assert_eq!(
-        eng.build_from_queries(&[(1, "michael jordan".to_string())])
+        eng.build_from_queries(&[(1, "wireless mouse".to_string())])
             .ingested,
         1
     );

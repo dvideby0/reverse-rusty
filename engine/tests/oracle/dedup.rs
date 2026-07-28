@@ -40,8 +40,8 @@ fn duplicate_corpus(seed: u64, n: usize) -> Vec<(u64, String)> {
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: 800,
-        num_sets: 400,
+        num_entities: 800,
+        num_collections: 400,
     });
     let mut out = Vec::new();
     let mut next_id = 10_000_000u64;
@@ -155,8 +155,8 @@ fn duplicated_corpus_matches_brute_per_title_and_batch() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xDED0_0002,
-        num_players: 800,
-        num_sets: 400,
+        num_entities: 800,
+        num_collections: 400,
     });
     let eng = build_multi(&queries, cfg_dedup(true));
     let snap = eng.snapshot();
@@ -181,8 +181,8 @@ fn dedup_off_is_result_identical_and_scans_more() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xDED0_0004,
-        num_players: 800,
-        num_sets: 400,
+        num_entities: 800,
+        num_collections: 400,
     })
     .titles;
     let on = build_multi(&queries, cfg_dedup(true));
@@ -212,16 +212,16 @@ fn tombstoned_leader_keeps_members_matchable() {
     let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg_dedup(true));
     // Insertion order makes id 1 the group leader.
     for id in 1..=4u64 {
-        eng.insert_live("psa 10 charizard", id, 1);
+        eng.insert_live("pro product delta", id, 1);
     }
     // A same-segment singleton so the segment stays non-trivial.
-    eng.insert_live("pikachu holo", 9, 1);
+    eng.insert_live("widget special", 9, 1);
     assert_eq!(eng.snapshot().dup_joined(), 3);
 
     let hits = |eng: &Engine| -> HashSet<u64> {
         let mut s = MatchScratch::new();
         let mut out = Vec::new();
-        eng.match_title("psa 10 charizard slab", &mut s, &mut out, true);
+        eng.match_title("pro product delta case", &mut s, &mut out, true);
         out.iter().copied().collect()
     };
     assert_eq!(hits(&eng), HashSet::from([1, 2, 3, 4]));
@@ -247,9 +247,9 @@ fn tombstoned_leader_keeps_members_matchable() {
 fn tag_divergent_duplicates_filter_independently() {
     let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg_dedup(true));
     let tags = |v: &str| -> Vec<(String, String)> { vec![("store".to_string(), v.to_string())] };
-    eng.insert_live_with_tags("psa 10 charizard", 1, 1, &tags("us")); // leader
-    eng.insert_live_with_tags("psa 10 charizard", 2, 1, &tags("uk"));
-    eng.insert_live_with_tags("psa 10 charizard", 3, 1, &tags("us"));
+    eng.insert_live_with_tags("pro product delta", 1, 1, &tags("us")); // leader
+    eng.insert_live_with_tags("pro product delta", 2, 1, &tags("uk"));
+    eng.insert_live_with_tags("pro product delta", 3, 1, &tags("us"));
     assert_eq!(eng.snapshot().dup_joined(), 2);
 
     let snap = eng.snapshot();
@@ -257,7 +257,7 @@ fn tag_divergent_duplicates_filter_independently() {
         let pred = snap.compile_tag_predicate(&[("store".to_string(), vec![v.to_string()])]);
         let mut s = MatchScratch::new();
         let mut out = Vec::new();
-        snap.match_title_filtered("psa 10 charizard slab", &mut s, &mut out, true, &pred);
+        snap.match_title_filtered("pro product delta case", &mut s, &mut out, true, &pred);
         out.iter().copied().collect()
     };
     assert_eq!(filtered("us"), HashSet::from([1, 3]));
@@ -299,8 +299,8 @@ fn flush_reopen_and_wal_replay_match_brute() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xDED0_0006,
-        num_players: 800,
-        num_sets: 400,
+        num_entities: 800,
+        num_collections: 400,
     })
     .titles;
     let cfg = EngineConfig {
@@ -346,11 +346,11 @@ fn compaction_regroups_across_segments() {
     );
     // Two bulk segments, each with 50 copies of the same body + distinct filler.
     let mut batch_a: Vec<(u64, String)> = (0..50u64)
-        .map(|i| (i, "psa 10 charizard".to_string()))
+        .map(|i| (i, "pro product delta".to_string()))
         .collect();
-    batch_a.extend((0..30u64).map(|i| (1_000 + i, format!("pikachu holo v{i}"))));
+    batch_a.extend((0..30u64).map(|i| (1_000 + i, format!("widget special v{i}"))));
     let mut batch_b: Vec<(u64, String)> = (0..50u64)
-        .map(|i| (100 + i, "psa 10 charizard".to_string()))
+        .map(|i| (100 + i, "pro product delta".to_string()))
         .collect();
     batch_b.extend((0..30u64).map(|i| (2_000 + i, format!("blastoise ex n{i}"))));
     eng.build_from_queries(&batch_a);
@@ -359,7 +359,7 @@ fn compaction_regroups_across_segments() {
     let count_hit = |eng: &Engine| -> (usize, u32) {
         let mut s = MatchScratch::new();
         let mut out = Vec::new();
-        let st = eng.match_title("psa 10 charizard slab", &mut s, &mut out, true);
+        let st = eng.match_title("pro product delta case", &mut s, &mut out, true);
         (out.len(), st.postings_scanned)
     };
     let (hits_before, scanned_before) = count_hit(&eng);
@@ -379,9 +379,9 @@ fn compaction_regroups_across_segments() {
     corpus.extend(batch_b);
     let brute = Brute::build(&corpus);
     let titles = vec![
-        "psa 10 charizard slab".to_string(),
-        "pikachu holo v3".to_string(),
-        "blastoise ex n7 psa 10".to_string(),
+        "pro product delta case".to_string(),
+        "widget special v3".to_string(),
+        "blastoise ex n7 pro".to_string(),
     ];
     diff_vs_brute(&eng, &brute, &titles, "post-compaction regroup");
 }
@@ -393,13 +393,13 @@ fn compaction_regroups_across_segments() {
 #[test]
 fn thousand_identical_queries_scan_one_posting_entry() {
     let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg_dedup(true));
-    let corpus: Vec<(u64, String)> = (0..1_000u64).map(|i| (i, "psa 10".to_string())).collect();
+    let corpus: Vec<(u64, String)> = (0..1_000u64).map(|i| (i, "pro".to_string())).collect();
     eng.build_from_queries(&corpus);
     assert_eq!(eng.snapshot().dup_joined(), 999);
 
     let mut s = MatchScratch::new();
     let mut out = Vec::new();
-    let stats = eng.match_title("psa 10 charizard", &mut s, &mut out, true);
+    let stats = eng.match_title("pro product delta", &mut s, &mut out, true);
     assert_eq!(out.len(), 1_000, "every member must still match");
     assert!(
         stats.postings_scanned <= 4,
@@ -493,7 +493,7 @@ fn grouped_migration_is_one_leader_move_with_cap_exempt_adoptions() {
 fn upsert_moves_members_between_groups() {
     let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg_dedup(true));
     for id in 1..=3u64 {
-        eng.insert_live("psa 10 charizard", id, 1);
+        eng.insert_live("pro product delta", id, 1);
     }
     let hits = |eng: &Engine, title: &str| -> HashSet<u64> {
         let mut s = MatchScratch::new();
@@ -502,17 +502,17 @@ fn upsert_moves_members_between_groups() {
         out.iter().copied().collect()
     };
     // Move id 2 to a different body.
-    eng.try_upsert_live("pikachu holo", 2, 2).expect("upsert");
-    assert_eq!(hits(&eng, "psa 10 charizard slab"), HashSet::from([1, 3]));
-    assert_eq!(hits(&eng, "pikachu holo promo"), HashSet::from([2]));
+    eng.try_upsert_live("widget special", 2, 2).expect("upsert");
+    assert_eq!(hits(&eng, "pro product delta case"), HashSet::from([1, 3]));
+    assert_eq!(hits(&eng, "widget special promo"), HashSet::from([2]));
     // And back: it re-joins the original body's group.
-    eng.try_upsert_live("psa 10 charizard", 2, 3)
+    eng.try_upsert_live("pro product delta", 2, 3)
         .expect("upsert back");
     assert_eq!(
-        hits(&eng, "psa 10 charizard slab"),
+        hits(&eng, "pro product delta case"),
         HashSet::from([1, 2, 3])
     );
-    assert_eq!(hits(&eng, "pikachu holo promo"), HashSet::new());
+    assert_eq!(hits(&eng, "widget special promo"), HashSet::new());
 }
 
 /// Counter + sketch sanity on a corpus with EXACTLY known duplication: 400
@@ -524,7 +524,7 @@ fn sketch_estimates_distinct_bodies() {
     let mut id = 0u64;
     for b in 0..400u64 {
         for _ in 0..4 {
-            corpus.push((id, format!("card{b} slab grade")));
+            corpus.push((id, format!("item{b} case level")));
             id += 1;
         }
     }

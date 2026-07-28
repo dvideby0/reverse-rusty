@@ -342,11 +342,11 @@ pub enum PunctClass {
     /// identically, so the lossless cover still holds.
     Fold,
     /// Keep the character literally, in place, inside the surrounding token (`9.5`
-    /// stays `9.5`). The default for `.` so half-grades survive byte-cleaning.
+    /// stays `9.5`). The default for `.` so half-levels survive byte-cleaning.
     Keep,
     /// Emit the character as its own standalone marker token (` c `). The default for
-    /// `#` and `/` so the number logic can tell card-numbers (`#2`) and serials
-    /// (`/199`, `3/10`) apart from grades.
+    /// `#` and `/` so the number logic can tell item-numbers (`#2`) and serials
+    /// (`/199`, `3/10`) apart from levels.
     Marker,
 }
 

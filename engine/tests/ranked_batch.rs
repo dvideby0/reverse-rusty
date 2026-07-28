@@ -32,8 +32,8 @@ fn gen_data(seed: u64, num_queries: usize, num_titles: usize, broad_frac: f64) -
         hot_skew: 2.0,
         family_size: 8,
         seed,
-        num_players: (num_queries / 40).max(2_000),
-        num_sets: (num_queries / 100).max(1_000),
+        num_entities: (num_queries / 40).max(2_000),
+        num_collections: (num_queries / 100).max(1_000),
     })
 }
 
@@ -301,7 +301,7 @@ fn multiword_alias_forced_inline_batch_equals_scalar() {
 #[test]
 fn batch_admission_rejects_before_matching() {
     let mut eng = Engine::new(norm());
-    eng.insert_live("topps chrome", 1, 1);
+    eng.insert_live("acme chrome", 1, 1);
     let snap = eng.snapshot();
     let program = snap
         .compile_rank_program(&RankProgramSpec::default())

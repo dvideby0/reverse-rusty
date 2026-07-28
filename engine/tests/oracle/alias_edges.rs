@@ -1,6 +1,6 @@
 //! Multi-word alias (ADR-061) edge-case differential tests, split out of `alias.rs` to keep that
 //! file under the size budget. Covers the ID-stability-on-fresh-index FN class for the multi-word
-//! entity-interning path, and the end-to-end "Goldilocks parse" stateful-grade parse-union (the
+//! entity-interning path, and the end-to-end "Goldilocks parse" stateful-level parse-union (the
 //! exhaustive normalizer-level sweep lives in `src/normalize/parse_union_oracle.rs`).
 
 use reverse_rusty::dict::Dict;
@@ -36,12 +36,12 @@ fn multiword_alias_survives_future_insert_on_fresh_index() {
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.set_vocab(v).expect("set_vocab on fresh engine");
     // A later insert interns the multi-word entity dense; the alias must still resolve to it.
-    eng.try_insert_live("new york yankees", 1, 1)
+    eng.try_insert_live("new york inventory", 1, 1)
         .expect("insert");
 
     let mut s = MatchScratch::new();
     assert!(
-        matched(&mut eng, &mut s, "ny yankees").contains(&1),
+        matched(&mut eng, &mut s, "ny inventory").contains(&1),
         "multi-word alias must survive a future insert on a fresh index (a ny title reaches the \
          new york query)"
     );
@@ -50,7 +50,7 @@ fn multiword_alias_survives_future_insert_on_fresh_index() {
 /// Codex R11 (P2): a whitespace RUN inside a query-side alias occurrence — the DSL passes a
 /// quoted phrase's inner text verbatim to `compile_features` — must still collapse to the alias
 /// entity. Without the query-side run collapse the query compiles to component terms, equivalence
-/// expansion never reaches the group, and `"new  york" mets` misses a `ny mets` title (a false
+/// expansion never reaches the group, and `"new  york" catalog` misses a `ny catalog` title (a false
 /// negative of the zero-FN contract).
 #[test]
 fn query_alias_with_whitespace_run_still_reaches_the_group() {
@@ -65,15 +65,15 @@ fn query_alias_with_whitespace_run_still_reaches_the_group() {
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.set_vocab(v).expect("set_vocab");
     // The quoted phrase carries a DOUBLE space; the DSL hands it to the normalizer verbatim.
-    eng.build_from_queries(&[(1, "\"new  york\" mets".into())]);
+    eng.build_from_queries(&[(1, "\"new  york\" catalog".into())]);
 
     let mut s = MatchScratch::new();
     assert!(
-        matched(&mut eng, &mut s, "ny mets").contains(&1),
+        matched(&mut eng, &mut s, "ny catalog").contains(&1),
         "a whitespace run inside the quoted alias phrase must not hide the alias"
     );
     assert!(
-        matched(&mut eng, &mut s, "new york mets").contains(&1),
+        matched(&mut eng, &mut s, "new york catalog").contains(&1),
         "the literal form still matches"
     );
 }

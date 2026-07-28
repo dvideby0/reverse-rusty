@@ -23,8 +23,8 @@ fn zero_false_negatives_after_corpus_phrase_learn_and_apply() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0C0F_FEE5,
-        num_players: 600,
-        num_sets: 300,
+        num_entities: 600,
+        num_collections: 300,
     };
     let data = generate(&cfg);
 
@@ -41,7 +41,7 @@ fn zero_false_negatives_after_corpus_phrase_learn_and_apply() {
         titles.push(format!("zenith zonk extra{i}"));
     }
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&queries);
     let learn_cfg = CorpusLearnConfig {
         corpus_phrases: true,
@@ -119,11 +119,11 @@ fn zero_false_negatives_after_corpus_phrase_learn_and_apply() {
 fn corpus_phrase_induction_preserves_component_query_recall() {
     use reverse_rusty::vocab::CorpusLearnConfig;
 
-    let mut queries: Vec<(u64, String)> = vec![(1, "deck".into())]; // requires just "deck"
+    let mut queries: Vec<(u64, String)> = vec![(1, "star".into())]; // requires just "star"
     for i in 0..40u64 {
-        queries.push((100 + i, format!("upper deck u{i}"))); // plant the "upper deck" phrase
+        queries.push((100 + i, format!("north star u{i}"))); // plant the "north star" phrase
     }
-    let title = "1994 upper deck rookie"; // contains "upper deck" adjacently
+    let title = "1994 north star new"; // contains "north star" adjacently
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
@@ -133,7 +133,7 @@ fn corpus_phrase_induction_preserves_component_query_recall() {
     let before: HashSet<u64> = out.iter().copied().collect();
     assert!(
         before.contains(&1),
-        "before induction, the 'deck' query matches a title containing 'deck'"
+        "before induction, the 'star' query matches a title containing 'star'"
     );
 
     let cfg = CorpusLearnConfig {
@@ -148,15 +148,15 @@ fn corpus_phrase_induction_preserves_component_query_recall() {
             .expect("vocab")
             .phrases()
             .iter()
-            .any(|p| p.tokens == vec!["upper".to_string(), "deck".to_string()] && p.additive),
-        "the induced 'upper deck' phrase must be additive"
+            .any(|p| p.tokens == vec!["north".to_string(), "star".to_string()] && p.additive),
+        "the induced 'north star' phrase must be additive"
     );
 
     eng.match_title(title, &mut s, &mut out, true);
     let after: HashSet<u64> = out.iter().copied().collect();
     assert!(
         after.contains(&1),
-        "AFTER additive induction, the 'deck' query STILL matches (component recall preserved)"
+        "AFTER additive induction, the 'star' query STILL matches (component recall preserved)"
     );
     assert!(
         before.is_subset(&after),
@@ -164,7 +164,7 @@ fn corpus_phrase_induction_preserves_component_query_recall() {
     );
 }
 
-/// Characterization (NOT a bug): inducing `upper deck` makes a query *phrased* "upper deck"
+/// Characterization (NOT a bug): inducing `north star` makes a query *phrased* "north star"
 /// require the adjacent phrase, so it no longer matches a title where the two tokens are
 /// NON-adjacent. This is the intended re-tokenization; for genuine entities (which appear
 /// adjacent in real titles) it is negligible. Pinned so the tradeoff is explicit — and
@@ -173,11 +173,11 @@ fn corpus_phrase_induction_preserves_component_query_recall() {
 fn corpus_phrase_induction_tightens_phrase_query_to_adjacency() {
     use reverse_rusty::vocab::CorpusLearnConfig;
 
-    let mut queries: Vec<(u64, String)> = vec![(1, "upper deck".into())];
+    let mut queries: Vec<(u64, String)> = vec![(1, "north star".into())];
     for i in 0..40u64 {
-        queries.push((100 + i, format!("upper deck u{i}")));
+        queries.push((100 + i, format!("north star u{i}")));
     }
-    let nonadjacent = "upper blue deck"; // upper and deck present but NOT adjacent
+    let nonadjacent = "north blue star"; // north and star present but NOT adjacent
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
@@ -186,7 +186,7 @@ fn corpus_phrase_induction_tightens_phrase_query_to_adjacency() {
     eng.match_title(nonadjacent, &mut s, &mut out, true);
     assert!(
         out.contains(&1),
-        "before induction, 'upper deck' matches a non-adjacent title (AND of bare terms)"
+        "before induction, 'north star' matches a non-adjacent title (AND of bare terms)"
     );
 
     let cfg = CorpusLearnConfig {

@@ -27,7 +27,7 @@ pub(super) type CompiledCorpus = (
 /// finalize the hot mask + tag space). Lets a test seed a `LocalShard` at the same low level the
 /// coordinator uses.
 pub(super) fn compile_corpus(dsls: &[(u64, &str)]) -> CompiledCorpus {
-    let norm = Arc::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let norm = Arc::new(Normalizer::default_vocab().expect("default vocabulary"));
     let mut dict = Dict::new();
     let mut lc = String::new();
     let mut out = Vec::new();

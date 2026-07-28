@@ -31,8 +31,8 @@ fn adopt_dict_refuses_previous_compiler_semantics_before_mutation() {
 fn adopt_dict_state_machine() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
-    let d1 = frozen_dict(&["1994 upper deck", "psa 10"], &n);
-    let d2 = frozen_dict(&["1994 upper deck", "psa 10", "1995 fleer ultra"], &n);
+    let d1 = frozen_dict(&["1994 north star", "pro"], &n);
+    let d2 = frozen_dict(&["1994 north star", "pro", "1995 vertex ultra"], &n);
     assert_ne!(
         d1.fingerprint(),
         d2.fingerprint(),
@@ -86,7 +86,7 @@ fn adopt_dict_state_machine() {
     assert_eq!(current_fp(&srv), d2.fingerprint());
 
     // Load data, then a DIVERGENT dict → refused (the silent-FN guard).
-    srv.ingest_dsl(&[(1u64, "1994 upper deck".to_string())]);
+    srv.ingest_dsl(&[(1u64, "1994 north star".to_string())]);
     let n_loaded = rt
         .block_on(srv.num_queries(Request::new(proto::ShardRef { shard_id: 0 })))
         .expect("count after load")
@@ -108,8 +108,8 @@ fn adopt_dict_state_machine() {
 #[tokio::test]
 async fn fingerprint_claim_attests_space_adopted_during_legacy_drain() {
     let n = norm();
-    let d1 = frozen_dict(&["1994 upper deck"], &n);
-    let d2 = frozen_dict(&["1995 fleer ultra"], &n);
+    let d1 = frozen_dict(&["1994 north star"], &n);
+    let d2 = frozen_dict(&["1995 vertex ultra"], &n);
     assert_ne!(
         d1.fingerprint(),
         d2.fingerprint(),

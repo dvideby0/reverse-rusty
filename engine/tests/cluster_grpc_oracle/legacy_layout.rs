@@ -372,7 +372,7 @@ fn distributed_top_k_refuses_pre_adr_110_peer() {
         .expect("rank program");
     let error = cluster
         .try_percolate_filtered_top_k(
-            "topps chrome",
+            "acme chrome",
             &[],
             reverse_rusty::TopKOptions::default(),
             &program,
@@ -428,7 +428,7 @@ fn distributed_top_k_keeps_one_absolute_deadline_across_transport() {
     let started = Instant::now();
     let error = cluster
         .try_percolate_filtered_top_k(
-            "topps chrome",
+            "acme chrome",
             &[],
             reverse_rusty::TopKOptions::default(),
             &program,

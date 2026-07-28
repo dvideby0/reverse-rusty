@@ -48,15 +48,15 @@ fn ranks_by_priority_then_boost_additively() {
     let mut eng = Engine::new(norm());
     // Three queries that all match the title below, with distinct priority + tier tags.
     eng.insert_live_with_tags(
-        "topps chrome",
+        "acme chrome",
         1,
         1,
         &[tag("priority", "10"), tag("tier", "gold")],
     );
-    eng.insert_live_with_tags("topps chrome", 2, 1, &[tag("priority", "50")]);
-    eng.insert_live_with_tags("topps chrome", 3, 1, &[tag("tier", "gold")]);
+    eng.insert_live_with_tags("acme chrome", 2, 1, &[tag("priority", "50")]);
+    eng.insert_live_with_tags("acme chrome", 3, 1, &[tag("tier", "gold")]);
     let snap = eng.snapshot();
-    let ids = matched(&snap, "2020 topps chrome update");
+    let ids = matched(&snap, "2020 acme chrome update");
     assert_eq!(ids, vec![1, 2, 3], "all three queries match the title");
 
     // priority only: 2 (50) > 1 (10) > 3 (0).
@@ -95,11 +95,11 @@ fn ranking_never_changes_the_matched_set() {
     // The recall guard: ranking only reorders the already-final id set — it may
     // never add or drop a match. Compare the ranked id SET to the raw matched set.
     let mut eng = Engine::new(norm());
-    eng.insert_live_with_tags("topps chrome", 1, 1, &[tag("priority", "10")]);
-    eng.insert_live_with_tags("topps chrome", 2, 1, &[]); // untagged → priority 0
-    eng.insert_live_with_tags("topps chrome", 3, 1, &[tag("priority", "999")]);
+    eng.insert_live_with_tags("acme chrome", 1, 1, &[tag("priority", "10")]);
+    eng.insert_live_with_tags("acme chrome", 2, 1, &[]); // untagged → priority 0
+    eng.insert_live_with_tags("acme chrome", 3, 1, &[tag("priority", "999")]);
     let snap = eng.snapshot();
-    let ids = matched(&snap, "2020 topps chrome update");
+    let ids = matched(&snap, "2020 acme chrome update");
 
     let spec = RankSpec {
         priority_key: Some("priority".into()),
@@ -120,11 +120,11 @@ fn rank_uses_newest_live_copy_tags() {
     // segment (v1, priority 1) and the memtable (v2, priority 9). `tags_for_logical`
     // must pick the NEWEST live copy (memtable), so the score is 9, not 1.
     let mut eng = Engine::new(norm());
-    eng.insert_live_with_tags("topps chrome", 1, 1, &[tag("priority", "1")]);
+    eng.insert_live_with_tags("acme chrome", 1, 1, &[tag("priority", "1")]);
     eng.flush(); // bake v1 into a base segment (still alive — no tombstone)
-    eng.insert_live_with_tags("topps chrome", 1, 2, &[tag("priority", "9")]);
+    eng.insert_live_with_tags("acme chrome", 1, 2, &[tag("priority", "9")]);
     let snap = eng.snapshot();
-    let ids = matched(&snap, "2020 topps chrome update");
+    let ids = matched(&snap, "2020 acme chrome update");
     assert_eq!(ids, vec![1], "the logical id dedups to a single hit");
 
     let spec = RankSpec {
@@ -145,8 +145,8 @@ fn rank_uses_newest_copy_within_one_container() {
     // lists them oldest-first, so ranking must take the LAST (newest) live local,
     // not the first. (This is the common server PUT-update path.)
     let mut eng = Engine::new(norm());
-    eng.insert_live_with_tags("topps chrome", 1, 1, &[tag("priority", "1")]);
-    eng.insert_live_with_tags("topps chrome", 1, 2, &[tag("priority", "9")]);
+    eng.insert_live_with_tags("acme chrome", 1, 1, &[tag("priority", "1")]);
+    eng.insert_live_with_tags("acme chrome", 1, 2, &[tag("priority", "9")]);
     let spec = RankSpec {
         priority_key: Some("priority".into()),
         boosts: vec![],
@@ -154,7 +154,7 @@ fn rank_uses_newest_copy_within_one_container() {
 
     // Both copies live in the memtable.
     let snap = eng.snapshot();
-    let ids = matched(&snap, "2020 topps chrome update");
+    let ids = matched(&snap, "2020 acme chrome update");
     assert_eq!(ids, vec![1], "deduped to a single hit");
     assert_eq!(
         ranked_ids(&snap, &ids, &spec),
@@ -166,7 +166,7 @@ fn rank_uses_newest_copy_within_one_container() {
     eng.flush();
     let snap = eng.snapshot();
     assert_eq!(
-        ranked_ids(&snap, &matched(&snap, "2020 topps chrome update"), &spec),
+        ranked_ids(&snap, &matched(&snap, "2020 acme chrome update"), &spec),
         vec![(1, 9)],
         "newest copy in the same base segment wins after flush"
     );
@@ -175,7 +175,7 @@ fn rank_uses_newest_copy_within_one_container() {
 #[test]
 fn rank_scores_unknown_id_zero() {
     let mut eng = Engine::new(norm());
-    eng.insert_live_with_tags("topps chrome", 1, 1, &[tag("priority", "5")]);
+    eng.insert_live_with_tags("acme chrome", 1, 1, &[tag("priority", "5")]);
     let snap = eng.snapshot();
     let spec = snap.compile_rank_spec(&RankSpec {
         priority_key: Some("priority".into()),
@@ -197,14 +197,14 @@ fn bounded_typed_top_k_matches_collect_all_full_sort() {
     ];
     for (id, priority, tier) in rows {
         let tags = vec![tag("priority", &priority.to_string()), tag("tier", tier)];
-        eng.try_insert_live_ranked("topps chrome", id, 1, &tags, Some(RankValues { priority }))
+        eng.try_insert_live_ranked("acme chrome", id, 1, &tags, Some(RankValues { priority }))
             .expect("typed insert");
     }
     // Two physical copies of logical 2: the newest-live priority must win no
     // matter which row emits the match first.
     eng.flush();
     eng.try_insert_live_ranked(
-        "topps chrome",
+        "acme chrome",
         2,
         2,
         &[tag("priority", "75"), tag("tier", "gold")],
@@ -227,7 +227,7 @@ fn bounded_typed_top_k_matches_collect_all_full_sort() {
     let mut scratch = MatchScratch::new();
     let got = snap
         .try_match_title_top_k(
-            "2020 topps chrome update",
+            "2020 acme chrome update",
             options,
             &program,
             &reverse_rusty::exact::TagPredicate::empty(),
@@ -236,7 +236,7 @@ fn bounded_typed_top_k_matches_collect_all_full_sort() {
         )
         .expect("bounded top-k");
 
-    let ids = matched(&snap, "2020 topps chrome update");
+    let ids = matched(&snap, "2020 acme chrome update");
     let compat = RankSpec {
         priority_key: Some("priority".into()),
         boosts: vec![boost("tier", "gold", 100)],
@@ -260,13 +260,13 @@ fn bounded_typed_top_k_matches_collect_all_full_sort() {
 fn bounded_top_k_honors_filters_size_zero_and_field_errors() {
     let mut eng = Engine::new(norm());
     eng.insert_live_with_tags(
-        "topps chrome",
+        "acme chrome",
         1,
         1,
         &[tag("priority", "9"), tag("tenant", "a")],
     );
     eng.insert_live_with_tags(
-        "topps chrome",
+        "acme chrome",
         2,
         1,
         &[tag("priority", "99"), tag("tenant", "b")],
@@ -285,7 +285,7 @@ fn bounded_top_k_honors_filters_size_zero_and_field_errors() {
     let mut scratch = MatchScratch::new();
     let got = snap
         .try_match_title_top_k(
-            "topps chrome",
+            "acme chrome",
             TopKOptions {
                 search_after: None,
                 size: 0,
@@ -439,7 +439,7 @@ fn pit_snapshot_pages_concatenate_and_survive_engine_mutation() {
     for id in 1..=40u64 {
         let priority = (id % 7) as i64 * 10;
         eng.try_insert_live_ranked(
-            "topps chrome",
+            "acme chrome",
             id,
             1,
             &[tag("priority", &priority.to_string())],
@@ -460,7 +460,7 @@ fn pit_snapshot_pages_concatenate_and_survive_engine_mutation() {
         .compile_rank_program(&raw)
         .expect("compile rank program");
     let pred = reverse_rusty::exact::TagPredicate::empty();
-    let title = "2020 topps chrome update";
+    let title = "2020 acme chrome update";
 
     let one_shot = {
         let mut scratch = MatchScratch::new();
@@ -520,7 +520,7 @@ fn pit_snapshot_pages_concatenate_and_survive_engine_mutation() {
         let victim = page.hits[0].logical_id;
         eng.delete_by_logical_id(victim).expect("delete winner");
         eng.try_insert_live_ranked(
-            "topps chrome",
+            "acme chrome",
             fresh_id,
             1,
             &[tag("priority", "990")],

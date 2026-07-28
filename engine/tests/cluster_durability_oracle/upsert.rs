@@ -20,7 +20,7 @@ fn upserts_survive_reopen_via_log_tail_and_checkpoint() {
     let (v1_id, _) = queries[10].clone();
     let (_, v1_new_dsl) = queries[20].clone();
     let (v2_id, _) = queries[11].clone();
-    let v2_new_dsl = "zzupserted gem mint".to_string();
+    let v2_new_dsl = "zzupserted deluxe premium".to_string();
     let v3_id = base;
     let (_, v3_dsl) = queries[30].clone();
     let (v4_id, _) = queries[12].clone();
@@ -46,7 +46,7 @@ fn upserts_survive_reopen_via_log_tail_and_checkpoint() {
 
     // Probe the original titles plus one that only the new-term replacement matches.
     let mut probe_titles = titles.clone();
-    probe_titles.push("zzupserted gem mint psa 10".to_string());
+    probe_titles.push("zzupserted deluxe premium pro".to_string());
 
     for &(k, checkpoint) in &[(3usize, false), (3usize, true), (8usize, false)] {
         let dir = unique_dir(&format!("upsert_k{k}_ckpt{checkpoint}"));

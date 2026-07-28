@@ -231,6 +231,12 @@ ADR-124 adds a deliberately smaller automated contract in `perfgate`:
   reference band is `max(30% of the six-run median, 3 × historical MAD)`; a timing-only breach
   retries the whole timing window once. Structure/resources never retry.
 
+After an intentional workload-semantic rewrite, the checked-in baseline may temporarily carry no
+timing source runs or samples. In that explicit all-empty state, `perfgate check` still blocks on
+deterministic structure and resources, captures and uploads the normal timing attempt, but reports
+timing comparison as pending. Partial histories fail validation. The normal `rebaseline` command
+requires five fresh reviewed CI reports and atomically restores the timing gate.
+
 The reviewed baseline is
 [`performance/perf-baseline.json`](performance/perf-baseline.json). Every PR uploads its
 `perf-current.json`. Deep `bench`/`segbench`/`snapbench`/`clusterbench`/`rankbench` sweeps remain advisory

@@ -20,7 +20,7 @@ const NUM_SHARDS: usize = 8;
 const RF: usize = 2;
 
 fn vocab() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 fn data_node(id: u64) -> NodeDescriptor {
@@ -40,8 +40,8 @@ fn build() -> (ClusterEngine, Vec<String>) {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x5F0C_A11E,
-        num_players: 300,
-        num_sets: 150,
+        num_entities: 300,
+        num_collections: 150,
     };
     let data = generate(&cfg);
     let ccfg = ClusterConfig {

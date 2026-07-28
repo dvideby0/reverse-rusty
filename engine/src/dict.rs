@@ -362,14 +362,14 @@ mod tests {
 
         // Interned ids are dense and never land in the synthetic range.
         let mut d = Dict::new();
-        let topps = d.intern("term:topps", FeatureKind::Generic);
-        let rookie = d.intern("term:rookie", FeatureKind::Category);
-        assert!(!is_synthetic(topps));
-        assert!(!is_synthetic(rookie));
+        let acme = d.intern("term:acme", FeatureKind::Generic);
+        let new = d.intern("term:new", FeatureKind::Category);
+        assert!(!is_synthetic(acme));
+        assert!(!is_synthetic(new));
 
         // get_or_synthetic: a hit keeps its dense id; a miss hashes (and matches the
         // free function, so the compile path and the match path agree).
-        assert_eq!(d.get_or_synthetic("term:topps"), topps);
+        assert_eq!(d.get_or_synthetic("term:acme"), acme);
         let miss = d.get_or_synthetic("term:never-seen");
         assert!(is_synthetic(miss));
         assert_eq!(miss, synthetic_id("term:never-seen"));

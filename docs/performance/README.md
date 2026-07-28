@@ -64,6 +64,12 @@ windows. Each timing bound is the more tolerant of a 30% material-change band an
 MADs; a timing-only breach gets one complete retry. Deterministic structure and the 5% resource
 ceilings never retry.
 
+The current domain-neutral workload migration has an explicit pending timing baseline: source-run
+IDs and all timing histories are empty together, so structure and resources remain merge-blocking
+while timing is still measured and uploaded but comparison is skipped with a visible message. Five
+fresh reviewed CI reports supplied to `perfgate rebaseline` repopulate the histories and
+automatically restore timing enforcement.
+
 The broader capture log remains valuable but advisory. Full policy, rebaseline procedure, and
 scheduled-soak contract → [`../testing.md`](../testing.md) and
 [ADR-124](../decisions/adr-124-variance-tolerant-performance-gate.md).

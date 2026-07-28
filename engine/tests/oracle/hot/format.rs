@@ -87,7 +87,7 @@ fn hot_segments_write_the_v5_rollback_fence() {
         cfg.data_dir = Some(dir_both.clone());
         let mut eng = Engine::open(Normalizer::default_vocab().expect("vocab"), cfg).expect("open");
         let mut both_queries = queries.clone();
-        both_queries.push((900_000, "-auto".to_string()));
+        both_queries.push((900_000, "-manual".to_string()));
         eng.build_from_queries(&both_queries);
         let cc = eng.class_counts();
         assert!(

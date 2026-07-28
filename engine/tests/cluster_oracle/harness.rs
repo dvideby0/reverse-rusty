@@ -9,7 +9,7 @@ use reverse_rusty::normalize::Normalizer;
 use std::collections::HashSet;
 
 pub(crate) fn vocab() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 /// Independent ground-truth matcher over extracted queries (copied structure from
@@ -147,7 +147,7 @@ impl Brute {
 // ---- per-query tags + filtered percolation (ADR-049/055) ----
 // Mirrors the single-node `tests/oracle/` scheme so the cluster path is held to the same
 // deterministic-tags + AND-across-keys/OR-within-a-key filter semantics.
-const CATEGORIES: [&str; 6] = ["cards", "coins", "stamps", "comics", "toys", "art"];
+const CATEGORIES: [&str; 6] = ["items", "coins", "stamps", "comics", "toys", "art"];
 const STATUSES: [&str; 3] = ["active", "inactive", "archived"];
 
 /// Deterministic per-query tags, a pure function of the logical id — so the cluster, the single-node
@@ -203,18 +203,18 @@ pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0CEA_5ADE,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
     let mut queries = data.queries;
     let mut titles = data.titles;
     let mut next_id = queries.iter().map(|(id, _)| *id).max().unwrap_or(0) + 1;
 
-    // class-B any-of: pure any-of of two RARE players (no required term, so the
-    // any-of cover path fires). "rareplayerN" appears only here -> non-hot.
+    // class-B any-of: pure any-of of two RARE entities (no required term, so the
+    // any-of cover path fires). "rareentityN" appears only here -> non-hot.
     for i in 0..150u64 {
-        queries.push((next_id, format!("(rareplayer{i},rareplayer{})", i + 1000)));
+        queries.push((next_id, format!("(rareentity{i},rareentity{})", i + 1000)));
         next_id += 1;
     }
     // class-B arity-2: all-hot required (year + brand), no rare anchor -> the
@@ -225,23 +225,23 @@ pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
         queries.push((next_id, format!("{year} {brand}")));
         next_id += 1;
     }
-    // a few class-A queries anchored on the injected rare players, so multi-entity
+    // a few class-A queries anchored on the injected rare entities, so multi-entity
     // titles below actually match something across shards.
     for i in 0..150u64 {
         let year = 1986 + (i % 39);
         let brand = BRANDS[(i % BRANDS.len() as u64) as usize];
-        queries.push((next_id, format!("{year} {brand} rareplayer{i}")));
+        queries.push((next_id, format!("{year} {brand} rareentity{i}")));
         next_id += 1;
     }
 
-    // multi-entity titles: two rare players (both in the dict via the any-of
+    // multi-entity titles: two rare entities (both in the dict via the any-of
     // queries) -> fan out to two selective shards plus the replicated lane.
     for i in 0..200u64 {
         let year = 1986 + (i % 39);
         let brand = BRANDS[(i % BRANDS.len() as u64) as usize];
         let a = i % 150;
         titles.push(format!(
-            "{year} {brand} rareplayer{a} rareplayer{} psa 10",
+            "{year} {brand} rareentity{a} rareentity{} pro",
             a + 1000
         ));
     }

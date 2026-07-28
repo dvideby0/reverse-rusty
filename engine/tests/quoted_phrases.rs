@@ -81,17 +81,17 @@ fn quoted_semantics_agree_with_the_independent_front_end() {
 fn aliases_form_alternate_paths_without_weakening_adjacency() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
     engine.build_from_queries(&[
-        (1, "\"new york\" knicks".to_string()),
+        (1, "\"new york\" office".to_string()),
         (2, "foo -\"new york\"".to_string()),
     ]);
     engine
         .import_alias_synonyms("ny => new york\nnyc => new york city")
         .expect("activate aliases");
 
-    assert_eq!(matched(&engine, "ny knicks"), vec![1]);
-    assert_eq!(matched(&engine, "new york knicks"), vec![1]);
+    assert_eq!(matched(&engine, "ny office"), vec![1]);
+    assert_eq!(matched(&engine, "new york office"), vec![1]);
     assert!(
-        matched(&engine, "new vintage york knicks").is_empty(),
+        matched(&engine, "new vintage york office").is_empty(),
         "alias alternatives must not turn the phrase back into conjunction"
     );
     assert!(
@@ -404,24 +404,24 @@ fn ordinary_overlapping_phrase_entities_remain_quoted_paths() {
 #[test]
 fn quoted_phrase_whitespace_is_normalized_without_aliases() {
     let mut builder = Normalizer::builder();
-    builder.add_phrase(&["upper", "deck"], "term:upper_deck", FeatureKind::Generic);
+    builder.add_phrase(&["north", "star"], "term:north_star", FeatureKind::Generic);
     let queries = vec![
-        (1, "\"upper deck\"".to_string()),
-        (2, "\"upper  deck\"".to_string()),
-        (3, "item -\"upper deck\"".to_string()),
+        (1, "\"north star\"".to_string()),
+        (2, "\"north  star\"".to_string()),
+        (3, "item -\"north star\"".to_string()),
     ];
     let mut engine = Engine::new(builder.build().expect("normalizer"));
     engine.build_from_queries(&queries);
     let reference = RefMatcher::build(
         &queries,
         RefVocab::default_vocab().phrase(
-            "upper deck",
-            "term:upper_deck",
+            "north star",
+            "term:north_star",
             reverse_rusty_ref_matcher::vocab::PhraseMode::Collapse,
         ),
     );
 
-    for title in ["upper deck", "upper  deck"] {
+    for title in ["north star", "north  star"] {
         assert_eq!(matched_with_broad(&engine, title, false), vec![1, 2]);
         assert_eq!(
             reference.matches(title),
@@ -429,7 +429,7 @@ fn quoted_phrase_whitespace_is_normalized_without_aliases() {
             "{title:?}"
         );
     }
-    for title in ["item upper deck", "item upper  deck"] {
+    for title in ["item north star", "item north  star"] {
         assert_eq!(matched(&engine, title), vec![1, 2]);
         assert_eq!(
             reference.matches(title),
@@ -437,8 +437,11 @@ fn quoted_phrase_whitespace_is_normalized_without_aliases() {
             "{title:?}"
         );
     }
-    assert_eq!(matched(&engine, "item card"), vec![3]);
-    assert_eq!(reference.matches("item card"), [3].into_iter().collect());
+    assert_eq!(matched(&engine, "item accessory"), vec![3]);
+    assert_eq!(
+        reference.matches("item accessory"),
+        [3].into_iter().collect()
+    );
 }
 
 #[test]

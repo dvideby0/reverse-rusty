@@ -18,8 +18,8 @@ fn staged_read_write_delete_single_thread() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x57_2E55,
-        num_players: 3_000,
-        num_sets: 1_200,
+        num_entities: 3_000,
+        num_collections: 1_200,
     };
     let data = generate(&cfg);
     let q = &data.queries;
@@ -131,7 +131,7 @@ fn staged_read_write_delete_single_thread() {
     // ── Phase 6: Second wave of inserts + reads ──
     eprintln!("\n  Phase 6: second wave of 1000 inserts + full read sweep");
     for i in 0..1_000u64 {
-        let text = format!("wave2 michael jordan 1994 upper deck variant{i}");
+        let text = format!("wave2 wireless mouse 1994 north star variant{i}");
         eng.insert_live(&text, 5_000_000 + i, 1);
     }
 
@@ -156,7 +156,7 @@ fn staged_read_write_delete_single_thread() {
     for i in 0..1_000u64 {
         live_queries.push((
             5_000_000 + i,
-            format!("wave2 michael jordan 1994 upper deck variant{i}"),
+            format!("wave2 wireless mouse 1994 north star variant{i}"),
         ));
     }
 
@@ -210,37 +210,37 @@ fn update_visibility_across_flush_compact() {
 
     // Insert v1 queries
     let v1_queries: Vec<(u64, String)> = vec![
-        (1, "michael jordan 1986 fleer".into()),
-        (2, "lebron james rookie card".into()),
-        (3, "kobe bryant 1996 topps".into()),
-        (4, "shaquille oneal orlando magic".into()),
-        (5, "tim duncan 1997 bowman".into()),
+        (1, "wireless mouse 1986 vertex".into()),
+        (2, "mechanical keyboard new item".into()),
+        (3, "noise cancelling headphones 1996 acme".into()),
+        (4, "product epsilon home office".into()),
+        (5, "product zeta 1997 summit".into()),
     ];
     eng.build_from_queries(&v1_queries);
     eprintln!("  v1 loaded: {} queries", v1_queries.len());
 
     // Check v1 matches
-    let v1_hit = match_ids(&eng, "michael jordan 1986 fleer basketball card");
+    let v1_hit = match_ids(&eng, "wireless mouse 1986 vertex appliance item");
     eprintln!("  v1 match for MJ: {v1_hit:?}");
     assert!(v1_hit.contains(&1), "v1 MJ query should match");
 
     // Update: delete old, re-insert with new text + higher version
     let _ = eng.delete_by_logical_id(1);
-    eng.insert_live("michael jordan 1986 fleer rookie card", 1, 2);
+    eng.insert_live("wireless mouse 1986 vertex new item", 1, 2);
 
     // Before flush: should still match with updated text
-    let pre_flush = match_ids(&eng, "michael jordan 1986 fleer rookie card psa 10");
+    let pre_flush = match_ids(&eng, "wireless mouse 1986 vertex new item pro");
     eprintln!("  pre-flush updated MJ: {pre_flush:?}");
     assert!(pre_flush.contains(&1), "updated MJ should match pre-flush");
 
-    // Original title (without "rookie card") should NOT match updated query
-    // if the new text requires "rookie" and "card"
-    // (Actually it still will — the updated query adds "rookie card" but the
+    // Original title (without "new item") should NOT match updated query
+    // if the new text requires "new" and "item"
+    // (Actually it still will — the updated query adds "new item" but the
     //  original features are still present. This is correct behavior.)
 
     // Flush
     eng.flush();
-    let post_flush = match_ids(&eng, "michael jordan 1986 fleer rookie card psa 10");
+    let post_flush = match_ids(&eng, "wireless mouse 1986 vertex new item pro");
     eprintln!("  post-flush updated MJ: {post_flush:?}");
     assert!(
         post_flush.contains(&1),
@@ -250,7 +250,11 @@ fn update_visibility_across_flush_compact() {
     // Bulk updates: update all 5 queries, flush, compact
     for (id, _) in &v1_queries {
         let _ = eng.delete_by_logical_id(*id);
-        eng.insert_live(&format!("updated_{id} michael jordan lebron kobe"), *id, 3);
+        eng.insert_live(
+            &format!("updated_{id} wireless mouse entityone entitytwo"),
+            *id,
+            3,
+        );
     }
     eng.flush();
 
@@ -262,7 +266,10 @@ fn update_visibility_across_flush_compact() {
     print_metrics("post-update-compact", &eng.metrics());
 
     // All original IDs should still be findable via the updated text
-    let final_hits = match_ids(&eng, "michael jordan lebron kobe updated_1 updated_2");
+    let final_hits = match_ids(
+        &eng,
+        "wireless mouse entityone entitytwo updated_1 updated_2",
+    );
     eprintln!("  final hits: {final_hits:?}");
 
     events.dump_summary("update-vis");

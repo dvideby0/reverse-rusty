@@ -77,14 +77,14 @@ fn reopen_attaches_segments_with_no_log_or_snapshot() {
 fn checkpoint_after_removing_a_build_time_query_does_not_resurrect_it() {
     // A controlled corpus so we know `Q` (id 7) is a build-time query and a title matches it.
     let queries = vec![
-        (1u64, "1994 topps".to_string()),
-        (7u64, "rareplayer42 1994 topps".to_string()),
-        (8u64, "rareplayer99 1995 fleer".to_string()),
+        (1u64, "1994 acme".to_string()),
+        (7u64, "rareentity42 1994 acme".to_string()),
+        (8u64, "rareentity99 1995 vertex".to_string()),
     ];
-    let title_q = "rareplayer42 1994 topps psa 10";
+    let title_q = "rareentity42 1994 acme pro";
     let survivors = vec![
-        (1u64, "1994 topps".to_string()),
-        (8u64, "rareplayer99 1995 fleer".to_string()),
+        (1u64, "1994 acme".to_string()),
+        (8u64, "rareentity99 1995 vertex".to_string()),
     ];
 
     for &k in &[1usize, 3, 8] {

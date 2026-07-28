@@ -322,13 +322,13 @@ mod tests {
     #[tokio::test]
     async fn import_then_get_reflects_registry_via_published_snapshot() {
         let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
-        eng.build_from_queries(&[(1u64, "fleer autograph".to_string())]);
+        eng.build_from_queries(&[(1u64, "vertex adapter".to_string())]);
         let state = state_with(eng);
 
         let imp = import_aliases(
             State(Arc::clone(&state)),
             Json(ImportAliasesRequest {
-                synonyms: "autograph, autographs\npsa, bgs, sgc".to_string(),
+                synonyms: "adapter, adapters\nsofa, couch".to_string(),
             }),
         )
         .await;
@@ -352,9 +352,9 @@ mod tests {
         let mut queries = Vec::new();
         let mut id = 1u64;
         for i in 0..40 {
-            queries.push((id, format!("zzud ctxp{} ctxb{}", i % 7, i % 5)));
+            queries.push((id, format!("zzns ctxp{} ctxb{}", i % 7, i % 5)));
             id += 1;
-            queries.push((id, format!("zzupperdeck ctxp{} ctxb{}", i % 7, i % 5)));
+            queries.push((id, format!("zznorthstar ctxp{} ctxb{}", i % 7, i % 5)));
             id += 1;
         }
         for i in 0..200 {
@@ -368,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn discover_returns_proposals_and_records_nothing() {
         let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
-        eng.build_from_queries(&[(1u64, "fleer autograph".to_string())]);
+        eng.build_from_queries(&[(1u64, "vertex adapter".to_string())]);
         let state = state_with(eng);
 
         let resp = discover_aliases(
@@ -388,7 +388,7 @@ mod tests {
                 .iter()
                 .map(|v| v.as_str().unwrap())
                 .collect();
-            forms.contains(&"zzud") && forms.contains(&"zzupperdeck")
+            forms.contains(&"zzns") && forms.contains(&"zznorthstar")
         });
         assert!(
             planted_found,

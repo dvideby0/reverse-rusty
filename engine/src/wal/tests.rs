@@ -15,7 +15,7 @@ fn append_surfaces_write_errors_instead_of_swallowing() {
     let path = scratch_path("append_err");
     let mut wal = Wal::open(&path, false).unwrap();
     // A healthy append succeeds.
-    assert!(wal.append_insert(1, 1, "michael jordan", &[]).is_ok());
+    assert!(wal.append_insert(1, 1, "wireless mouse", &[]).is_ok());
     // Once the file can no longer be written, the error is returned (not swallowed).
     wal.break_writes_for_test();
     assert!(wal.append_insert(2, 1, "scottie pippen", &[]).is_err());
@@ -28,7 +28,7 @@ fn fsync_each_write_round_trips_through_recovery() {
     let path = scratch_path("fsync_roundtrip");
     {
         let mut wal = Wal::open(&path, true).unwrap();
-        wal.append_insert(7, 2, "wander franco", &[]).unwrap();
+        wal.append_insert(7, 2, "product omega", &[]).unwrap();
         wal.append_tombstone(0, 3).unwrap();
     }
     let recovered = Wal::recover(&path).unwrap();
@@ -43,7 +43,7 @@ fn fsync_each_write_round_trips_through_recovery() {
         } => {
             assert_eq!(*logical, 7);
             assert_eq!(*version, 2);
-            assert_eq!(text, "wander franco");
+            assert_eq!(text, "product omega");
         }
         other => panic!("expected Insert, got {other:?}"),
     }
@@ -59,9 +59,9 @@ fn insert_tags_round_trip_through_recovery_and_untagged_reads_empty() {
         wal.append_insert(
             7,
             1,
-            "1994 upper deck",
+            "1994 north star",
             &[
-                ("category".to_string(), "cards".to_string()),
+                ("category".to_string(), "items".to_string()),
                 ("status".to_string(), "active".to_string()),
             ],
         )
@@ -76,7 +76,7 @@ fn insert_tags_round_trip_through_recovery_and_untagged_reads_empty() {
             assert_eq!(
                 tags,
                 &vec![
-                    ("category".to_string(), "cards".to_string()),
+                    ("category".to_string(), "items".to_string()),
                     ("status".to_string(), "active".to_string()),
                 ]
             );
@@ -101,7 +101,7 @@ fn typed_priority_extension_round_trips_without_new_opcode() {
         wal.append_insert_ranked(
             7,
             3,
-            "topps chrome",
+            "acme chrome",
             &[("priority".to_string(), "-55".to_string())],
             -55,
         )
@@ -109,7 +109,7 @@ fn typed_priority_extension_round_trips_without_new_opcode() {
         wal.append_upsert_ranked(
             7,
             4,
-            "topps chrome refractor",
+            "acme chrome premium",
             &[("priority".to_string(), "99".to_string())],
             99,
         )
@@ -132,12 +132,12 @@ fn source_generation_extension_round_trips_with_optional_priority() {
     let path = scratch_path("source_generation_roundtrip");
     {
         let mut wal = Wal::open(&path, true).unwrap();
-        wal.append_insert_with_source_generation(7, 3, "topps chrome", &[], None, 41, false)
+        wal.append_insert_with_source_generation(7, 3, "acme chrome", &[], None, 41, false)
             .unwrap();
         wal.append_upsert_with_source_generation(
             7,
             4,
-            "topps chrome refractor",
+            "acme chrome premium",
             &[("priority".to_string(), "-55".to_string())],
             Some(-55),
             42,
@@ -181,7 +181,7 @@ fn delete_by_logical_round_trips_through_recovery() {
     let path = scratch_path("delete_logical_roundtrip");
     {
         let mut wal = Wal::open(&path, true).unwrap();
-        wal.append_insert(7, 1, "wander franco", &[]).unwrap();
+        wal.append_insert(7, 1, "product omega", &[]).unwrap();
         wal.append_delete_logical(7).unwrap();
         // Old positional frames still coexist in the same file.
         wal.append_tombstone(u32::MAX, 3).unwrap();
@@ -210,12 +210,12 @@ fn upsert_round_trips_with_tags_and_coexists_with_insert() {
     let path = scratch_path("upsert_roundtrip");
     {
         let mut wal = Wal::open(&path, true).unwrap();
-        wal.append_insert(7, 1, "wander franco", &[]).unwrap();
+        wal.append_insert(7, 1, "product omega", &[]).unwrap();
         wal.append_upsert(
             7,
             2,
-            "wander franco psa 10",
-            &[("category".to_string(), "cards".to_string())],
+            "product omega pro",
+            &[("category".to_string(), "items".to_string())],
         )
         .unwrap();
     }
@@ -232,8 +232,8 @@ fn upsert_round_trips_with_tags_and_coexists_with_insert() {
         } => {
             assert_eq!(*logical, 7);
             assert_eq!(*version, 2);
-            assert_eq!(text, "wander franco psa 10");
-            assert_eq!(tags, &vec![("category".to_string(), "cards".to_string())]);
+            assert_eq!(text, "product omega pro");
+            assert_eq!(tags, &vec![("category".to_string(), "items".to_string())]);
         }
         other => panic!("expected Upsert, got {other:?}"),
     }
@@ -245,7 +245,7 @@ fn last_seq_is_monotonic_across_reset() {
     let path = scratch_path("last_seq_monotonic");
     let mut wal = Wal::open(&path, false).unwrap();
     assert_eq!(wal.last_seq(), 0, "no entries yet");
-    wal.append_insert(1, 1, "michael jordan", &[]).unwrap();
+    wal.append_insert(1, 1, "wireless mouse", &[]).unwrap();
     wal.append_delete_logical(1).unwrap();
     assert_eq!(wal.last_seq(), 2);
     wal.reset().unwrap();
@@ -271,7 +271,7 @@ fn bench_fsync_cost() {
         let mut wal = Wal::open(&path, fsync).unwrap();
         let t = Instant::now();
         for i in 0..N {
-            wal.append_insert(i, 1, "1994 upper deck michael jordan sp psa 10", &[])
+            wal.append_insert(i, 1, "1994 north star wireless mouse limited pro", &[])
                 .unwrap();
         }
         let per = t.elapsed().as_secs_f64() / N as f64;

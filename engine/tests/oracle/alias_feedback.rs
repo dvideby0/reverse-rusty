@@ -30,17 +30,17 @@ fn corpus() -> Vec<(u64, String)> {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0FEE_D103,
-        num_players: 900,
-        num_sets: 400,
+        num_entities: 900,
+        num_collections: 400,
     };
     let data = generate(&cfg);
     let mut queries = data.queries;
     let mut id = queries.iter().map(|(i, _)| *i).max().unwrap_or(0) + 1;
-    // The substitute family (discovery input): zzud / zzupperdeck over shared contexts.
+    // The substitute family (discovery input): zzns / zznorthstar over shared contexts.
     for i in 0..40u64 {
-        queries.push((id, format!("zzud ctxp{} ctxb{}", i % 7, i % 5)));
+        queries.push((id, format!("zzns ctxp{} ctxb{}", i % 7, i % 5)));
         id += 1;
-        queries.push((id, format!("zzupperdeck ctxp{} ctxb{}", i % 7, i % 5)));
+        queries.push((id, format!("zznorthstar ctxp{} ctxb{}", i % 7, i % 5)));
         id += 1;
     }
     // Context-only demand queries — the behavioral evidence BOTH forms' titles satisfy
@@ -58,8 +58,8 @@ fn corpus() -> Vec<(u64, String)> {
 fn capture(eng: &mut Engine, fb: &mut AliasFeedback, n: usize) {
     let mut s = MatchScratch::new();
     for i in 0..n {
-        for form in ["zzud", "zzupperdeck"] {
-            let title = format!("{form} ctxp{} ctxb{} psa 10", i % 7, i % 5);
+        for form in ["zzns", "zznorthstar"] {
+            let title = format!("{form} ctxp{} ctxb{} pro", i % 7, i % 5);
             let ids = matched(eng, &mut s, &title);
             let toks = reverse_rusty::corpus::tokenize(&title);
             fb.observe(&toks, &ids);
@@ -71,15 +71,15 @@ fn capture(eng: &mut Engine, fb: &mut AliasFeedback, n: usize) {
 fn genuine_pair_validates_and_activation_is_fn_safe() {
     let mut queries = corpus();
     let probe_q = 9_900_001u64;
-    queries.push((probe_q, "zzud ctxp0".into()));
-    let cross_title = "zzupperdeck ctxp0 ctxb0 psa 10";
+    queries.push((probe_q, "zzns ctxp0".into()));
+    let cross_title = "zznorthstar ctxp0 ctxb0 pro";
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
     eng.discover_aliases_and_record(&DistributionalConfig::default())
         .expect("discover + record");
     let forms = {
-        let mut f = vec!["zzud".to_string(), "zzupperdeck".to_string()];
+        let mut f = vec!["zzns".to_string(), "zznorthstar".to_string()];
         f.sort();
         f
     };
@@ -118,8 +118,8 @@ fn genuine_pair_validates_and_activation_is_fn_safe() {
     let all_titles: Vec<String> = (0..40)
         .flat_map(|i| {
             [
-                format!("zzud ctxp{} ctxb{} psa 10", i % 7, i % 5),
-                format!("zzupperdeck ctxp{} ctxb{} psa 10", i % 7, i % 5),
+                format!("zzns ctxp{} ctxb{} pro", i % 7, i % 5),
+                format!("zznorthstar ctxp{} ctxb{} pro", i % 7, i % 5),
             ]
         })
         .collect();
@@ -158,7 +158,7 @@ fn genuine_pair_validates_and_activation_is_fn_safe() {
     assert_eq!(act.activated, 1);
     assert!(
         matched(&mut eng, &mut s, cross_title).contains(&probe_q),
-        "after activation the zzud query matches the zzupperdeck title"
+        "after activation the zzns query matches the zznorthstar title"
     );
     for (t, want) in all_titles.iter().zip(&before) {
         let got: HashSet<u64> = matched(&mut eng, &mut s, t).into_iter().collect();
@@ -171,7 +171,7 @@ fn disjoint_population_candidate_does_not_validate() {
     // A tracked candidate whose two forms satisfy DISJOINT query demand: form A titles match
     // only A-context queries, form B titles only B-context queries. Overlap ≈ 0 ⇒ never
     // validated — the behavioral signal rejects a pair that merely LOOKED distributional.
-    // (An identical-demand co-hyponym like psa/bgs is kept out earlier: the ADR-102
+    // (An identical-demand co-hyponym like alpha/beta is kept out earlier: the ADR-102
     // co-occurrence penalty stops it from ever becoming a candidate — the pipeline composes.)
     let mut queries: Vec<(u64, String)> = Vec::new();
     let mut id = 1u64;

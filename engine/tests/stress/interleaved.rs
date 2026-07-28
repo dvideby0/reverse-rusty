@@ -24,91 +24,100 @@ fn match_while_inserting_varied_queries() {
     );
     eng.set_observer(events.observer());
 
-    // Diverse query families — different sports, categories, structures
+    // Diverse query families — different products, categories, structures
     let query_families: Vec<Vec<(u64, &str)>> = vec![
-        // Basketball cards — simple required
+        // Appliance items — simple required
         vec![
-            (100, "michael jordan 1986 fleer"),
-            (101, "michael jordan 1997 upper deck"),
-            (102, "michael jordan 1993 topps"),
-            (103, "lebron james 2003 topps chrome"),
-            (104, "lebron james rookie card"),
-            (105, "kobe bryant 1996 topps"),
-            (106, "kobe bryant 1996 bowman"),
-            (107, "shaquille oneal 1992 fleer"),
-            (108, "tim duncan 1997 bowman"),
-            (109, "allen iverson 1996 topps"),
+            (100, "wireless mouse 1986 vertex"),
+            (101, "wireless mouse 1997 north star"),
+            (102, "wireless mouse 1993 acme"),
+            (103, "mechanical keyboard 2003 acme chrome"),
+            (104, "mechanical keyboard new item"),
+            (105, "noise cancelling headphones 1996 acme"),
+            (106, "noise cancelling headphones 1996 summit"),
+            (107, "product epsilon 1992 vertex"),
+            (108, "product zeta 1997 summit"),
+            (109, "product eta 1996 acme"),
         ],
         // With any-of groups
         vec![
-            (200, "michael jordan (fleer,topps,bowman) 1986"),
-            (201, "lebron james (topps,upper deck) rookie"),
-            (202, "kobe bryant (topps,bowman,fleer) 1996"),
-            (203, "(jordan,james,bryant) rookie card"),
-            (204, "(psa,bgs,sgc) michael jordan"),
+            (200, "wireless mouse (vertex,acme,summit) 1986"),
+            (201, "mechanical keyboard (acme,north star) new"),
+            (202, "noise cancelling headphones (acme,summit,vertex) 1996"),
+            (203, "(product gamma,entityseven,product theta) new item"),
+            (204, "(alpha,beta,gamma) wireless mouse"),
         ],
         // With forbidden terms
         vec![
-            (300, "michael jordan card -(reprint,auto,lot)"),
-            (301, "lebron james rookie -(fake,auto)"),
-            (302, "kobe bryant topps -(reprint,lot,break)"),
-            (303, "jordan 1986 fleer -(psa,bgs,sgc)"),
-            (304, "basketball card rookie -(auto,signed,used)"),
+            (300, "wireless mouse item -(replica,manual,lot)"),
+            (301, "mechanical keyboard new -(fake,manual)"),
+            (302, "noise cancelling headphones acme -(replica,lot,break)"),
+            (303, "product gamma 1986 vertex -(alpha,beta,gamma)"),
+            (304, "appliance item new -(manual,signed,used)"),
         ],
         // Mixed complex
         vec![
             (
                 400,
-                "michael jordan (1986,1993,1997) (fleer,topps) -(reprint)",
+                "wireless mouse (1986,1993,1997) (vertex,acme) -(replica)",
             ),
             (
                 401,
-                "lebron james (2003,2004) (topps,upper deck) -(auto,lot)",
+                "mechanical keyboard (2003,2004) (acme,north star) -(manual,lot)",
             ),
-            (402, "(jordan,james) (psa,bgs) -(fake,reprint)"),
-            (403, "kobe bryant (topps,bowman) card -(auto,lot,break)"),
-            (404, "(jordan,lebron,kobe) (fleer,topps,bowman) rookie"),
+            (
+                402,
+                "(product gamma,entityseven) (alpha,beta) -(fake,replica)",
+            ),
+            (
+                403,
+                "noise cancelling headphones (acme,summit) item -(manual,lot,break)",
+            ),
+            (
+                404,
+                "(product gamma,entityone,entitytwo) (vertex,acme,summit) new",
+            ),
         ],
         // Year-heavy / brand-heavy
         vec![
-            (500, "1986 fleer basketball"),
-            (501, "1997 upper deck basketball card"),
-            (502, "topps chrome 2003 basketball"),
-            (503, "bowman 1997 rookie card"),
-            (504, "upper deck 1994 basketball"),
+            (500, "1986 vertex appliance"),
+            (501, "1997 north star appliance item"),
+            (502, "acme chrome 2003 appliance"),
+            (503, "summit 1997 new item"),
+            (504, "north star 1994 appliance"),
         ],
         // Single-word broad queries
         vec![
-            (600, "jordan"),
-            (601, "lebron"),
-            (602, "rookie"),
-            (603, "basketball"),
-            (604, "fleer"),
+            (600, "product gamma"),
+            (601, "entityone"),
+            (602, "new"),
+            (603, "appliance"),
+            (604, "vertex"),
         ],
     ];
 
     // Varied titles to search against
     let titles = vec![
-        "michael jordan 1986 fleer basketball card psa 10",
-        "lebron james 2003 topps chrome rookie card",
-        "kobe bryant 1996 topps rookie card bgs 9.5",
-        "michael jordan 1997 upper deck game jersey",
-        "1986 fleer michael jordan rookie card #57",
-        "lebron james 2004 upper deck rookie card auto",
-        "kobe bryant 1996 bowman best card psa 9",
-        "tim duncan 1997 bowman rookie card",
-        "allen iverson 1996 topps draft pick",
-        "shaquille oneal 1992 fleer rookie card",
-        "michael jordan 1993 topps finest card lot",
-        "jordan james bryant triple card topps 2008",
-        "1997 upper deck basketball complete set",
-        "basketball card reprint auto signed lot",
-        "michael jordan fleer reprint fake 1986",
-        "lebron james topps chrome 2003 psa 10 gem mt",
-        "kobe bryant topps bowman 1996 rookie draft pick",
-        "vintage basketball card 1986 fleer set break",
-        "michael jordan game used jersey auto signed",
-        "rookie card lot basketball topps bowman 1994",
+        "wireless mouse 1986 vertex appliance item pro",
+        "mechanical keyboard 2003 acme chrome new item",
+        "noise cancelling headphones 1996 acme new item basic",
+        "wireless mouse 1997 north star game accessory",
+        "1986 vertex wireless mouse new item #57",
+        "mechanical keyboard 2004 north star new item auto",
+        "noise cancelling headphones 1996 summit best item alpha 9",
+        "product zeta 1997 summit new item",
+        "product eta 1996 acme prototype pick",
+        "product epsilon 1992 vertex new item",
+        "wireless mouse 1993 acme finest item lot",
+        "product gamma entityseven product theta triple item acme 2008",
+        "1997 north star appliance complete set",
+        "appliance item replica manual signed lot",
+        "wireless mouse vertex replica fake 1986",
+        "mechanical keyboard acme chrome 2003 pro deluxe",
+        "noise cancelling headphones acme summit 1996 new prototype pick",
+        "vintage appliance item 1986 vertex set break",
+        "wireless mouse used accessory manual signed",
+        "new item lot appliance acme summit 1994",
     ];
 
     let mut match_count_history: Vec<(usize, usize)> = Vec::new(); // (queries_in, total_matches)
@@ -266,8 +275,8 @@ fn mixed_synthetic_and_handcrafted_parallel() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0xCA_FE_D0_0D,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
 
@@ -289,28 +298,31 @@ fn mixed_synthetic_and_handcrafted_parallel() {
 
     // Phase 2: Add hand-crafted queries that test specific DSL features
     let handcrafted: Vec<(u64, String)> = vec![
-        (9_000_001, "michael jordan 1986 fleer".into()),
+        (9_000_001, "wireless mouse 1986 vertex".into()),
         (
             9_000_002,
-            "michael jordan (1986,1993,1997) (fleer,topps)".into(),
+            "wireless mouse (1986,1993,1997) (vertex,acme)".into(),
         ),
         (
             9_000_003,
-            "michael jordan card -(reprint,auto,lot,break)".into(),
+            "wireless mouse item -(replica,manual,lot,break)".into(),
         ),
         (
             9_000_004,
-            "(jordan,james,kobe) (psa,bgs) -(fake,reprint)".into(),
+            "(product gamma,entityseven,entitytwo) (alpha,beta) -(fake,replica)".into(),
         ),
-        (9_000_005, "lebron james 2003 topps chrome rookie".into()),
-        (9_000_006, "kobe bryant (topps,bowman) 1996 -(lot)".into()),
+        (9_000_005, "mechanical keyboard 2003 acme chrome new".into()),
+        (
+            9_000_006,
+            "noise cancelling headphones (acme,summit) 1996 -(lot)".into(),
+        ),
         (
             9_000_007,
-            "(jordan,lebron) (fleer,topps,upper deck) (1986,1997,2003)".into(),
+            "(product gamma,entityone) (vertex,acme,north star) (1986,1997,2003)".into(),
         ),
         (
             9_000_008,
-            "basketball card (psa,bgs,sgc) -(auto,signed,used)".into(),
+            "appliance item (alpha,beta,gamma) -(manual,signed,used)".into(),
         ),
     ];
 
@@ -330,16 +342,16 @@ fn mixed_synthetic_and_handcrafted_parallel() {
 
     // Phase 3: Search with titles designed to hit the handcrafted queries
     let targeted_titles = vec![
-        "michael jordan 1986 fleer basketball card #57 psa 10",
-        "michael jordan 1993 topps finest refractor card",
-        "michael jordan 1997 upper deck card game jersey",
-        "michael jordan 1986 fleer card reprint fake",
-        "lebron james 2003 topps chrome rookie card psa 10",
-        "kobe bryant 1996 topps draft pick rookie card lot",
-        "kobe bryant 1996 bowman basketball card psa 9",
-        "jordan james triple card topps 1997 psa 10",
-        "basketball card psa 10 gem mint vintage",
-        "basketball card auto signed used game worn",
+        "wireless mouse 1986 vertex appliance item #57 pro",
+        "wireless mouse 1993 acme finest premium item",
+        "wireless mouse 1997 north star item game accessory",
+        "wireless mouse 1986 vertex item replica fake",
+        "mechanical keyboard 2003 acme chrome new item pro",
+        "noise cancelling headphones 1996 acme prototype pick new item lot",
+        "noise cancelling headphones 1996 summit appliance item alpha 9",
+        "product gamma entityseven triple item acme 1997 pro",
+        "appliance item pro deluxe premium vintage",
+        "appliance item manual signed used preowned",
     ];
 
     eprintln!("  Phase 3: targeted searches");

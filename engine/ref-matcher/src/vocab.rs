@@ -21,14 +21,15 @@ pub enum PhraseMode {
 /// A multi-word phrase: its cleaned token sequence -> a canonical entity feature.
 #[derive(Clone, Debug)]
 pub struct RefPhrase {
-    /// The cleaned tokens the phrase matches (e.g. `["upper","deck"]`).
+    /// The cleaned tokens the phrase matches (e.g. `["north","star"]`).
     pub tokens: Vec<String>,
-    /// The canonical entity feature emitted (e.g. `term:upper_deck`), used verbatim.
+    /// The canonical entity feature emitted (e.g. `term:north_star`), used verbatim.
     pub feature: String,
     pub mode: PhraseMode,
 }
 
-/// A single-token synonym: `token` -> a canonical feature (e.g. `rc` -> `term:rookie`).
+/// A single-token synonym: `token` -> a canonical feature
+/// (e.g. `refurb` -> `term:refurbished`).
 #[derive(Clone, Debug)]
 pub struct RefSynonym {
     pub token: String,

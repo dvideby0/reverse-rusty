@@ -14,7 +14,7 @@ use crate::exact::TagPredicate;
 use crate::segment::{IngestReport, MatchStats, PlacedQuery};
 
 fn vocab() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {

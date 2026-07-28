@@ -29,12 +29,12 @@ fn append_then_replay_round_trips() {
     let path = scratch_path("roundtrip");
     {
         let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
-        assert_eq!(log.append(&add(1, "1994 upper deck")).unwrap(), LogPos(1));
+        assert_eq!(log.append(&add(1, "1994 north star")).unwrap(), LogPos(1));
         assert_eq!(
             log.append(&ClusterMutation::Remove { logical: 1 }).unwrap(),
             LogPos(2)
         );
-        assert_eq!(log.append(&add(2, "topps chrome")).unwrap(), LogPos(3));
+        assert_eq!(log.append(&add(2, "acme chrome")).unwrap(), LogPos(3));
         assert_eq!(log.last_pos().unwrap(), LogPos(3));
     }
     // Reopen and replay from the start.
@@ -42,7 +42,7 @@ fn append_then_replay_round_trips() {
     let replay = log.replay(LogPos(0)).unwrap();
     assert_eq!(replay.skipped_bytes, 0);
     assert_eq!(replay.entries.len(), 3);
-    assert_eq!(replay.entries[0], (LogPos(1), add(1, "1994 upper deck")));
+    assert_eq!(replay.entries[0], (LogPos(1), add(1, "1994 north star")));
     assert_eq!(
         replay.entries[1],
         (LogPos(2), ClusterMutation::Remove { logical: 1 })
@@ -58,14 +58,14 @@ fn upsert_frame_round_trips_with_and_without_tags() {
     let tagged = ClusterMutation::Upsert {
         logical: 7,
         version: 2,
-        dsl: "psa 10 charizard".to_string(),
-        tags: vec![("category".into(), "cards".into())],
+        dsl: "pro product delta".to_string(),
+        tags: vec![("category".into(), "items".into())],
         placement: crate::ownership::QueryPlacement::standalone(),
     };
     let untagged = ClusterMutation::Upsert {
         logical: 8,
         version: 1,
-        dsl: "topps chrome".to_string(),
+        dsl: "acme chrome".to_string(),
         tags: Vec::new(),
         placement: crate::ownership::QueryPlacement::standalone(),
     };
@@ -97,8 +97,8 @@ fn v4_round_trips_ownership_and_v3_is_refused() {
     let mutation = ClusterMutation::Add {
         logical: 44,
         version: 5,
-        dsl: "1994 upper deck".into(),
-        tags: vec![("category".into(), "cards".into())],
+        dsl: "1994 north star".into(),
+        tags: vec![("category".into(), "items".into())],
         placement,
     };
     {

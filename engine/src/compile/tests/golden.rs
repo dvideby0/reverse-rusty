@@ -412,8 +412,8 @@ fn would_be_hot_flags_exactly_the_rank_cliff_shapes() {
     assert!(!p.would_be_hot);
 
     // build_signatures carries the flag through unchanged.
-    let sp = build_signatures(&ex(vec![fat], vec![]), &dict, 0);
-    assert!(sp.would_be_hot);
+    let limited = build_signatures(&ex(vec![fat], vec![]), &dict, 0);
+    assert!(limited.would_be_hot);
 }
 
 #[test]

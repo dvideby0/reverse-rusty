@@ -13,7 +13,7 @@ use std::collections::HashSet;
 fn broad_lane_queries_only_in_broad_index() {
     // Craft queries that are clearly broad (all required features are hot)
     // and queries that are clearly selective.
-    let norm = Normalizer::default_vocab().expect("built-in vocab");
+    let norm = Normalizer::default_vocab().expect("default vocabulary");
     let mut eng = Engine::new(norm);
 
     // Build a corpus that establishes frequency. We need many queries so the
@@ -94,12 +94,12 @@ fn match_stats_separate_main_and_broad_candidates() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0B20_AD57,
-        num_players: 2_000,
-        num_sets: 800,
+        num_entities: 2_000,
+        num_collections: 800,
     };
     let data = generate(&cfg);
 
-    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
     eng.build_from_queries(&data.queries);
 
     let classes = eng.class_counts();
@@ -162,8 +162,8 @@ fn broad_postings_scanned_parity_memory_vs_mmap() {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x0B20_AD58,
-        num_players: 1_000,
-        num_sets: 400,
+        num_entities: 1_000,
+        num_collections: 400,
     };
     let data = generate(&cfg);
 
@@ -174,7 +174,7 @@ fn broad_postings_scanned_parity_memory_vs_mmap() {
     // `tests/oracle/dedup.rs`). This test pins the ADR-101 under-count bug class,
     // which needs the two backings structurally comparable.
     let mut mem = Engine::with_config(
-        Normalizer::default_vocab().expect("built-in vocab"),
+        Normalizer::default_vocab().expect("default vocabulary"),
         EngineConfig {
             dedup_bodies: false,
             ..EngineConfig::default()
@@ -192,7 +192,7 @@ fn broad_postings_scanned_parity_memory_vs_mmap() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     let mut mmap_eng = Engine::with_config(
-        Normalizer::default_vocab().expect("built-in vocab"),
+        Normalizer::default_vocab().expect("default vocabulary"),
         EngineConfig {
             data_dir: Some(dir.clone()),
             dedup_bodies: false,

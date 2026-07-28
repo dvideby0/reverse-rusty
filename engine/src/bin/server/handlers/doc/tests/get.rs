@@ -9,7 +9,7 @@ async fn get_doc_is_es_shaped_filterable_and_head_aware() {
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::json!({
-                "query": "topps chrome",
+                "query": "acme chrome",
                 "version": 42,
                 "tags": {
                     "tenant": "acme",
@@ -34,7 +34,7 @@ async fn get_doc_is_es_shaped_filterable_and_head_aware() {
     assert_eq!(body["_id"], 7);
     assert_eq!(body["_version"], 42);
     assert_eq!(body["found"], true);
-    assert_eq!(body["_source"]["query"], "topps chrome");
+    assert_eq!(body["_source"]["query"], "acme chrome");
     assert_eq!(body["_source"]["tags"]["tenant"], "acme");
     assert_eq!(body["_source"]["tags"]["active"], "true");
     assert_eq!(body["_source"]["tags"]["é"], "accent");
@@ -76,7 +76,7 @@ async fn get_doc_is_es_shaped_filterable_and_head_aware() {
     let (status, bytes) = route_doc(&state, excluded).await;
     assert_eq!(status, StatusCode::OK);
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("excluded json");
-    assert_eq!(body["_source"]["query"], "topps chrome");
+    assert_eq!(body["_source"]["query"], "acme chrome");
     assert!(body["_source"]["tags"].get("colors").is_none());
     assert_eq!(body["_source"]["tags"]["tenant"], "acme");
 
@@ -144,9 +144,7 @@ async fn get_doc_does_not_report_a_live_row_as_missing_when_its_source_is_unavai
     {
         let mut engine =
             Engine::with_config(Normalizer::default_vocab().expect("vocab"), config.clone());
-        engine
-            .try_insert_live("topps chrome", 7, 1)
-            .expect("insert");
+        engine.try_insert_live("acme chrome", 7, 1).expect("insert");
         engine.flush();
     }
     let source_name = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin"))

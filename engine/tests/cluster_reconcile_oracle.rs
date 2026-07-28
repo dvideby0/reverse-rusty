@@ -15,7 +15,7 @@ use reverse_rusty::gen::{generate, GenConfig};
 use reverse_rusty::normalize::Normalizer;
 
 fn vocab() -> Normalizer {
-    Normalizer::default_vocab().expect("built-in vocab")
+    Normalizer::default_vocab().expect("default vocabulary")
 }
 
 /// A small in-process cluster + the title set to probe (the autoscale oracle's setup, so the corpus +
@@ -28,8 +28,8 @@ fn build() -> (ClusterEngine, Vec<String>) {
         hot_skew: 2.0,
         family_size: 8,
         seed: 0x5F0C_A11E,
-        num_players: 300,
-        num_sets: 150,
+        num_entities: 300,
+        num_collections: 150,
     };
     let data = generate(&cfg);
     let ccfg = ClusterConfig {
