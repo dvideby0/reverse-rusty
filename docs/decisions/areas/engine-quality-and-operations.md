@@ -26,6 +26,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [147](../adr-147-put-vocab-api-contract.md) | Vocabulary replacement REST API contract | Makes full vocabulary replacement strict, bounded, off-runtime, mode-consistent, and durably fail-loud. | Accepted |
 | [148](../adr-148-vocab-learn-api-contract.md) | Vocabulary learning REST API contract | Makes review-first learning strict, bounded, mode-consistent, and explicit about its native scope. | Accepted |
 | [149](../adr-149-vocab-learn-apply-api-contract.md) | Vocabulary learn-and-apply REST API contract | Makes stored-corpus learning strict, off-runtime, mode-consistent, and durably fail-loud. | Accepted |
+| [150](../adr-150-alias-registry-read-api-contract.md) | Alias-registry read REST API contract | Makes governed-alias review strict, pageable, observable, and bounded off async workers. | Accepted |
 
 ---
 

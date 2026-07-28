@@ -119,6 +119,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   standalone/coordinator response parity, shared off-runtime rebuild admission, complete standalone
   post-recompile verification, and fail-loud durable acknowledgement
   ([ADR-149](decisions/adr-149-vocab-learn-apply-api-contract.md)).
+- Hardened native `GET`/`HEAD /_vocab/aliases` with strict bounded no-store transport, familiar
+  `from`/`size` review paging, total `count`, whole-registry summaries, shared blocking-work
+  admission, lock-free standalone snapshot capture, and brief off-runtime coordinator locking
+  ([ADR-150](decisions/adr-150-alias-registry-read-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
