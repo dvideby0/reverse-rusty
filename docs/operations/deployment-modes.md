@@ -43,7 +43,7 @@ GET/HEAD /_doc/{id}            (source read/existence check in local modes; remo
 POST /_bulk                    (NDJSON, ES-shaped)
 GET/POST /_search              (single-document percolation; `include_broad` per request)
 POST /_mpercolate              (batch percolation, ES _msearch-shaped responses[])
-GET  /_health   /_stats   /_metrics   (open under default read policy; Prometheus text on /_metrics)
+GET/HEAD /_health; GET /_stats /_metrics (open under default read policy; Prometheus text on /_metrics)
 + restart-reopen               (every acknowledged write survives an operational restart)
 ```
 
@@ -70,8 +70,8 @@ any-of query can land in the quarantined broad lane (class C, served only with
 - **REST**: with `RR_AUTH_TOKEN` set, every mutating/admin endpoint requires the bearer. The explicit
   read-via-POST allowlist is `/_search`, `/v2/_search`, `/_mpercolate`,
   `/_percolate/jobs`, and the `/v2/_pit` lifecycle; `/v2/_mpercolate` currently remains protected.
-  GET/HEAD reads stay open unless `--auth-protect-reads` is enabled (only `GET /_health` always
-  bypasses auth). An
+  GET/HEAD reads stay open unless `--auth-protect-reads` is enabled (only `GET`/`HEAD /_health`
+  always bypass auth). An
   **empty** token refuses startup (never read as "off"); an **absent** token disables the gate —
   the server logs a loud warning if you bind a non-loopback interface that way. Default bind is
   loopback.

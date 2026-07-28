@@ -20,6 +20,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [141](../adr-141-cat-stats-api-contract.md) | CAT stats API contract | Gives native stats a strict bounded table with familiar CAT controls. | Accepted |
 | [142](../adr-142-cat-segments-api-contract.md) | CAT segments API contract | Gives native LSM rows strict familiar CAT controls without fabricating Lucene fields. | Accepted |
 | [143](../adr-143-cat-shards-api-contract.md) | CAT shards API contract | Makes logical shard counts and committed assignments strict, bounded, and fail-loud. | Accepted |
+| [144](../adr-144-health-api-contract.md) | Health REST API contract | Makes native readiness strict, waitable, bounded, and fail-loud. | Accepted |
 
 ---
 

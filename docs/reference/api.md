@@ -22,7 +22,7 @@ Options:
 | `--host` | 127.0.0.1 | IP address to bind. Loopback by default; set `0.0.0.0` to listen on all interfaces (see Security below) |
 | `--port` | 9200 | Port to listen on |
 | `--auth-token` | *(none — auth off)* | Bearer token required on mutating/admin endpoints (ADR-062). Prefer the `RR_AUTH_TOKEN` env var in production — flag values appear in process listings (see Security below) |
-| `--auth-protect-reads` | false | Extend bearer-token auth to read endpoints too (everything except `GET /_health`). Requires an auth token |
+| `--auth-protect-reads` | false | Extend bearer-token auth to read endpoints too (everything except `GET`/`HEAD /_health`). Requires an auth token |
 | `--data-dir` | *(in-memory)* | Persistence directory for segments and WAL |
 | `--load-file` | — | Pre-load queries from a CSV or JSONL file at startup |
 | `--vocab-file` | — | Load vocabulary from a JSON file at startup |
@@ -98,8 +98,8 @@ requires the token. Exhaustive job inspection/streaming stays open through GET; 
 DELETE is protected. The default-deny rule also covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
 `_forcemerge`, `_backup`, `_vocab` writes (including `/_vocab/learn*` and
 `/_vocab/aliases/*`), `_settings` writes, and any future mutating endpoint. `--auth-protect-reads`
-extends the gate to every read surface in the allowlist/GET/HEAD set; only `GET /_health` remains open
-for liveness probes.
+extends the gate to every read surface in the allowlist/GET/HEAD set; only `GET`/`HEAD /_health`
+remains open for liveness probes.
 
 Failures return **401** with the standard error envelope (`"type": "security_exception"`) and an
 RFC 6750 `WWW-Authenticate: Bearer` challenge (`error="invalid_token"` when a wrong token was
@@ -199,7 +199,7 @@ The full method/path matrix is below.
 | `/_stats` | GET | Strict native, no-store JSON metrics snapshot with timing, truthful physical/live counts, familiar shard/WAL projections, and bounded blocking execution (ADR-140) |
 | `/_cat/stats` | GET | Strict native standalone `metric` / `value` stats table with ES/OS-familiar `format`, `v`, `h`, `help`, and `s` controls; shares bounded collection with `/_stats` (ADR-141) |
 | `/_cat/segments` | GET | Strict native per-segment LSM table with ES/OS-familiar `format`, `v`, `h`, `help`, `s`, and `bytes` controls (ADR-142) |
-| `/_health` | GET | Health check (green/yellow/red) |
+| `/_health` | GET/HEAD | Strict native no-store readiness with familiar status waiting and fail-loud green/yellow/red results (ADR-144) |
 | `/_metrics` | GET | Prometheus text exposition format |
 | `/_vocab` | GET | Current vocabulary as JSON |
 | `/_vocab` | PUT | Replace vocabulary |
@@ -345,5 +345,6 @@ Cluster-only endpoints:
 `{shards, replication_factor, total_queries, shard_queries[], class_counts, epoch,
 pending_repairs, has_tagged_queries, durable}`. Counts are the primary physical-row view (including
 tombstones and content-driven multi-position copies), not distinct live logical IDs; a missing
-position fails the whole response (ADR-140). `GET /_health` is green/yellow (repairs queued)/red
-(a shard probe failed).
+position fails the whole response (ADR-140). `GET`/`HEAD /_health` validates every serving
+position plus the committed control topology: green is ready, yellow has queued repairs, and red
+means a required dependency or topology check failed (ADR-144).

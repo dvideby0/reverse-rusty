@@ -47,7 +47,7 @@ use crate::handlers::{
     cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
     cluster_v2_mpercolate_route, cluster_v2_search_route, cluster_validate_and_apply_feedback,
     BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT,
-    PIT_BODY_LIMIT, STATS_BODY_LIMIT,
+    HEALTH_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -340,6 +340,9 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         backup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
         )),
+        health_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
+        )),
         stats_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_STATS,
         )),
@@ -413,7 +416,10 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             "/_cat/segments",
             any(cluster_cat_segments).layer(DefaultBodyLimit::max(CAT_SEGMENTS_BODY_LIMIT)),
         )
-        .route("/_health", get(cluster_health))
+        .route(
+            "/_health",
+            any(cluster_health).layer(DefaultBodyLimit::max(HEALTH_BODY_LIMIT)),
+        )
         .route("/_metrics", get(cluster_metrics))
         .route("/_vocab", get(cluster_get_vocab).put(cluster_put_vocab))
         .route("/_vocab/learn", post(cluster_learn_vocab))

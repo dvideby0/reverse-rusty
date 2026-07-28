@@ -46,6 +46,9 @@ fn state_with(eng: Engine, include_broad: bool) -> Arc<AppState> {
         backup_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
         )),
+        health_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
+        )),
         stats_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_STATS,
         )),

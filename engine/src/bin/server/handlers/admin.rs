@@ -5,6 +5,7 @@
 pub(crate) mod cat_table;
 mod compact;
 mod flush;
+mod health;
 mod segments;
 mod stats;
 
@@ -12,6 +13,10 @@ pub(crate) use compact::{compact_route, force_merge_route};
 pub(crate) use flush::{
     acquire_flush, flush_route, validate_flush_method, validate_flush_request, FlushParams,
     FlushResponse,
+};
+pub(crate) use health::{
+    finish_health_response, health, health_rejection, validate_health_request, wait_delay,
+    HealthParams, HealthStatus, HealthTransport, HEALTH_BODY_LIMIT,
 };
 pub(crate) use segments::{
     cat_segments, finish_cat_segments_response, validate_cat_segments_method,
@@ -32,17 +37,6 @@ use tracing::error;
 use crate::dto::ApiVersion;
 use crate::state::AppState;
 
-// -- GET /_health
-#[derive(Serialize)]
-struct HealthResponse {
-    status: &'static str,
-    total_queries: usize,
-    wal_healthy: bool,
-    persistence_healthy: bool,
-    skipped_segments: usize,
-    stale_segments: usize,
-}
-
 // -- GET /
 #[derive(Serialize)]
 struct RootResponse {
@@ -51,31 +45,6 @@ struct RootResponse {
     cluster_uuid: &'static str,
     version: ApiVersion,
     tagline: &'static str,
-}
-
-/// GET /_health
-pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let snap = state.snapshot.load();
-    let total = snap.num_queries();
-    let wal_healthy = snap.wal_healthy();
-    let persistence_healthy = snap.persistence_healthy();
-    let skipped_segments = snap.skipped_segments();
-    let stale_segments = snap.stale_segment_count();
-    let status = if !wal_healthy || !persistence_healthy {
-        "red"
-    } else if skipped_segments > 0 || stale_segments > 0 {
-        "yellow"
-    } else {
-        "green"
-    };
-    Json(HealthResponse {
-        status,
-        total_queries: total,
-        wal_healthy,
-        persistence_healthy,
-        skipped_segments,
-        stale_segments,
-    })
 }
 
 /// GET / — API root.
@@ -131,3 +100,6 @@ mod flush_tests;
 
 #[cfg(test)]
 mod compact_tests;
+
+#[cfg(test)]
+mod health_tests;

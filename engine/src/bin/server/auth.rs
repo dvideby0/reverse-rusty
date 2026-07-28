@@ -3,9 +3,9 @@
 //! When a token is configured (`--auth-token` / `RR_AUTH_TOKEN`), any request
 //! that can change engine state must present `Authorization: Bearer <token>`.
 //! Read endpoints stay open unless `--auth-protect-reads` extends the gate to
-//! everything except the `/_health` liveness probe. With no token configured
-//! the middleware is a pass-through and the server behaves exactly as before —
-//! the gate is strictly opt-in.
+//! everything except `GET`/`HEAD /_health`. With no token configured the
+//! middleware is a pass-through and the server behaves exactly as before — the
+//! gate is strictly opt-in.
 //!
 //! The protected set is **default-deny**: every non-GET/HEAD request requires
 //! the token unless its path is one of the explicit read-via-mutation-method
@@ -33,7 +33,7 @@ use crate::state::RequestCtx;
 pub(crate) struct AuthConfig {
     /// The shared secret. Visible ASCII only, enforced at resolve time.
     token: Vec<u8>,
-    /// Gate read endpoints too (everything except `/_health`).
+    /// Gate read endpoints too (everything except `GET`/`HEAD /_health`).
     pub(crate) protect_reads: bool,
 }
 
@@ -102,11 +102,12 @@ impl AuthConfig {
 ///
 /// All non-GET `/_vocab*` verbs are protected — including the compute-only
 /// `/_vocab/learn` — because they are operator surface. Under `protect_reads`
-/// only `/_health` stays open: Kubernetes-style liveness probes cannot send
-/// credentials, and the endpoint reveals nothing.
+/// only `GET`/`HEAD /_health` stay open: Kubernetes-style liveness probes
+/// cannot send credentials, and the endpoint exposes only sanitized readiness
+/// data.
 pub(crate) fn requires_auth(method: &Method, path: &str, protect_reads: bool) -> bool {
     if protect_reads {
-        return path != "/_health";
+        return !(path == "/_health" && (*method == Method::GET || *method == Method::HEAD));
     }
     // ES/OpenSearch expose flush through GET as well as POST. It is still a
     // mutating maintenance operation, so the compatibility verb must not ride
@@ -283,7 +284,9 @@ mod tests {
         assert!(requires_auth(&Method::POST, "/_search", true));
         assert!(requires_auth(&Method::GET, "/", true));
         assert!(requires_auth(&Method::GET, "/_metrics", true));
+        assert!(requires_auth(&Method::POST, "/_health", true));
         assert!(!requires_auth(&Method::GET, "/_health", true));
+        assert!(!requires_auth(&Method::HEAD, "/_health", true));
     }
 
     // -- token resolution
@@ -366,6 +369,9 @@ mod tests {
             flush_serial: parking_lot::Mutex::new(()),
             backup_permits: Arc::new(tokio::sync::Semaphore::new(
                 crate::state::MAX_CONCURRENT_BACKUPS,
+            )),
+            health_permits: Arc::new(tokio::sync::Semaphore::new(
+                crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
             )),
             stats_permits: Arc::new(tokio::sync::Semaphore::new(
                 crate::state::MAX_CONCURRENT_STATS,
@@ -556,6 +562,14 @@ mod tests {
         assert_eq!(
             status(&state, req("GET", "/_health", None)).await,
             StatusCode::OK
+        );
+        assert_eq!(
+            status(&state, req("HEAD", "/_health", None)).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(&state, req("POST", "/_health", None)).await,
+            StatusCode::UNAUTHORIZED
         );
     }
 }
