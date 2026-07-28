@@ -1,10 +1,50 @@
 use super::*;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
+use reverse_rusty::vocab::Vocab;
+
+fn alias_fixture_vocab() -> Vocab {
+    serde_json::from_value(serde_json::json!({
+        "aliases": {
+            "entries": [
+                {
+                    "forms": ["adapter", "adapters"],
+                    "provenance": "declared_file",
+                    "kind": "single_token_variant",
+                    "status": "active",
+                    "confidence": 1.0
+                },
+                {
+                    "forms": ["couch", "sofa"],
+                    "provenance": "learned_from_queries",
+                    "kind": "single_token_distinct",
+                    "status": "candidate",
+                    "confidence": 0.5
+                },
+                {
+                    "forms": ["old", "used"],
+                    "provenance": "manual",
+                    "kind": "single_token_distinct",
+                    "status": "rejected",
+                    "confidence": 1.0
+                }
+            ]
+        }
+    }))
+    .expect("fixture vocab")
+}
+
+fn alias_seed() -> Vec<(u64, String)> {
+    vec![
+        (1, "adapter adapters".to_string()),
+        (2, "couch sofa".to_string()),
+        (3, "old used".to_string()),
+    ]
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vocabulary_learning_uses_the_strict_caller_corpus_contract_in_cluster_mode() {
@@ -147,6 +187,174 @@ async fn learn_and_apply_is_mode_consistent_bounded_and_off_runtime() {
             .get(),
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alias_registry_read_has_the_same_paged_contract_in_coordinator_mode() {
+    let state = test_state(&alias_seed());
+    assert_eq!(
+        state
+            .cluster
+            .write()
+            .set_vocab(alias_fixture_vocab())
+            .expect("install alias fixture"),
+        3
+    );
+
+    let uri = "/_vocab/aliases?from=1&size=1";
+    let (status, get_headers, bytes) = send_raw(&state, req_empty("GET", uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        get_headers.get(header::CONTENT_TYPE).expect("content type"),
+        "application/json"
+    );
+    assert_eq!(
+        get_headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    assert_eq!(
+        get_headers
+            .get(header::CONTENT_LENGTH)
+            .expect("content length")
+            .to_str()
+            .expect("ASCII length"),
+        bytes.len().to_string()
+    );
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON aliases");
+    assert_eq!(body["count"], 3, "{body}");
+    assert_eq!(
+        body["aliases"]["entries"],
+        serde_json::json!([{
+            "forms": ["couch", "sofa"],
+            "provenance": "learned_from_queries",
+            "kind": "single_token_distinct",
+            "status": "candidate",
+            "confidence": 0.5
+        }])
+    );
+    assert_eq!(
+        body["summary"],
+        serde_json::json!({"active": 1, "candidate": 1, "rejected": 1})
+    );
+
+    let (status, head_headers, bytes) = send_raw(&state, req_empty("HEAD", uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        head_headers.get(header::CONTENT_LENGTH),
+        get_headers.get(header::CONTENT_LENGTH)
+    );
+    assert!(bytes.is_empty());
+
+    let (status, headers, bytes) =
+        send_raw(&state, req_empty("GET", "/_vocab/aliases?unknown=true")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+    assert_eq!(body["error"]["type"], "validation_error", "{body}");
+
+    assert_eq!(
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["vocab_aliases_get", "200"])
+            .get(),
+        2
+    );
+    assert_eq!(
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["vocab_aliases_get", "400"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        state
+            .prom
+            .http_request_duration
+            .with_label_values(&["vocab_aliases_get"])
+            .get_sample_count(),
+        3
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coordinator_alias_read_waits_asynchronously_for_shared_admission() {
+    let state = test_state(&alias_seed());
+    state
+        .cluster
+        .write()
+        .set_vocab(alias_fixture_vocab())
+        .expect("install alias fixture");
+    let held = Arc::clone(&state.stats_permits)
+        .acquire_owned()
+        .await
+        .expect("admin permit");
+    let request_state = Arc::clone(&state);
+    let mut request = tokio::spawn(async move {
+        send_raw(&request_state, req_empty("HEAD", "/_vocab/aliases?size=1")).await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut request)
+            .await
+            .is_err(),
+        "coordinator alias read must wait without blocking an async worker"
+    );
+    drop(held);
+
+    let (status, headers, bytes) = request.await.expect("request task");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    assert!(bytes.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn coordinator_alias_read_does_not_wait_on_the_cluster_lock_on_async_runtime() {
+    let state = test_state(&alias_seed());
+    state
+        .cluster
+        .write()
+        .set_vocab(alias_fixture_vocab())
+        .expect("install alias fixture");
+
+    let lock_state = Arc::clone(&state);
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let _guard = lock_state.cluster.write();
+        locked_tx.send(()).expect("announce held lock");
+        std::thread::sleep(Duration::from_millis(500));
+    });
+    locked_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("cluster write lock held");
+
+    let request_state = Arc::clone(&state);
+    let request = tokio::spawn(async move {
+        send_raw(&request_state, req_empty("GET", "/_vocab/aliases?size=0")).await
+    });
+    let started = Instant::now();
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "cluster-lock contention escaped spawn_blocking and stalled the async runtime"
+    );
+    assert!(
+        !request.is_finished(),
+        "request should still be waiting for the deliberately held cluster lock"
+    );
+
+    blocker.join().expect("lock holder");
+    let (status, _, bytes) = request.await.expect("request task");
+    assert_eq!(status, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON aliases");
+    assert_eq!(body["count"], 3, "{body}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

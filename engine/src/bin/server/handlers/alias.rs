@@ -21,29 +21,17 @@ use crate::dto::ApiError;
 use crate::state::AppState;
 
 mod feedback;
+mod read;
+#[cfg(test)]
+mod read_tests;
 pub(crate) use feedback::{get_alias_feedback, reset_alias_feedback, validate_and_apply_feedback};
+pub(crate) use read::{
+    acquire_alias_read_permit, alias_read_method_not_allowed, finish_alias_read_worker,
+    get_aliases, serialize_aliases, AliasReadTransport, ALIAS_READ_BODY_LIMIT,
+};
 
 fn default_min_count() -> usize {
     2
-}
-
-#[derive(Serialize)]
-struct GetAliasesResponse {
-    /// The full governed registry (provenance / kind / confidence / status per entry) for review.
-    aliases: reverse_rusty::vocab::AliasRegistry,
-    /// Status counts (active / candidate / rejected).
-    summary: reverse_rusty::vocab::AliasSummary,
-}
-
-/// GET /_vocab/aliases — return the alias registry + status summary (ADR-060 item 9). Reads the
-/// lock-free snapshot (ADR-016) like `GET /_vocab`, so review never blocks behind a writer.
-pub(crate) async fn get_aliases(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let snap = state.snapshot.load();
-    let vocab = snap.vocab().cloned().unwrap_or_default();
-    Json(GetAliasesResponse {
-        summary: vocab.alias_summary(),
-        aliases: vocab.aliases().clone(),
-    })
 }
 
 #[derive(Deserialize)]
@@ -261,14 +249,14 @@ pub(crate) async fn discover_and_record_aliases(
 
 #[cfg(test)]
 mod tests {
+    use super::read::{serialize_aliases, AliasReadPage};
     use super::{
-        discover_aliases, discover_and_record_aliases, get_aliases, import_aliases,
-        DiscoverAliasesRequest, ImportAliasesRequest,
+        discover_aliases, discover_and_record_aliases, import_aliases, DiscoverAliasesRequest,
+        ImportAliasesRequest,
     };
     use crate::metrics::PrometheusMetrics;
     use crate::state::AppState;
     use axum::extract::State;
-    use axum::response::IntoResponse;
     use axum::Json;
     use reverse_rusty::segment::Engine;
     use reverse_rusty::Normalizer;
@@ -317,6 +305,16 @@ mod tests {
         serde_json::from_slice(&bytes).expect("json body")
     }
 
+    fn aliases_json(state: &AppState) -> serde_json::Value {
+        let snapshot = state.snapshot.load();
+        let bytes = serialize_aliases(
+            snapshot.vocab().map(reverse_rusty::vocab::Vocab::aliases),
+            AliasReadPage::default(),
+        )
+        .expect("serialize aliases");
+        serde_json::from_slice(&bytes).expect("alias JSON")
+    }
+
     /// Import → the snapshot is republished so the lock-free `GET /_vocab/aliases` reflects it:
     /// the variant pair is active, the category-alternative triple is a candidate.
     #[tokio::test]
@@ -339,7 +337,7 @@ mod tests {
         assert_eq!(imp["activated"], 2);
 
         // GET reads the published snapshot (no engine lock) and sees the same state.
-        let got = body_json(get_aliases(State(Arc::clone(&state))).await.into_response()).await;
+        let got = aliases_json(&state);
         assert_eq!(got["summary"]["active"], 2);
         let entries = got["aliases"]["entries"].as_array().expect("entries");
         assert_eq!(entries.len(), 2);
@@ -396,7 +394,7 @@ mod tests {
         );
 
         // Nothing recorded: the registry is untouched.
-        let reg = body_json(get_aliases(State(Arc::clone(&state))).await.into_response()).await;
+        let reg = aliases_json(&state);
         assert_eq!(reg["summary"]["candidate"], 0);
         assert_eq!(reg["summary"]["active"], 0);
     }
@@ -416,7 +414,7 @@ mod tests {
         assert_eq!(got["recompiled"], 0, "metadata-only: nothing recompiles");
 
         // Visible via the published snapshot — as candidates, nothing active.
-        let reg = body_json(get_aliases(State(Arc::clone(&state))).await.into_response()).await;
+        let reg = aliases_json(&state);
         assert!(reg["summary"]["candidate"].as_u64().unwrap() >= 1);
         assert_eq!(reg["summary"]["active"], 0);
 

@@ -174,7 +174,14 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 ))
                 .fallback(crate::handlers::vocab_learn_apply_method_not_allowed::<ClusterAppState>),
         )
-        .route("/_vocab/aliases", get(cluster_get_aliases))
+        .route(
+            "/_vocab/aliases",
+            get(cluster_get_aliases)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::handlers::ALIAS_READ_BODY_LIMIT,
+                ))
+                .fallback(crate::handlers::alias_read_method_not_allowed::<ClusterAppState>),
+        )
         .route(
             "/_settings",
             get(cluster_get_settings).put(cluster_put_settings),

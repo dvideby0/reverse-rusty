@@ -207,7 +207,7 @@ The full method/path matrix is below.
 | `/_vocab` | PUT | Replace vocabulary |
 | `/_vocab/learn` | POST | Learn synonyms (+ opt-in NPMI phrases, `corpus_phrases=true`) from raw query text |
 | `/_vocab/learn_and_apply` | POST | Strict native stored-corpus learn + synchronous apply with timing, one bounded blocking slot, and fail-loud durability (ADR-149) |
-| `/_vocab/aliases` | GET | The governed alias registry + status summary (ADR-060) |
+| `/_vocab/aliases` | GET/HEAD | Strict native governed-alias review with `from`/`size` paging, total `count`, whole-registry summary, and bounded no-store execution (ADR-060/150) |
 | `/_vocab/aliases/import` | POST | Import a Solr/Lucene synonym file + apply (body `{"synonyms":"..."}`) |
 | `/_vocab/aliases/learn_and_apply` | POST | Learn alias candidates from stored queries + apply (`?min_count=N`) |
 | `/_vocab/aliases/discover` | POST | Distributional alias discovery, compute-only (ADR-102): proposals + similarity/co-occurrence evidence over the stored queries, or an explicit `{"queries": [[id, "dsl"], ...]}` body; knob overrides in the body (`min_similarity`, `max_pairs`, …) |

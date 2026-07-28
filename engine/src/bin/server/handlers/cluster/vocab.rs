@@ -17,8 +17,11 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
 
 use reverse_rusty::config::EngineConfig;
-use reverse_rusty::vocab::{AliasRegistry, AliasSummary};
+use reverse_rusty::vocab::AliasSummary;
 
+use crate::handlers::alias::{
+    acquire_alias_read_permit, finish_alias_read_worker, serialize_aliases, AliasReadTransport,
+};
 use crate::handlers::vocab::{
     acquire_vocab_learn_apply_permit, acquire_vocab_read_permit, acquire_vocab_write_permit,
     default_min_count, execute_vocab_learn, finish_vocab_learn_apply_response, finish_vocab_worker,
@@ -149,22 +152,30 @@ pub(crate) async fn cluster_learn_and_apply_vocab(
     finish_vocab_learn_apply_response(&state.prom, response)
 }
 
-#[derive(Serialize)]
-struct ClusterAliasesResponse {
-    aliases: AliasRegistry,
-    summary: AliasSummary,
-}
-
-/// GET /_vocab/aliases — the governed alias registry + status summary (ADR-060).
+/// GET/HEAD /_vocab/aliases — clone the governed registry under a brief
+/// coordinator read lock, then page and serialize it on one bounded worker.
 pub(crate) async fn cluster_get_aliases(
     State(state): State<Arc<ClusterAppState>>,
-) -> impl IntoResponse {
-    let cluster = state.cluster.read();
-    let vocab = cluster.vocab().cloned().unwrap_or_default();
-    Json(ClusterAliasesResponse {
-        summary: vocab.alias_summary(),
-        aliases: vocab.aliases().clone(),
-    })
+    transport: AliasReadTransport,
+) -> Response {
+    let (_duration, page) = transport.into_parts();
+    let permit = match acquire_alias_read_permit(&state.stats_permits, &state.prom).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
+    let worker_state = Arc::clone(&state);
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let aliases = {
+            let cluster = worker_state.cluster.read();
+            cluster
+                .vocab()
+                .map(|vocab| vocab.aliases().clone())
+                .unwrap_or_default()
+        };
+        serialize_aliases(Some(&aliases), page)
+    });
+    finish_alias_read_worker(&state.prom, worker.await)
 }
 
 #[derive(Deserialize)]
