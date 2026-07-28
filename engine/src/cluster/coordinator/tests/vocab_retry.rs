@@ -114,3 +114,44 @@ fn identical_alias_retry_refuses_to_misrepair_a_failed_resize_transition() {
         "the refused alias retry must not mutate the stale topology"
     );
 }
+
+#[test]
+fn identical_alias_retry_accepts_an_exact_just_published_manifest() {
+    let dir = scratch_dir("alias_retry_published_manifest");
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("durable cluster");
+    let initial = cluster.control_state().expect("initial control state");
+    cluster = cluster.with_control_plane(Box::new(FailFirstProposal::new(initial)));
+
+    let first = cluster.import_alias_synonyms("package, pkg");
+    assert!(
+        matches!(first, Err(ShardError::ControlPlane(_))),
+        "first control transition must fail after the live rebuild: {first:?}"
+    );
+    cluster
+        .checkpoint()
+        .expect("publish the current-generation manifest");
+    let published_epoch = cluster.epoch();
+    cluster.epoch.store(published_epoch - 1, Ordering::Relaxed);
+
+    let retry = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect("retry must finish a manifest visible after rename");
+    assert!(!retry.applied);
+    assert_eq!(retry.recompiled, 0);
+    assert_eq!(
+        cluster.epoch(),
+        published_epoch,
+        "retry must adopt the exact published manifest epoch"
+    );
+    assert!(
+        cluster.pending_alias_import_predecessor.is_none(),
+        "successful repair clears the retained predecessor identity"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

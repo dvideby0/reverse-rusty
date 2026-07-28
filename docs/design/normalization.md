@@ -171,7 +171,10 @@ accepts only bounded, bodyless, validated query controls; both mutations return 
 rebuilt query state committed; a coherent live rebuild whose storage commit fails is published but
 explicitly not acknowledged. Retrying the identical coordinator import in that state recommits the
 live vocabulary generation and repairs any pending feature-model control transition before it
-returns a no-op acknowledgement; an unreadable manifest remains a fail-loud incompatibility.
+returns a no-op acknowledgement. The retry may replace only the exact pre-import manifest retained
+by that attempt; if the new manifest was renamed before directory sync failed, it re-attests and
+syncs that exact next-epoch commit. Every other unreadable, divergent, or newer manifest remains a
+fail-loud incompatibility.
 Embedded imports also complete any stale-plan rebuild left between the public split apply steps.
 Alias-registry review shares that administrative slot for potentially large JSON snapshots. A
 standalone read captures one immutable engine snapshot; a coordinator read clones the registry

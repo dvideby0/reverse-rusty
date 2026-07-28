@@ -1,6 +1,55 @@
 //! Durable alias-import retry behavior after a live rebuild has been swapped.
 
 use crate::harness::*;
+use reverse_rusty::cluster::{
+    ClusterState, ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane, NodeId,
+    StateVersion,
+};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
+struct FailFirstProposal {
+    inner: InMemoryControlPlane,
+    fail_next: AtomicBool,
+}
+
+impl FailFirstProposal {
+    fn new(state: ClusterState) -> Self {
+        Self {
+            inner: InMemoryControlPlane::new(state),
+            fail_next: AtomicBool::new(true),
+        }
+    }
+}
+
+impl ControlPlane for FailFirstProposal {
+    fn cluster_state(&self) -> Result<Arc<ClusterState>, ControlError> {
+        self.inner.cluster_state()
+    }
+
+    fn version(&self) -> Result<StateVersion, ControlError> {
+        self.inner.version()
+    }
+
+    fn propose(&self, change: ClusterStateChange) -> Result<StateVersion, ControlError> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(ControlError::Backend(
+                "injected first proposal failure".into(),
+            ));
+        }
+        self.inner.propose(change)
+    }
+
+    fn change_membership(&self, voters: Vec<NodeId>) -> Result<StateVersion, ControlError> {
+        self.inner.change_membership(voters)
+    }
+
+    fn leader(&self) -> Result<Option<NodeId>, ControlError> {
+        self.inner.leader()
+    }
+}
 
 #[test]
 fn identical_alias_retry_recommits_an_uncommitted_rebuild() {
@@ -9,20 +58,21 @@ fn identical_alias_retry_recommits_an_uncommitted_rebuild() {
     let manifest_path = dir.join("cluster_manifest.bin");
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
         .expect("durable cluster");
-    let mut old_manifest = read_cluster_manifest(&manifest_path).expect("baseline manifest");
+    let initial = cluster.control_state().expect("initial control state");
+    cluster = cluster.with_control_plane(Box::new(FailFirstProposal::new(initial)));
 
-    let applied = cluster
-        .import_alias_synonyms("package, pkg")
-        .expect("initial alias import");
-    assert!(applied.applied);
+    let first = cluster.import_alias_synonyms("package, pkg");
+    assert!(
+        matches!(first, Err(ShardError::ControlPlane(_))),
+        "first control transition must fail after the live rebuild: {first:?}"
+    );
     assert!(cluster.percolate("pkg adapter").unwrap().contains(&1));
-
-    // Restore a pre-import commit point while retaining the coherent live
-    // rebuild. Keep the in-memory epoch to model a checkpoint that failed
-    // before publishing its manifest.
-    old_manifest.epoch = cluster.epoch();
-    reverse_rusty::storage::write_cluster_manifest(&old_manifest, &manifest_path)
-        .expect("restore old manifest");
+    let predecessor = read_cluster_manifest(&manifest_path).expect("pre-import manifest");
+    assert_ne!(
+        predecessor.placement_generation,
+        cluster.placement_generation(),
+        "failed control transition must leave the captured predecessor authoritative"
+    );
 
     let retry = cluster
         .import_alias_synonyms("package, pkg")
@@ -41,6 +91,43 @@ fn identical_alias_retry_recommits_an_uncommitted_rebuild() {
     assert!(
         reopened.percolate("pkg adapter").unwrap().contains(&1),
         "an acknowledged retry must preserve the imported alias across restart"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn identical_alias_retry_does_not_overwrite_a_different_valid_predecessor() {
+    let dir = unique_dir("alias_retry_divergent_predecessor");
+    let cfg = durable_cfg(3, dir.clone(), false);
+    let manifest_path = dir.join("cluster_manifest.bin");
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+        .expect("durable cluster");
+    let initial = cluster.control_state().expect("initial control state");
+    cluster = cluster.with_control_plane(Box::new(FailFirstProposal::new(initial)));
+
+    let first = cluster.import_alias_synonyms("package, pkg");
+    assert!(
+        matches!(first, Err(ShardError::ControlPlane(_))),
+        "first control transition must fail after the live rebuild: {first:?}"
+    );
+
+    let mut divergent = read_cluster_manifest(&manifest_path).expect("captured predecessor");
+    divergent.vocab_data = b"{}".to_vec();
+    reverse_rusty::storage::write_cluster_manifest(&divergent, &manifest_path)
+        .expect("write a different valid predecessor");
+    let divergent_bytes = std::fs::read(&manifest_path).expect("divergent predecessor bytes");
+
+    let error = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect_err("retry must attest the exact captured predecessor");
+    assert!(
+        matches!(error, ShardError::Log(_)),
+        "unexpected retry error: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("manifest after retry"),
+        divergent_bytes,
+        "a no-op retry must not overwrite another valid predecessor"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

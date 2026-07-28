@@ -116,6 +116,7 @@ impl ClusterEngine {
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
             source_files: durable.source_files,
+            pending_alias_import_predecessor: None,
             control: durable.control,
             // A fresh transport-metrics collector (ADR-085); the gRPC builders REPLACE it with
             // the shared one they also hand to each `RemoteShard` (via `with_transport_metrics`),

@@ -53,6 +53,7 @@ const CLUSTER_MANIFEST_VERSION_COMPILER_SEMANTICS: u32 = 7;
 /// later hold). Written atomically (tmp + CRC + rename) — the SINGLE commit point that
 /// makes a checkpoint all-or-nothing: it pins the frozen dict + ring + log cursor AND
 /// the per-shard segment registry that constitutes the committed base (ADR-032).
+#[derive(PartialEq, Eq)]
 pub struct ClusterManifest {
     /// The log epoch / checkpoint generation (bumped on `checkpoint`).
     pub epoch: u64,

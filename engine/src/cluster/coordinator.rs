@@ -371,6 +371,11 @@ pub struct ClusterEngine {
     /// Per-shard source-sidecar basenames selected by the current coordinator
     /// manifest. Index-aligned with `shards`.
     source_files: Vec<String>,
+    /// Exact durable predecessor captured before an alias import swaps the live
+    /// model. Retained only while that import's control/manifest commit is
+    /// incomplete, so an identical retry can overwrite precisely that commit
+    /// point and no other CRC-valid manifest.
+    pending_alias_import_predecessor: Option<crate::storage::ClusterManifest>,
     /// Optional observer for durability events (recovery torn-tail, append failures).
     /// Buffered until set, mirroring the engine's `set_observer` pattern.
     observer: Mutex<Option<ClusterObserver>>,
