@@ -153,7 +153,9 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(
                     crate::handlers::VOCAB_READ_BODY_LIMIT,
                 ))
-                .put(cluster_put_vocab)
+                .merge(axum::routing::put(cluster_put_vocab).layer(
+                    axum::extract::DefaultBodyLimit::max(crate::handlers::VOCAB_WRITE_BODY_LIMIT),
+                ))
                 .fallback(crate::handlers::vocab_method_not_allowed::<ClusterAppState>),
         )
         .route("/_vocab/learn", post(cluster_learn_vocab))

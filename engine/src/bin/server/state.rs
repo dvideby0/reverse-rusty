@@ -35,9 +35,9 @@ pub(crate) const MAX_CONCURRENT_BACKUPS: usize = 1;
 /// The health route stays open even when read auth is enabled. Bound all of
 /// its requests independently before their bodies are buffered.
 pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
-/// Expensive administrative reads share one blocking-work slot per server.
-/// Stats scans dominate the cost; vocabulary reads also use it so a large JSON
-/// snapshot cannot fan out clone/serialization work.
+/// Expensive administrative work shares one blocking slot per server. Stats
+/// scans dominate read cost; vocabulary reads and corpus-wide replacements also
+/// use it so large JSON snapshots and O(corpus) rebuilds cannot fan out.
 pub(crate) const MAX_CONCURRENT_STATS: usize = 1;
 
 pub(crate) struct AppState {
@@ -52,7 +52,7 @@ pub(crate) struct AppState {
     pub(crate) backup_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Per-server admission for the intentionally unauthenticated health route.
     pub(crate) health_permits: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Bounds corpus-wide stats and potentially large vocabulary snapshot work
+    /// Bounds corpus-wide stats and vocabulary read/replacement work
     /// independently from search and backup. The permit is owned by the worker.
     pub(crate) stats_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) snapshot: ArcSwap<EngineSnapshot>,
@@ -127,7 +127,8 @@ pub(crate) struct ClusterAppState {
     pub(crate) backup_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Coordinator analogue of [`AppState::health_permits`].
     pub(crate) health_permits: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Coordinator analogue of [`AppState::stats_permits`].
+    /// Coordinator analogue of [`AppState::stats_permits`], including bounded
+    /// vocabulary reads and blue/green replacements.
     pub(crate) stats_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) pool: rayon::ThreadPool,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /

@@ -61,7 +61,7 @@ use arc_swap::ArcSwap;
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{any, get, post},
+    routing::{any, get, post, put},
     Router,
 };
 use clap::Parser;
@@ -85,6 +85,7 @@ use handlers::{
     v2_mpercolate_route, v2_search_route, validate_and_apply_feedback, vocab_method_not_allowed,
     BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT,
     METRICS_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
+    VOCAB_WRITE_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -483,7 +484,7 @@ async fn main() {
             "/_vocab",
             get(get_vocab)
                 .layer(DefaultBodyLimit::max(VOCAB_READ_BODY_LIMIT))
-                .put(put_vocab)
+                .merge(put(put_vocab).layer(DefaultBodyLimit::max(VOCAB_WRITE_BODY_LIMIT)))
                 .fallback(vocab_method_not_allowed::<AppState>),
         )
         .route("/_vocab/learn", post(learn_vocab))
