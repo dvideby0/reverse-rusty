@@ -83,10 +83,10 @@ use handlers::{
     learn_and_apply_vocab, learn_vocab, mpercolate_route, open_pit_route, prometheus_metrics,
     put_doc, put_settings, put_vocab, reset_alias_feedback, search_route, stats,
     v2_mpercolate_route, v2_search_route, validate_and_apply_feedback,
-    vocab_learn_method_not_allowed, vocab_method_not_allowed, BACKUP_BODY_LIMIT,
-    CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT,
-    PIT_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
-    VOCAB_WRITE_BODY_LIMIT,
+    vocab_learn_apply_method_not_allowed, vocab_learn_method_not_allowed, vocab_method_not_allowed,
+    BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT,
+    METRICS_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT,
+    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -494,7 +494,12 @@ async fn main() {
                 .layer(DefaultBodyLimit::max(VOCAB_LEARN_BODY_LIMIT))
                 .fallback(vocab_learn_method_not_allowed::<AppState>),
         )
-        .route("/_vocab/learn_and_apply", post(learn_and_apply_vocab))
+        .route(
+            "/_vocab/learn_and_apply",
+            post(learn_and_apply_vocab)
+                .layer(DefaultBodyLimit::max(VOCAB_LEARN_APPLY_BODY_LIMIT))
+                .fallback(vocab_learn_apply_method_not_allowed::<AppState>),
+        )
         .route("/_vocab/aliases", get(get_aliases))
         .route("/_vocab/aliases/import", post(import_aliases))
         .route(

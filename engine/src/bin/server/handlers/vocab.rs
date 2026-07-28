@@ -18,11 +18,17 @@ use crate::dto::ApiError;
 use crate::state::AppState;
 
 mod learn;
+mod learn_apply;
 mod read;
 mod write;
 pub(crate) use learn::{
     execute_vocab_learn, learn_vocab, vocab_learn_method_not_allowed, VocabLearnTransport,
     VOCAB_LEARN_BODY_LIMIT,
+};
+pub(crate) use learn_apply::{
+    acquire_vocab_learn_apply_permit, finish_vocab_learn_apply_response, learn_and_apply_vocab,
+    vocab_learn_apply_error_response, vocab_learn_apply_method_not_allowed,
+    vocab_learn_apply_success, VocabLearnApplyTransport, VOCAB_LEARN_APPLY_BODY_LIMIT,
 };
 pub(crate) use read::{
     acquire_vocab_read_permit, finish_vocab_worker, get_vocab, serialize_vocab,
@@ -33,6 +39,8 @@ pub(crate) use write::{
     vocab_write_success, VocabWriteTransport, VOCAB_WRITE_BODY_LIMIT,
 };
 
+#[cfg(test)]
+mod learn_apply_tests;
 #[cfg(test)]
 mod learn_tests;
 #[cfg(test)]
@@ -62,74 +70,6 @@ pub(crate) fn build_corpus_config(
         npmi_iterations: npmi_iterations.unwrap_or(d.npmi_iterations),
         learn_equivalences,
     }
-}
-
-#[derive(Deserialize, Default)]
-pub(crate) struct LearnApplyQuery {
-    /// Minimum any-of occurrences for a synonym to be learned (ES-style query param).
-    #[serde(default = "default_min_count")]
-    pub(crate) min_count: usize,
-    /// Opt-in NPMI corpus phrase induction (ADR-053); off by default — when absent the
-    /// endpoint is byte-identical to before (any-of learning only).
-    #[serde(default)]
-    pub(crate) corpus_phrases: bool,
-    /// NPMI binding-strength threshold (defaults to the engine default).
-    #[serde(default)]
-    pub(crate) npmi_tau: Option<f64>,
-    /// Minimum adjacent co-occurrence count for an induced phrase.
-    #[serde(default)]
-    pub(crate) npmi_min_count: Option<usize>,
-    /// Bigram -> trigram growth passes.
-    #[serde(default)]
-    pub(crate) npmi_iterations: Option<usize>,
-    /// Opt-in: learn any-of groups as equivalences applied via expansion (ADR-054).
-    #[serde(default)]
-    pub(crate) learn_equivalences: bool,
-}
-
-#[derive(Serialize)]
-struct LearnApplyResponse {
-    acknowledged: bool,
-    /// Number of stored queries recompiled under the learned-and-applied vocabulary.
-    recompiled: usize,
-}
-
-/// POST /_vocab/learn_and_apply — learn from the engine's OWN stored queries and APPLY
-/// immediately (ADR-046), recompiling the index so the change takes effect with zero false
-/// negatives. By default this is ADR-015 any-of synonym learning (`?min_count=N`, default 2).
-/// With `?corpus_phrases=true` it ALSO runs NPMI corpus phrase induction (ADR-053) — entity
-/// phrases self-derived from the live query text — tunable via `npmi_tau`, `npmi_min_count`,
-/// `npmi_iterations` (all defaulting to the engine defaults). Unlike `POST /_vocab/learn`,
-/// this changes the live vocabulary.
-pub(crate) async fn learn_and_apply_vocab(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<LearnApplyQuery>,
-) -> impl IntoResponse {
-    let cfg = build_corpus_config(
-        q.min_count,
-        q.corpus_phrases,
-        q.npmi_tau,
-        q.npmi_min_count,
-        q.npmi_iterations,
-        q.learn_equivalences,
-    );
-    let result = {
-        let mut engine = state.engine.lock();
-        match engine.learn_and_apply_with(&cfg) {
-            Ok(recompiled) => (
-                StatusCode::OK,
-                Json(LearnApplyResponse {
-                    acknowledged: true,
-                    recompiled,
-                }),
-            )
-                .into_response(),
-            Err(e) => ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
-                .into_response(),
-        }
-    };
-    state.publish_snapshot();
-    result
 }
 
 // ---------------------------------------------------------------------------

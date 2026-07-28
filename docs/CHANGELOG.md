@@ -115,6 +115,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   blocking-work admission, round-trippable no-store output, and explicit separation from
   ES/OpenSearch synonym management
   ([ADR-148](decisions/adr-148-vocab-learn-api-contract.md)).
+- Hardened native `POST /_vocab/learn_and_apply` with strict bodyless controls, timed
+  standalone/coordinator response parity, shared off-runtime rebuild admission, complete standalone
+  post-recompile verification, and fail-loud durable acknowledgement
+  ([ADR-149](decisions/adr-149-vocab-learn-apply-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
