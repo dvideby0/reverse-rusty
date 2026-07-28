@@ -416,14 +416,19 @@ declaration. An unexpressible or mixed-feature-kind group remains a candidate.
 `rules` is the accepted rule count, `activated` is the number of groups switched to active, and
 `recompiled` is the number of stored queries rebuilt so the change takes effect immediately. An
 identical retry returns `result: "noop"`, `activated: 0`, and `recompiled: 0`; it does not rebuild,
-checkpoint, or republish an identical snapshot. Standalone and coordinator modes return this same
-shape and always use `recompiled` (never a coordinator-only `rebuilt` alias).
+republish an identical snapshot, or checkpoint an already committed coordinator generation. If the
+previous durable coordinator attempt rebuilt live state but failed before committing its manifest,
+the identical retry finishes that checkpoint before acknowledging the no-op. Standalone and
+coordinator modes return this same shape and always use `recompiled` (never a coordinator-only
+`rebuilt` alias).
 
 The request is strict JSON (`application/json` or `application/*+json`), capped at 16 MiB and five
 seconds. At most 10,000 rules and 256 forms per rule are accepted. Unknown or duplicate query
 parameters, unknown JSON fields, both/neither input envelopes, malformed JSON, and unsupported
-compatibility controls fail explicitly. Unsupported methods return 405 with `Allow: POST`. Every
-route-reached response has `Cache-Control: no-store` and fixed `vocab_aliases_import` telemetry.
+compatibility controls fail explicitly. Optional rule IDs are limited to 256 raw input bytes, must
+remain non-empty after trimming, and must be unique after trimming. Unsupported methods return 405
+with `Allow: POST`. Every route-reached response has `Cache-Control: no-store` and fixed
+`vocab_aliases_import` telemetry.
 
 Admission, engine/coordinator lock waits, parsing apply, and any rebuild run in the shared one-slot
 administrative blocking worker. Closed admission returns `503 aliases_unavailable`; worker failure

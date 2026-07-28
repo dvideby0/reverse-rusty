@@ -32,8 +32,9 @@ directional replacement, or deferred activation.
   - native `{"synonyms":"<Solr file text>"}`; or
   - familiar Elasticsearch `{"synonyms_set":{"id":"optional","synonyms":"one rule"}}` or an array
     of those rule objects.
-  Optional rule IDs must be unique, non-empty, and at most 256 bytes. They are request metadata only;
-  the registry continues to key canonical form groups and does not fabricate persistent named rules.
+  Optional rule IDs must be unique, non-empty after trimming, and at most 256 raw input bytes. They
+  are request metadata only; the registry continues to key canonical form groups and does not
+  fabricate persistent named rules.
 - Accept OpenSearch's body controls only as `format: "solr"` and `expand: true`, with those values as
   the defaults. Reject WordNet and `expand: false`. Continue to union either side of `a => b` into
   one bidirectional group; this is a documented recall-safe expansion, not directional replacement.
@@ -51,7 +52,9 @@ directional replacement, or deferred activation.
   `took`, `took_ms`, `acknowledged`, `result`, `rules`, `activated`, `recompiled`, and `summary`.
   `result` is `updated` when the registry was installed and `noop` when an identical import changed
   nothing. A no-op returns `activated: 0`, `recompiled: 0`, does not publish a new snapshot, and does
-  not checkpoint or rebuild.
+  not rebuild. It also avoids a checkpoint when the current coordinator vocabulary generation is
+  already committed; an identical retry after a failed durable checkpoint must retry that commit
+  before acknowledging the otherwise unchanged registry.
 - Wait asynchronously for the shared one-slot administrative permit, then move the permit, engine
   or coordinator lock wait, parsing apply, rebuild, and standalone publication onto a blocking
   worker. A disconnected request cannot release admission while mutation work continues.
@@ -86,5 +89,6 @@ Parser tests cover comments, escapes, directional-input union, every malformed r
 diagnostics, and rule/form bounds. Standalone route tests cover both JSON dialects, synchronous
 matching, true no-op publication behavior, strict method/query/media/JSON/body handling, deadlines,
 telemetry, off-runtime admission and locking, closed admission, and fail-loud durable commit failure.
-Coordinator tests cover response and matching parity, no-op behavior, telemetry, method handling,
-asynchronous admission, and off-runtime write-lock contention over a real multi-shard cluster.
+Coordinator tests cover response and matching parity, no-op behavior, durable retry recommit,
+telemetry, method handling, asynchronous admission, and off-runtime write-lock contention over a
+real multi-shard cluster.

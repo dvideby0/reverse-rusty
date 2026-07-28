@@ -116,14 +116,14 @@ fn validate_rule_metadata(
     ids: &mut BTreeSet<String>,
 ) -> Result<String, String> {
     if let Some(id) = rule.id {
-        let id = id.trim();
-        if id.is_empty() {
-            return Err(format!("`synonyms_set[{index}].id` may not be empty"));
-        }
         if id.len() > MAX_RULE_ID_BYTES {
             return Err(format!(
                 "`synonyms_set[{index}].id` may not exceed {MAX_RULE_ID_BYTES} bytes"
             ));
+        }
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(format!("`synonyms_set[{index}].id` may not be empty"));
         }
         if !ids.insert(id.to_string()) {
             return Err(format!("duplicate synonym rule id `{id}`"));

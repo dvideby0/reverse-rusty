@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use crate::vocab::{CorpusLearnConfig, Vocab};
 
-use super::ClusterEngine;
+use super::{ClusterEngine, CLUSTER_MANIFEST_FILE};
 use crate::cluster::control::ClusterStateChange;
 use crate::cluster::shard::ShardError;
 
@@ -241,6 +241,13 @@ impl ClusterEngine {
             .map_err(|error| ShardError::Config(error.to_string()))?;
         let changed = vocab.aliases() != &before;
         if !changed {
+            // A failed durable `set_vocab` checkpoint leaves the coherent green
+            // rebuild live even though the old manifest remains authoritative.
+            // An identical retry must finish that commit before acknowledging a
+            // no-op, or the acknowledged alias can disappear on restart.
+            if !self.current_vocab_rebuild_is_committed()? {
+                self.checkpoint()?;
+            }
             return Ok(crate::segment::AliasApplyReport {
                 applied: false,
                 activated,
@@ -263,6 +270,34 @@ impl ClusterEngine {
                 .map(Vocab::alias_summary)
                 .unwrap_or_default(),
         })
+    }
+
+    /// Whether the current vocabulary rebuild is the coordinator manifest's
+    /// committed generation. In-memory clusters are committed by definition.
+    ///
+    /// A missing or unreadable durable manifest is treated as uncommitted so
+    /// the retry goes through `checkpoint`, which either repairs it atomically
+    /// or returns the underlying durability failure.
+    fn current_vocab_rebuild_is_committed(&self) -> Result<bool, ShardError> {
+        let Some(dir) = &self.data_dir else {
+            return Ok(true);
+        };
+        let vocab_data = match &self.vocab {
+            Some(vocab) => vocab
+                .to_json()
+                .map_err(|error| {
+                    ShardError::Log(format!("serializing cluster vocab for retry: {error}"))
+                })?
+                .into_bytes(),
+            None => Vec::new(),
+        };
+        let Ok(manifest) = crate::storage::read_cluster_manifest(&dir.join(CLUSTER_MANIFEST_FILE))
+        else {
+            return Ok(false);
+        };
+        Ok(manifest.placement_generation == self.placement_generation()
+            && manifest.dict_fingerprint == self.dict.fingerprint()
+            && manifest.vocab_data == vocab_data)
     }
 
     /// Learn alias candidates from the cluster's OWN stored queries (any-of

@@ -169,7 +169,8 @@ skip installation entirely when an identical registry declaration is retried. Th
 accepts only bounded, bodyless, validated query controls; both mutations return the same timed
 `recompiled` result in standalone and coordinator modes. A successful durable response means the
 rebuilt query state committed; a coherent live rebuild whose storage commit fails is published but
-explicitly not acknowledged.
+explicitly not acknowledged. Retrying the identical coordinator import in that state recommits the
+live vocabulary generation before it returns a no-op acknowledgement.
 Alias-registry review shares that administrative slot for potentially large JSON snapshots. A
 standalone read captures one immutable engine snapshot; a coordinator read clones the registry
 under a brief cluster guard inside the blocking worker and releases the guard before paging and
