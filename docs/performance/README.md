@@ -60,12 +60,12 @@ RAYON_NUM_THREADS=4 cargo run --release --bin perfgate -- \
 
 ## Automated regression policy
 
-The required `gate + benchmarks` CI job pins the public standard `ubuntu-24.04` x64 runner
-(4 vCPU / 16 GiB), release+LTO, four Rayon threads, 1M queries, 20k titles, 5% broad intent, and
-seed `0x00C0FFEE`. `perfgate` collects seven complete latency distributions and nine throughput
-windows. Each timing bound is the more tolerant of a 30% material-change band and three historical
-MADs; a timing-only breach gets one complete retry. Deterministic structure and the 5% resource
-ceilings never retry.
+The `core gate + benchmarks` execution job behind the required `gate + benchmarks` aggregate pins
+the public standard `ubuntu-24.04` x64 runner (4 vCPU / 16 GiB), release+LTO, four Rayon threads, 1M
+queries, 20k titles, 5% broad intent, and seed `0x00C0FFEE`. `perfgate` collects seven complete
+latency distributions and nine throughput windows. Each timing bound is the more tolerant of a 30%
+material-change band and three historical MADs; a timing-only breach gets one complete retry.
+Deterministic structure and the 5% resource ceilings never retry.
 
 The current domain-neutral workload migration has an explicit pending timing history: source-run
 IDs and all timing histories are empty together. Structure, resources, and conservative absolute
