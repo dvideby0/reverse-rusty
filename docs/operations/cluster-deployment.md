@@ -135,12 +135,12 @@ query, an always-candidate is returned only when the request includes the broad 
 
 | Check | Endpoint | Meaning |
 |---|---|---|
-| Liveness/readiness | `GET /_health` | `green` = all shards reachable; `red`/`503` = a shard is unreachable (the cluster fails loud, never silently truncates). |
+| Liveness/readiness | `GET`/`HEAD /_health` | `green` = every shard and the complete committed topology validate; `yellow` = repairs are queued; `red`/`503` = a required shard/control/topology check failed (ADR-144). |
 | Corpus + segments | `GET /_stats` | Physical `total_queries` and per-position `shard_queries[]` (includes tombstones and content-driven copies; ADR-140). |
 | Per-shard view | `GET /_cat/shards` | Logical position → physical stored-query count + committed node assignment (ADR-143). |
 
-`GET /_health` is the only endpoint that never requires the bearer token, so container/orchestrator
-probes work without credentials.
+`GET`/`HEAD /_health` are the only requests that never require the bearer token, so
+container/orchestrator probes work without credentials.
 
 ## 5. Scaling
 

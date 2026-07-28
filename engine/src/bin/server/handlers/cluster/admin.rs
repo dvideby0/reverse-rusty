@@ -9,10 +9,12 @@
 
 mod cat_shards;
 mod gc;
+mod health;
 mod ops;
 
 pub(crate) use cat_shards::{cluster_cat_shards, CAT_SHARDS_BODY_LIMIT};
 pub(crate) use gc::cluster_gc;
+pub(crate) use health::cluster_health;
 pub(crate) use ops::{
     cluster_deregister_node, cluster_handoff, cluster_reassign, cluster_rebalance,
     cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync, cluster_state,
@@ -206,57 +208,6 @@ pub(crate) async fn cluster_stats(
                 "cluster stats worker failed",
             )
         }
-    }
-}
-
-#[derive(Serialize)]
-struct ClusterHealthResponse {
-    status: &'static str,
-    mode: &'static str,
-    shards: usize,
-    pending_repairs: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-}
-
-/// GET /_health — green (all shards answer, no queued repairs), yellow (repairs
-/// queued — converging), red (a shard probe fails).
-#[instrument(skip_all)]
-pub(crate) async fn cluster_health(State(state): State<Arc<ClusterAppState>>) -> Response {
-    let cluster = state.cluster.read();
-    let shards = cluster.num_shards();
-    match cluster.num_queries() {
-        Ok(_) => {
-            let pending = cluster.pending_repairs();
-            let (status, code) = if pending > 0 {
-                ("yellow", StatusCode::OK)
-            } else {
-                ("green", StatusCode::OK)
-            };
-            (
-                code,
-                Json(ClusterHealthResponse {
-                    status,
-                    mode: "cluster",
-                    shards,
-                    pending_repairs: pending,
-                    reason: (pending > 0)
-                        .then(|| "partial applies queued; resync converges them".to_string()),
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ClusterHealthResponse {
-                status: "red",
-                mode: "cluster",
-                shards,
-                pending_repairs: cluster.pending_repairs(),
-                reason: Some(format!("a shard probe failed: {e}")),
-            }),
-        )
-            .into_response(),
     }
 }
 

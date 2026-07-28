@@ -34,7 +34,7 @@ pub(crate) struct Cli {
     pub(crate) auth_token: Option<String>,
 
     /// Extend bearer-token auth to read endpoints too — everything except the
-    /// `GET /_health` liveness probe (so probes keep working without
+    /// `GET`/`HEAD /_health` liveness probe (so probes keep working without
     /// credentials). Requires an auth token.
     #[arg(long, default_value_t = false)]
     pub(crate) auth_protect_reads: bool,

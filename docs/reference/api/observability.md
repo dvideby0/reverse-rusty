@@ -331,15 +331,19 @@ unsupported because Reverse Rusty has no exact corresponding index namespace, st
 columns, or state-read mode. Stable typed automation should combine `GET /_stats` with
 `GET /_cluster/state`.
 
-## `GET /_health` — Health check
+## `GET` / `HEAD /_health` — Native readiness
 
 ```bash
-curl localhost:9200/_health
+curl 'localhost:9200/_health?wait_for_status=green&timeout=30s'
 ```
+
+Standalone response:
 
 ```json
 {
   "status": "green",
+  "mode": "standalone",
+  "timed_out": false,
   "total_queries": 3,
   "wal_healthy": true,
   "persistence_healthy": true,
@@ -352,11 +356,51 @@ curl localhost:9200/_health
 |---|---|
 | `green` | Single-node durability is healthy, or every cluster position answers with no queued repair |
 | `yellow` | Single-node load skipped/stale segments, or cluster partial applies are queued for resync |
-| `red` | Single-node WAL/persistence failure, or a cluster position cannot answer; cluster mode returns HTTP 503 |
+| `red` | Single-node WAL/persistence failure, or a required cluster shard/control/topology check failed |
 
-Cluster health uses a different, deliberately smaller payload:
-`{"status":"green","mode":"cluster","shards":8,"pending_repairs":0}`. A yellow or red response also
-includes `reason`.
+Cluster health uses a deliberately smaller native payload:
+
+```json
+{
+  "status": "green",
+  "mode": "cluster",
+  "timed_out": false,
+  "shards": 8,
+  "pending_repairs": 0
+}
+```
+
+A yellow or red response also includes `reason`. Detailed shard/control-plane errors are logged but
+the unauthenticated response uses a stable generic red reason.
+
+The route is a strict, bodyless GET/HEAD with a 64 KiB extraction ceiling. It rejects unknown query
+parameters and unsupported values, returns structured 400/405/413 errors, sends
+`Allow: GET, HEAD` on 405, strips the body for HEAD, and includes `Cache-Control: no-store` on every
+response. `GET` and `HEAD` remain open even with `--auth-protect-reads` so orchestrator probes do
+not need bearer credentials.
+
+Supported query controls:
+
+| Control | Contract |
+|---|---|
+| `wait_for_status=red\|yellow\|green` | Wait until the observed status reaches at least this ordered color; yellow accepts yellow or green |
+| `timeout=<time>` | Bound the wait, stats admission, and coordinator probe result wait; default `30s`; units are `nanos`, `micros`, `ms`, `s`, `m`, `h`, or `d` |
+| `level=cluster` | Accepted familiar spelling for this cluster-level native response; index/shard levels are rejected |
+
+Green and yellow return HTTP 200. Red returns 503. If coordinator collection cannot complete by the
+deadline, or `wait_for_status` is not reached, the latest response returns 408 with
+`"timed_out":true`. A coordinator request that times out cannot forcibly stop already-running
+blocking/network work; that work retains its single shared stats permit until its own transport
+bounds complete.
+
+Coordinator green requires a successful committed control-state read, a count from every logical
+serving position, matching committed/ring shard counts, and exactly one in-range committed
+assignment per position. The probe shares bounded stats admission with `/_stats` and CAT stats and
+runs off the async request workers.
+
+This is deliberately not Elasticsearch/OpenSearch `/_cluster/health`. Those APIs describe Lucene
+index-shard allocation; Reverse Rusty has no honest equivalent for their index, active-primary,
+relocating, or unassigned-shard fields, so no `/_cluster/health` alias is exposed (ADR-144).
 
 ## `GET /_metrics` — Prometheus metrics
 

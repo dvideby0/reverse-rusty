@@ -1,0 +1,206 @@
+use super::{health, HEALTH_BODY_LIMIT};
+
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
+use axum::{
+    body::{Body, Bytes},
+    extract::DefaultBodyLimit,
+    http::{header, Method, Request, StatusCode},
+    routing::any,
+    Router,
+};
+use parking_lot::Mutex;
+use reverse_rusty::{config::EngineConfig, segment::Engine, Normalizer};
+use tower::ServiceExt;
+
+use crate::{metrics::PrometheusMetrics, state::AppState};
+
+fn test_state() -> Arc<AppState> {
+    let mut engine = Engine::with_config(
+        Normalizer::default_vocab().expect("vocab"),
+        EngineConfig::default(),
+    );
+    engine
+        .try_insert_live("1994 topps", 7, 1)
+        .expect("fixture insert");
+    let snapshot = Arc::new(engine.snapshot());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("pool");
+    let prom = PrometheusMetrics::new();
+    Arc::new(AppState {
+        engine: Mutex::new(engine),
+        flush_serial: Mutex::new(()),
+        backup_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_BACKUPS,
+        )),
+        stats_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_STATS,
+        )),
+        snapshot: ArcSwap::new(snapshot),
+        pool,
+        search_permits: None,
+        ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(1)),
+        exhaustive_jobs: crate::jobs::ExhaustiveJobs::for_tests(prom.clone()),
+        max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
+        include_broad: false,
+        prom,
+        slow_query_threshold_ms: 0,
+        auth: None,
+        feedback: Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
+        pit_tokens: crate::pit::PitTokens::generate(),
+        pits: Mutex::new(reverse_rusty::PitRegistry::new()),
+        pit_config: reverse_rusty::PitConfig::default(),
+    })
+}
+
+fn router(state: &Arc<AppState>, body_limit: usize) -> Router {
+    Router::new()
+        .route(
+            "/_health",
+            any(health).layer(DefaultBodyLimit::max(body_limit)),
+        )
+        .with_state(Arc::clone(state))
+}
+
+async fn send(
+    state: &Arc<AppState>,
+    body_limit: usize,
+    method: Method,
+    uri: &str,
+    body: impl Into<Body>,
+) -> (StatusCode, axum::http::HeaderMap, Bytes) {
+    let response = router(state, body_limit)
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(body.into())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    (status, headers, bytes)
+}
+
+#[tokio::test]
+async fn green_readiness_is_truthful_uncacheable_and_observed() {
+    let state = test_state();
+    let (status, headers, bytes) = send(
+        &state,
+        HEALTH_BODY_LIMIT,
+        Method::GET,
+        "/_health?wait_for_status=green&timeout=1s&level=cluster",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON health");
+    assert_eq!(body["status"], "green");
+    assert_eq!(body["mode"], "standalone");
+    assert_eq!(body["timed_out"], false);
+    assert_eq!(body["total_queries"], 1);
+    assert_eq!(body["wal_healthy"], true);
+    assert_eq!(body["persistence_healthy"], true);
+    assert_eq!(
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["health", "200"])
+            .get(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn head_is_a_bodyless_readiness_probe() {
+    let state = test_state();
+    let (status, headers, bytes) = send(
+        &state,
+        HEALTH_BODY_LIMIT,
+        Method::HEAD,
+        "/_health",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).expect("cache"),
+        "no-store"
+    );
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).expect("content type"),
+        "application/json"
+    );
+    assert!(bytes.is_empty());
+}
+
+#[tokio::test]
+async fn transport_and_controls_fail_loud() {
+    let state = test_state();
+    for uri in [
+        "/_health?unknown=true",
+        "/_health?wait_for_status=blue",
+        "/_health?timeout=1",
+        "/_health?level=shards",
+    ] {
+        let (status, headers, bytes) =
+            send(&state, HEALTH_BODY_LIMIT, Method::GET, uri, Body::empty()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(
+            headers.get(header::CACHE_CONTROL).expect("cache"),
+            "no-store"
+        );
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+        assert_eq!(body["error"]["type"], "validation_error", "{uri}: {body}");
+    }
+
+    let (status, _, bytes) = send(
+        &state,
+        HEALTH_BODY_LIMIT,
+        Method::GET,
+        "/_health",
+        Body::from("not empty"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+    assert_eq!(body["error"]["type"], "validation_error");
+
+    let (status, headers, bytes) = send(
+        &state,
+        HEALTH_BODY_LIMIT,
+        Method::POST,
+        "/_health",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(headers.get(header::ALLOW).expect("allow"), "GET, HEAD");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+    assert_eq!(body["error"]["type"], "method_not_allowed");
+
+    let oversized = vec![b'x'; HEALTH_BODY_LIMIT + 1];
+    let (status, _, bytes) = send(
+        &state,
+        HEALTH_BODY_LIMIT,
+        Method::GET,
+        "/_health",
+        Body::from(oversized),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+    assert_eq!(body["error"]["type"], "payload_too_large");
+}

@@ -50,7 +50,8 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
   `/_percolate/jobs`, and the `/v2/_pit` lifecycle. `POST /v2/_mpercolate` and exhaustive-job
   cancellation remain protected. The protected set is otherwise **default-deny** (`requires_auth` in
   `bin/server/auth.rs`), so a future mutating endpoint is covered without anyone listing it.
-  `--auth-protect-reads` extends the gate to everything except the `/_health` liveness probe.
+  `--auth-protect-reads` extends the gate to everything except the sanitized
+  `GET`/`HEAD /_health` liveness probe.
 - **Fail-loud, never fail-open.** `AuthConfig::resolve` (`auth.rs`) refuses to start on an empty,
   non-printable, or **set-but-not-UTF-8** `RR_AUTH_TOKEN` (the latter was a real fail-open bug, fixed
   in ADR-062) — the server never silently serves open when a token was intended.

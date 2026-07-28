@@ -132,7 +132,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 crate::handlers::CAT_SEGMENTS_BODY_LIMIT,
             )),
         )
-        .route("/_health", get(cluster_health))
+        .route(
+            "/_health",
+            any(cluster_health).layer(axum::extract::DefaultBodyLimit::max(
+                crate::handlers::HEALTH_BODY_LIMIT,
+            )),
+        )
         .route("/_metrics", get(cluster_metrics))
         .route("/_vocab", get(cluster_get_vocab).put(cluster_put_vocab))
         .route("/_vocab/learn", post(cluster_learn_vocab))
@@ -210,6 +215,7 @@ mod bulk;
 mod cat_shards;
 mod crud;
 mod flush;
+mod health;
 mod jobs;
 mod pit;
 mod ranked;

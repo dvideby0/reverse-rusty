@@ -15,7 +15,7 @@
 //!   GET  /_stats             JSON metrics snapshot
 //!   GET  /_cat/stats         Human-readable metrics
 //!   GET  /_cat/segments      Per-segment LSM detail (text table; ?format=json)
-//!   GET  /_health            Health check
+//!   GET/HEAD /_health        Native readiness
 //!   GET  /_metrics           Prometheus text exposition format
 //!   GET  /_vocab             Current vocabulary as JSON
 //!   PUT  /_vocab             Replace vocabulary (body: Vocab JSON)
@@ -83,7 +83,8 @@ use handlers::{
     learn_and_apply_vocab, learn_vocab, mpercolate_route, open_pit_route, prometheus_metrics,
     put_doc, put_settings, put_vocab, reset_alias_feedback, search_route, stats,
     v2_mpercolate_route, v2_search_route, validate_and_apply_feedback, BACKUP_BODY_LIMIT,
-    CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT,
+    CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, PIT_BODY_LIMIT,
+    STATS_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -139,7 +140,7 @@ async fn main() {
     };
     match &auth_config {
         Some(a) if a.protect_reads => {
-            info!("bearer-token auth enabled (all endpoints except /_health)");
+            info!("bearer-token auth enabled (all requests except GET/HEAD /_health)");
         }
         Some(_) => info!("bearer-token auth enabled (mutating/admin endpoints)"),
         None => {
@@ -464,7 +465,10 @@ async fn main() {
             "/_cat/segments",
             any(cat_segments).layer(DefaultBodyLimit::max(CAT_SEGMENTS_BODY_LIMIT)),
         )
-        .route("/_health", get(health))
+        .route(
+            "/_health",
+            any(health).layer(DefaultBodyLimit::max(HEALTH_BODY_LIMIT)),
+        )
         .route("/_metrics", get(prometheus_metrics))
         .route("/_vocab", get(get_vocab).put(put_vocab))
         .route("/_vocab/learn", post(learn_vocab))
@@ -506,7 +510,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, GET/HEAD/PUT/DELETE /_doc/{id}, GET/POST /_search, POST /_mpercolate, POST /_bulk, GET/POST /_flush, POST /_compact, POST /_forcemerge, POST /_backup, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply, POST /_vocab/aliases/discover, POST /_vocab/aliases/discover_and_record, GET /_vocab/aliases/feedback, POST /_vocab/aliases/feedback/reset, POST /_vocab/aliases/validate_and_apply",
+        endpoints = "GET /, GET/HEAD/PUT/DELETE /_doc/{id}, GET/POST /_search, POST /_mpercolate, POST /_bulk, GET/POST /_flush, POST /_compact, POST /_forcemerge, POST /_backup, GET /_stats, GET /_cat/stats, GET/HEAD /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply, POST /_vocab/aliases/discover, POST /_vocab/aliases/discover_and_record, GET /_vocab/aliases/feedback, POST /_vocab/aliases/feedback/reset, POST /_vocab/aliases/validate_and_apply",
         "server listening"
     );
 
