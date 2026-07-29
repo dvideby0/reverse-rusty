@@ -76,19 +76,21 @@ use reverse_rusty::segment::Engine;
 
 use cli::Cli;
 use handlers::{
-    alias_import_method_not_allowed, alias_learn_apply_method_not_allowed,
-    alias_read_method_not_allowed, api_root, backup_route, bulk_route, cancel_job, cat_segments,
-    cat_stats, close_pit_route, compact_route, create_job_route, delete_doc, discover_aliases,
-    discover_and_record_aliases, flush_route, force_merge_route, get_alias_feedback, get_aliases,
-    get_doc, get_job, get_job_stream, get_settings, get_vocab, health, import_aliases,
-    learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab, mpercolate_route, open_pit_route,
-    prometheus_metrics, put_doc, put_settings, put_vocab, reset_alias_feedback, search_route,
-    stats, v2_mpercolate_route, v2_search_route, validate_and_apply_feedback,
+    alias_discover_method_not_allowed, alias_import_method_not_allowed,
+    alias_learn_apply_method_not_allowed, alias_read_method_not_allowed, api_root, backup_route,
+    bulk_route, cancel_job, cat_segments, cat_stats, close_pit_route, compact_route,
+    create_job_route, delete_doc, discover_aliases, discover_and_record_aliases, flush_route,
+    force_merge_route, get_alias_feedback, get_aliases, get_doc, get_job, get_job_stream,
+    get_settings, get_vocab, health, import_aliases, learn_and_apply_aliases,
+    learn_and_apply_vocab, learn_vocab, mpercolate_route, open_pit_route, prometheus_metrics,
+    put_doc, put_settings, put_vocab, reset_alias_feedback, search_route, stats,
+    v2_mpercolate_route, v2_search_route, validate_and_apply_feedback,
     vocab_learn_apply_method_not_allowed, vocab_learn_method_not_allowed, vocab_method_not_allowed,
-    ALIAS_IMPORT_BODY_LIMIT, ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT,
-    BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT,
-    METRICS_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT,
-    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
+    ALIAS_DISCOVER_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT, ALIAS_LEARN_APPLY_BODY_LIMIT,
+    ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT,
+    HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT,
+    VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
+    VOCAB_WRITE_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -520,7 +522,12 @@ async fn main() {
                 .layer(DefaultBodyLimit::max(ALIAS_LEARN_APPLY_BODY_LIMIT))
                 .fallback(alias_learn_apply_method_not_allowed::<AppState>),
         )
-        .route("/_vocab/aliases/discover", post(discover_aliases))
+        .route(
+            "/_vocab/aliases/discover",
+            post(discover_aliases)
+                .layer(DefaultBodyLimit::max(ALIAS_DISCOVER_BODY_LIMIT))
+                .fallback(alias_discover_method_not_allowed::<AppState>),
+        )
         .route(
             "/_vocab/aliases/discover_and_record",
             post(discover_and_record_aliases),

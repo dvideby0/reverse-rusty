@@ -139,6 +139,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   corpus/rebuild admission, complete standalone rebuild verification, fail-loud durable
   acknowledgement, and an explicit native boundary from Elasticsearch/OpenSearch synonym management
   ([ADR-153](decisions/adr-153-alias-learn-apply-api-contract.md)).
+- Hardened native `POST /_vocab/aliases/discover` with strict optional-JSON transport, validated
+  distinct-query evidence and bounded controls, timed no-store standalone/coordinator parity,
+  shared off-runtime admission, brief stored-source capture, deterministic response limits, and an
+  explicit native boundary from Elasticsearch/OpenSearch synonym management
+  ([ADR-154](decisions/adr-154-alias-discover-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

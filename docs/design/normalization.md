@@ -182,6 +182,11 @@ standalone read captures one immutable engine snapshot; a coordinator read clone
 under a brief cluster guard inside the blocking worker and releases the guard before paging and
 serialization. Optional `from`/`size` controls page stored order without changing the total
 registry `count` or whole-registry lifecycle summary.
+Compute-only distributional discovery shares the same admission and blocking-work boundary. An
+explicit corpus is validated as distinct, valid DSL with bounded size and controls; standalone
+stored-corpus discovery briefly clones live sources under the engine guard and releases it before
+analysis. Coordinator discovery requires an explicit corpus until cross-shard source gathering
+exists. The deterministic proposals are never recorded or activated by that route.
 Embedded callers use the deliberately split `set_vocab()` then `recompile_stale_segments()` sequence
 and must not publish a snapshot between those calls. Single-node durable deployments must persist
 the same vocabulary file used on reopen; clusters checkpoint the vocabulary in coordinator state. See

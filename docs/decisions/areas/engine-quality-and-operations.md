@@ -30,6 +30,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [151](../adr-151-parallel-ci-code-gate-lanes.md) | Parallel CI code-gate lanes | Runs exact core and distributed gates concurrently behind one required result. | Accepted |
 | [152](../adr-152-alias-import-api-contract.md) | Alias-import REST API contract | Makes governed Solr imports strict, familiar, idempotent, durable, and mode-consistent. | Accepted |
 | [153](../adr-153-alias-learn-apply-api-contract.md) | Alias learn-and-apply REST API contract | Makes stored-corpus alias learning strict, bounded, off-runtime, durable, and mode-consistent. | Accepted |
+| [154](../adr-154-alias-discover-api-contract.md) | Alias discovery REST API contract | Makes review-first distributional discovery strict, bounded, off-runtime, and mode-consistent. | Accepted |
 
 ---
 
