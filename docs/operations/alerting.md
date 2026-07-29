@@ -32,7 +32,7 @@ entries burn memory + scan time), disk-pressure problem later. **Do:** check com
 running (single-node: `flush/compaction_total` counters; cluster: the backlog should sawtooth,
 not climb), and check disk headroom — compaction needs transient space
 ([`sizing.md` §5](sizing.md)). In standalone mode, lower triggers through `PUT /_settings`
-(ADR-022). Cluster `PUT /_settings` is 501; change the consistent per-shard startup configuration
+(ADR-022/160). Cluster `PUT /_settings` is 501; change the consistent per-shard startup configuration
 and restart/redeploy instead.
 
 ### RRShardStaleSegments

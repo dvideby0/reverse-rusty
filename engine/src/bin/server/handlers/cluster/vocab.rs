@@ -34,8 +34,9 @@ use crate::handlers::vocab::{
     VocabLearnApplyTransport, VocabLearnTransport, VocabReadTransport, VocabWriteTransport,
 };
 use crate::handlers::{
-    acquire_settings_read_permit, finish_settings_read_worker, serialize_settings_response,
-    SettingsReadTransport,
+    acquire_settings_read_permit, apply_settings_patch, finish_settings_read_worker,
+    finish_settings_write_response, serialize_settings_response, settings_write_error_response,
+    SettingsReadTransport, SettingsWriteTransport,
 };
 use crate::state::ClusterAppState;
 
@@ -321,14 +322,26 @@ pub(crate) async fn cluster_get_settings(
     finish_settings_read_worker(&state.prom, worker.await)
 }
 
-/// PUT /_settings — cluster settings are static in v1 (set at assembly); the
-/// single-node dynamic-settings machinery has no cluster analogue yet.
-pub(crate) async fn cluster_put_settings() -> Response {
-    not_in_cluster_mode(
-        "PUT /_settings",
-        "cluster settings are fixed at assembly in v1 — restart the coordinator with \
-         the new flags",
-    )
+/// PUT /_settings — validate the shared native transport and patch contract,
+/// then name the coordinator-mode boundary and supported alternative.
+pub(crate) async fn cluster_put_settings(
+    State(state): State<Arc<ClusterAppState>>,
+    transport: SettingsWriteTransport,
+) -> Response {
+    let (_duration, _timeout, patch) = transport.into_parts();
+    let response = match apply_settings_patch(EngineConfig::default(), &patch.into_inner()) {
+        Ok(_) => not_in_cluster_mode(
+            "PUT /_settings",
+            "cluster settings are fixed at assembly in v1 — restart the coordinator and \
+             consistently configured shard nodes with the new flags",
+        ),
+        Err(problems) => settings_write_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "settings_error",
+            problems.join("; "),
+        ),
+    };
+    finish_settings_write_response(&state.prom, response)
 }
 
 /// POST /_vocab/aliases/discover — distributional discovery in cluster mode is a **dry run over

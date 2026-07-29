@@ -36,6 +36,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [157](../adr-157-alias-feedback-reset-api-contract.md) | Alias-feedback reset REST API contract | Makes evidence-window reset strict, linearizable, bounded, observable, and mode-consistent. | Accepted |
 | [158](../adr-158-alias-feedback-validate-apply-api-contract.md) | Alias-feedback validate-and-apply REST API contract | Makes evidence stamping and explicit activation strict, idempotent, bounded, durable, and observable. | Accepted |
 | [159](../adr-159-get-settings-api-contract.md) | Settings read REST API contract | Makes live configuration reads strict, cache-safe, bounded, observable, and off-runtime. | Accepted |
+| [160](../adr-160-put-settings-api-contract.md) | Settings write REST API contract | Makes runtime configuration updates strict, duplicate-safe, bounded, observable, and coherently published off-runtime. | Accepted |
 
 ---
 

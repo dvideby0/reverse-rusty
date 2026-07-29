@@ -166,6 +166,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   transport, no-store telemetry, shared off-runtime admission and serialization, and coordinator
   lock/default parity while keeping its native compatibility boundary explicit
   ([ADR-159](decisions/adr-159-get-settings-api-contract.md)).
+- Hardened native `PUT /_settings` with strict duplicate-safe JSON, bounded familiar controls,
+  no-store telemetry, shared off-runtime admission and lock waiting, and coherent mutation/snapshot
+  publication while preserving the explicit live-only and coordinator boundaries
+  ([ADR-160](decisions/adr-160-put-settings-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

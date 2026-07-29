@@ -13,10 +13,13 @@ mod jobs;
 mod pit;
 mod search;
 mod settings_read;
+mod settings_write;
 mod vocab;
 
 #[cfg(test)]
 mod settings_read_tests;
+#[cfg(test)]
+mod settings_write_tests;
 
 pub(crate) use admin::{
     api_root, cat_segments, cat_stats, compact_route, finish_metrics_response, flush_route,
@@ -66,9 +69,12 @@ pub(crate) use settings_read::{
     serialize_settings_response, settings_method_not_allowed, SettingsReadTransport,
     SETTINGS_READ_BODY_LIMIT,
 };
+pub(crate) use settings_write::{
+    apply_settings_patch, finish_settings_write_response, put_settings,
+    settings_write_error_response, SettingsWriteTransport, SETTINGS_WRITE_BODY_LIMIT,
+};
 pub(crate) use vocab::{
-    get_vocab, learn_and_apply_vocab, learn_vocab, put_settings, put_vocab,
-    vocab_learn_apply_method_not_allowed, vocab_learn_method_not_allowed, vocab_method_not_allowed,
-    VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
-    VOCAB_WRITE_BODY_LIMIT,
+    get_vocab, learn_and_apply_vocab, learn_vocab, put_vocab, vocab_learn_apply_method_not_allowed,
+    vocab_learn_method_not_allowed, vocab_method_not_allowed, VOCAB_LEARN_APPLY_BODY_LIMIT,
+    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
 };

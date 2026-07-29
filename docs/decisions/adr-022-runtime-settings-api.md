@@ -57,4 +57,7 @@
 
 [ADR-159](adr-159-get-settings-api-contract.md) supersedes the GET transport details with strict
 body/query handling, cache and telemetry policy, bounded off-runtime serialization, and
-coordinator/default parity. The native response model and this ADR's PUT policy remain unchanged.
+coordinator/default parity. [ADR-160](adr-160-put-settings-api-contract.md) supersedes the PUT
+transport and concurrency details with strict duplicate-safe JSON, bounded familiar controls,
+off-runtime admission/locking, and coherent mutation plus snapshot publication. This ADR's native,
+live-only response model remains unchanged.
