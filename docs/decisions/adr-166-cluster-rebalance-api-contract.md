@@ -67,6 +67,9 @@ transfer once it has fenced/drained a source.
   thread under the existing shared topology barrier. This keeps Tokio request workers free and
   makes a zero-timeout probe independent of shared blocking-pool scheduling. Descriptor mutation
   remains exclusive with the workflow; ADR-095's internal disjoint move concurrency is unchanged.
+- After HTTP drain begins, acquire and retain the same single rebalance admission slot before
+  durability cleanup and process exit. This joins the safety-sensitive work of any detached worker,
+  so graceful shutdown cannot terminate a handoff after fencing or a live-routing flip.
 - Return structured `Cache-Control: no-store` responses and fixed
   `cluster_rebalance` request/duration telemetry for every route-reached outcome.
 
@@ -84,6 +87,8 @@ Disconnecting after that atomic start does not cancel or multiply it: the indepe
 worker finishes while retaining the single admission slot, and the idempotent endpoint can be
 inspected/retried afterward. Disconnecting before start cancels the queued gate, so a delayed
 dedicated worker cannot mutate unless it atomically started before cancellation.
+Coordinator shutdown stops serving and then waits for that admission slot before flushing or
+exiting, so the independently supervised worker also survives the HTTP drain boundary.
 
 Map-only rebalance still commits changed assignments as the established sequence of control
 proposals. That sequence is safe only in-process; if a proposal or the final state read fails, the
@@ -102,6 +107,7 @@ topology modes (in-process, assignment-routed remote, and refused static remote)
 method/query/media/object/field controls, positive parallelism, body size and absolute body
 deadlines, zero/positive/closed admission, topology-lock timeouts, deterministic dedicated-worker
 dispatch, off-runtime execution, post-start manager-timeout semantics, disconnect-retained admission
-and completion, fixed telemetry/no-store headers, and sanitized fail-loud control errors.
+and completion, shutdown quiescence, fixed telemetry/no-store headers, and sanitized fail-loud
+control errors.
 Existing allocator, handoff, replicated-group rebalance, reconcile, topology-resolution, Raft, and
 multi-machine suites continue to prove the underlying placement and movement mechanisms.

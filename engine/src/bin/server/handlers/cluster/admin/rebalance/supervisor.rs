@@ -26,7 +26,9 @@ impl fmt::Display for ClusterRebalanceWorkerFailure {
 /// dedicated thread avoids both blocking Tokio and making a zero manager
 /// timeout depend on the shared blocking pool's scheduler. Dropping the join
 /// handle detaches the thread intentionally: the completion channel and logs
-/// remain live after an HTTP disconnect.
+/// remain live after an HTTP disconnect. The worker owns the sole rebalance
+/// permit until its safety-sensitive work finishes; coordinator shutdown
+/// acquires and retains that permit before durability cleanup and process exit.
 pub(super) fn supervise_cluster_rebalance_worker(
     worker: impl FnOnce() -> ClusterRebalanceWorkerOutcome + Send + 'static,
 ) -> std::io::Result<tokio::sync::oneshot::Receiver<ClusterRebalanceWorkerResult>> {

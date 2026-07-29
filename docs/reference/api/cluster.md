@@ -304,6 +304,10 @@ familiar ES/OS overall `timeout` control is rejected because their reroute
 APIs return after an allocation decision, whereas this native endpoint synchronously waits for
 physical movement.
 
+Graceful coordinator shutdown stops accepting traffic, then waits to acquire and retain that same
+rebalance slot before durability cleanup and process exit. An already-started handoff therefore
+finishes across HTTP drain instead of being terminated after fencing or a live-routing flip.
+
 The route accepts only `POST`, caps body transport at 64 KiB, and gives body delivery 250 ms. An
 empty body needs no content type; a non-empty body requires `application/json` or
 `application/*+json`. Unknown/duplicate/null fields, non-object JSON, zero parallelism, unsupported
