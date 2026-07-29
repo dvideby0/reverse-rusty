@@ -31,6 +31,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [152](../adr-152-alias-import-api-contract.md) | Alias-import REST API contract | Makes governed Solr imports strict, familiar, idempotent, durable, and mode-consistent. | Accepted |
 | [153](../adr-153-alias-learn-apply-api-contract.md) | Alias learn-and-apply REST API contract | Makes stored-corpus alias learning strict, bounded, off-runtime, durable, and mode-consistent. | Accepted |
 | [154](../adr-154-alias-discover-api-contract.md) | Alias discovery REST API contract | Makes review-first distributional discovery strict, bounded, off-runtime, and mode-consistent. | Accepted |
+| [155](../adr-155-alias-discover-record-api-contract.md) | Alias discover-and-record REST API contract | Makes candidate recording strict, bounded, off-runtime, and explicit about live-only persistence. | Accepted |
 
 ---
 

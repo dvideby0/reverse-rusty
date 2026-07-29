@@ -20,10 +20,12 @@ use reverse_rusty::config::EngineConfig;
 
 use crate::handlers::alias::{
     acquire_alias_import_permit, acquire_alias_learn_apply_permit, acquire_alias_read_permit,
-    alias_import_error_response, alias_import_success, alias_learn_apply_error_response,
-    alias_learn_apply_success, execute_alias_discovery, finish_alias_import_response,
+    alias_discover_record_error_response, alias_import_error_response, alias_import_success,
+    alias_learn_apply_error_response, alias_learn_apply_success, execute_alias_discovery,
+    finish_alias_discover_record_response, finish_alias_import_response,
     finish_alias_learn_apply_response, finish_alias_read_worker, serialize_aliases,
-    AliasDiscoverTransport, AliasImportTransport, AliasLearnApplyTransport, AliasReadTransport,
+    validate_alias_discover_record_body, AliasDiscoverRecordTransport, AliasDiscoverTransport,
+    AliasImportTransport, AliasLearnApplyTransport, AliasReadTransport,
 };
 use crate::handlers::vocab::{
     acquire_vocab_learn_apply_permit, acquire_vocab_read_permit, acquire_vocab_write_permit,
@@ -328,12 +330,24 @@ pub(crate) async fn cluster_discover_aliases(
 /// POST /_vocab/aliases/discover_and_record — 501 in cluster mode (ADR-102): recording into a
 /// cluster vocabulary is a full blue/green rebuild (ADR-074/076), grossly disproportionate for
 /// review-only candidates.
-pub(crate) async fn cluster_discover_and_record_aliases() -> Response {
-    not_in_cluster_mode(
-        "POST /_vocab/aliases/discover_and_record",
-        "run the dry-run /_vocab/aliases/discover with an explicit `queries` body (or discover \
-         on a single-node replica), review, then install reviewed entries via PUT /_vocab",
-    )
+pub(crate) async fn cluster_discover_and_record_aliases(
+    State(state): State<Arc<ClusterAppState>>,
+    transport: AliasDiscoverRecordTransport,
+) -> Response {
+    let (_duration, _started, body) = transport.into_parts();
+    let response = match validate_alias_discover_record_body(&body) {
+        Ok(_) => not_in_cluster_mode(
+            "POST /_vocab/aliases/discover_and_record",
+            "run the dry-run /_vocab/aliases/discover with an explicit `queries` body (or discover \
+             on a single-node replica), review, then install reviewed entries via PUT /_vocab",
+        ),
+        Err(reason) => alias_discover_record_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "validation_error",
+            reason,
+        ),
+    };
+    finish_alias_discover_record_response(&state.prom, response)
 }
 
 /// GET /_vocab/aliases/feedback — 501 in cluster mode (ADR-103): capture is single-node v1

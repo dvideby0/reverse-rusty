@@ -54,9 +54,9 @@ struct AliasDiscoverRequest {
     include_numeric: Option<bool>,
 }
 
-struct AliasDiscoverWork {
-    queries: Option<Vec<(u64, String)>>,
-    config: reverse_rusty::vocab::DistributionalConfig,
+pub(super) struct AliasDiscoverWork {
+    pub(super) queries: Option<Vec<(u64, String)>>,
+    pub(super) config: reverse_rusty::vocab::DistributionalConfig,
 }
 
 impl AliasDiscoverRequest {
@@ -245,7 +245,7 @@ where
     }
 }
 
-fn is_json_content_type(headers: &axum::http::HeaderMap) -> bool {
+pub(super) fn is_json_content_type(headers: &axum::http::HeaderMap) -> bool {
     let Some(value) = headers.get(header::CONTENT_TYPE) else {
         return false;
     };
@@ -276,6 +276,34 @@ enum AliasDiscoverWorkerError {
     Serialization(serde_json::Error),
 }
 
+fn parse_alias_discover_request(body: &[u8]) -> Result<AliasDiscoverRequest, String> {
+    let request = if body.is_empty() {
+        AliasDiscoverRequest::default()
+    } else {
+        serde_json::from_slice(body)
+            .map_err(|source| format!("invalid alias discovery JSON body: {source}"))?
+    };
+    Ok(request)
+}
+
+pub(super) fn parse_alias_discover_work(body: &[u8]) -> Result<AliasDiscoverWork, String> {
+    parse_alias_discover_request(body)?.into_work()
+}
+
+pub(super) fn parse_alias_discover_record_config(
+    body: &[u8],
+) -> Result<reverse_rusty::vocab::DistributionalConfig, String> {
+    let request = parse_alias_discover_request(body)?;
+    if request.queries.is_some() {
+        return Err(
+            "discover_and_record analyzes this engine's own stored queries; use \
+             /_vocab/aliases/discover for an explicit corpus"
+                .to_string(),
+        );
+    }
+    Ok(request.into_work()?.config)
+}
+
 /// Run parsing, validation, corpus capture, discovery, and serialization on the
 /// shared one-slot blocking worker. `stored_corpus` is called only when the
 /// request omits `queries`; coordinator mode supplies a fail-loud closure.
@@ -300,18 +328,7 @@ where
 
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let request = if body.is_empty() {
-            AliasDiscoverRequest::default()
-        } else {
-            serde_json::from_slice(&body).map_err(|source| {
-                AliasDiscoverWorkerError::Invalid(format!(
-                    "invalid alias discovery JSON body: {source}"
-                ))
-            })?
-        };
-        let work = request
-            .into_work()
-            .map_err(AliasDiscoverWorkerError::Invalid)?;
+        let work = parse_alias_discover_work(&body).map_err(AliasDiscoverWorkerError::Invalid)?;
         let queries = match work.queries {
             Some(queries) => queries,
             None => stored_corpus().map_err(AliasDiscoverWorkerError::Invalid)?,

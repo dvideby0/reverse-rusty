@@ -5,8 +5,9 @@
 - **Status:** **Accepted (2026-07-02).** `POST /_vocab/aliases/discover[_and_record]` — PPMI-cosine
   context-similarity candidates over the stored queries, filed as review-only `Candidate`s under a
   new never-auto-active provenance.
-- **Current outcome:** ADR-103 shipped the match-feedback validation follow-on, and
-  [ADR-154](adr-154-alias-discover-api-contract.md) hardened the compute-only REST contract.
+- **Current outcome:** ADR-103 shipped the match-feedback validation follow-on,
+  [ADR-154](adr-154-alias-discover-api-contract.md) hardened the compute-only REST contract, and
+  [ADR-155](adr-155-alias-discover-record-api-contract.md) hardened candidate recording.
   Cluster-side source gathering and title-corpus contexts remain unimplemented; cluster
   record/feedback endpoints fail loudly where the required cross-shard evidence is unavailable.
 
