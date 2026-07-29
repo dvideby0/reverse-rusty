@@ -76,9 +76,11 @@ remote callers that deliberately depended on the old default incur physical move
 correctness-preserving behavior.
 
 This endpoint is synchronous with respect to the whole selected workflow, unlike ES/OpenSearch
-reroute. A remote pass may therefore outlive the manager-start timeout after it begins. Disconnecting
-does not cancel or multiply it: the independently supervised worker finishes while retaining the
-single admission slot, and the idempotent endpoint can be inspected/retried afterward.
+reroute. A remote pass may therefore outlive the manager-start timeout after it begins.
+Disconnecting after that atomic start does not cancel or multiply it: the independently supervised
+worker finishes while retaining the single admission slot, and the idempotent endpoint can be
+inspected/retried afterward. Disconnecting before start cancels the queued gate, so a blocking-pool
+worker cannot mutate later without a live request having observed its start.
 
 Map-only rebalance still commits changed assignments as the established sequence of control
 proposals. That sequence is safe only in-process; if a proposal or the final state read fails, the

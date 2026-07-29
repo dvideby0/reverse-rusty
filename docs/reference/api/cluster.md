@@ -291,10 +291,12 @@ blocking-pool queueing, and topology/cluster-lock waiting until the workflow sta
 
 The manager timeout does **not** cancel a started data move. Once the worker atomically starts, the
 request waits for its terminal report because peer recovery/fence/drain/flip cannot be safely
-cancelled at an arbitrary HTTP deadline. A disconnect drops only the response: the independently
-supervised worker retains the single rebalance admission slot and completes. The familiar ES/OS
-overall `timeout` control is rejected because their reroute APIs return after an allocation
-decision, whereas this native endpoint synchronously waits for physical movement.
+cancelled at an arbitrary HTTP deadline. A disconnect after start drops only the response: the
+independently supervised worker retains the single rebalance admission slot and completes. A
+disconnect before start cancels its queued gate, so it cannot mutate later when blocking-pool
+capacity appears. The familiar ES/OS overall `timeout` control is rejected because their reroute
+APIs return after an allocation decision, whereas this native endpoint synchronously waits for
+physical movement.
 
 The route accepts only `POST`, caps body transport at 64 KiB, and gives body delivery 250 ms. An
 empty body needs no content type; a non-empty body requires `application/json` or

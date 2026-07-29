@@ -371,24 +371,26 @@ fn blocking_pool_queue_cannot_start_a_rebalance_after_the_deadline() {
             .recv_timeout(Duration::from_secs(1))
             .expect("blocking pool is occupied");
 
-        let (status, _, bytes) = tokio::time::timeout(
-            Duration::from_secs(1),
-            send_raw(
-                &state,
-                rebalance_request(
-                    "/_cluster/rebalance?cluster_manager_timeout=25ms",
-                    Body::empty(),
+        for timeout in ["0", "25ms"] {
+            let (status, _, bytes) = tokio::time::timeout(
+                Duration::from_secs(1),
+                send_raw(
+                    &state,
+                    rebalance_request(
+                        &format!("/_cluster/rebalance?cluster_manager_timeout={timeout}"),
+                        Body::empty(),
+                    ),
                 ),
-            ),
-        )
-        .await
-        .expect("queued rebalance request remains bounded");
-        assert_error(
-            status,
-            &bytes,
-            StatusCode::REQUEST_TIMEOUT,
-            "rebalance_timeout",
-        );
+            )
+            .await
+            .expect("queued rebalance request remains bounded");
+            assert_error(
+                status,
+                &bytes,
+                StatusCode::REQUEST_TIMEOUT,
+                "rebalance_timeout",
+            );
+        }
 
         release_tx.send(()).expect("release blocking pool");
         blocker.await.expect("blocking-pool blocker");

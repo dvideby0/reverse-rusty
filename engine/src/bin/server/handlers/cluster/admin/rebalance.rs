@@ -103,6 +103,17 @@ fn cancel_queued_cluster_rebalance(gate: &Mutex<RebalanceStart>) -> bool {
     }
 }
 
+struct CancelQueuedClusterRebalance(Arc<Mutex<RebalanceStart>>);
+
+impl Drop for CancelQueuedClusterRebalance {
+    fn drop(&mut self) {
+        // Dropping an HTTP future must not leave a queued blocking worker able
+        // to start later. Once `Started` wins the gate this is intentionally a
+        // no-op: a live move cannot be cancelled safely.
+        let _ = cancel_queued_cluster_rebalance(&self.0);
+    }
+}
+
 #[derive(Debug)]
 struct RebalanceFailure {
     position: u32,
@@ -210,6 +221,7 @@ pub(crate) async fn cluster_rebalance(
 
     let worker_state = Arc::clone(&state);
     let gate = Arc::new(Mutex::new(RebalanceStart::Queued));
+    let _cancel_queued_on_drop = CancelQueuedClusterRebalance(Arc::clone(&gate));
     let worker_gate = Arc::clone(&gate);
     let (started_sender, mut started_receiver) = tokio::sync::oneshot::channel();
     #[cfg(feature = "distributed")]
@@ -236,6 +248,10 @@ pub(crate) async fn cluster_rebalance(
         let Some(cluster) = cluster else {
             return ClusterRebalanceWorkerOutcome::NotStarted;
         };
+        if !begin_cluster_rebalance(&worker_gate, deadline, no_wait) {
+            return ClusterRebalanceWorkerOutcome::NotStarted;
+        }
+        let _ = started_sender.send(());
         let mode = match resolve_rebalance_mode(
             cluster.requires_data_moving_rebalance(),
             body.do_move,
@@ -248,10 +264,6 @@ pub(crate) async fn cluster_rebalance(
                 ));
             }
         };
-        if !begin_cluster_rebalance(&worker_gate, deadline, no_wait) {
-            return ClusterRebalanceWorkerOutcome::NotStarted;
-        }
-        let _ = started_sender.send(());
         let result = execute_cluster_rebalance(
             &cluster,
             mode,
@@ -263,6 +275,14 @@ pub(crate) async fn cluster_rebalance(
     let mut completion = supervise_cluster_rebalance_worker(worker);
 
     if no_wait {
+        // Give an immediately runnable blocking worker one scheduler turn to
+        // win the start gate. If it is still queued, cancel it without waiting
+        // for blocking-pool capacity; the worker will observe `Cancelled`
+        // before any topology-dependent validation or mutation.
+        tokio::task::yield_now().await;
+        if cancel_queued_cluster_rebalance(&gate) {
+            return cluster_rebalance_not_started_timeout(&state.prom);
+        }
         return match completion.await {
             Ok(outcome) => finish_cluster_rebalance_worker(&state.prom, outcome),
             Err(source) => cluster_rebalance_supervisor_failed(&state.prom, &source),
@@ -539,5 +559,24 @@ mod tests {
             resolve_rebalance_mode(true, Some(false), None),
             Err(RebalanceRequestError::UnsafeRemoteMapOnly)
         ));
+    }
+
+    #[test]
+    fn dropping_a_handler_cancels_only_queued_work() {
+        let queued = Arc::new(Mutex::new(RebalanceStart::Queued));
+        drop(CancelQueuedClusterRebalance(Arc::clone(&queued)));
+        assert!(
+            !begin_cluster_rebalance(&queued, Instant::now(), true),
+            "a dropped request must leave its queued worker unable to start"
+        );
+
+        let started = Arc::new(Mutex::new(RebalanceStart::Queued));
+        let guard = CancelQueuedClusterRebalance(Arc::clone(&started));
+        assert!(begin_cluster_rebalance(&started, Instant::now(), true));
+        drop(guard);
+        assert!(
+            !cancel_queued_cluster_rebalance(&started),
+            "a started move must survive HTTP cancellation"
+        );
     }
 }
