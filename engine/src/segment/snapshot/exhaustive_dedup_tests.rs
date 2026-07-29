@@ -321,8 +321,13 @@ mod bounded_deadline_tests {
             pred: &pred,
         };
         let checks = AtomicUsize::new(0);
-        let mut collector =
-            TopKCollector::new_polling(10, 100, None, snapshot.program_scorer_with_poll(&program));
+        let title_features = [crate::rank::RankTitleFeatures::from_title("alpha")];
+        let mut collector = TopKCollector::new_polling(
+            10,
+            100,
+            None,
+            snapshot.program_scorer_with_poll(&program, &title_features),
+        );
         let mut scratch = MatchScratch::new();
         let result = view.match_title_collect(
             "zzrankneedle",

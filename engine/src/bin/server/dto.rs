@@ -1,10 +1,12 @@
 //! Response DTOs shared across handler modules.
 //!
 //! [`ApiError`] is the structured error envelope every handler returns on failure;
-//! [`ApiVersion`] is the honest ES/OS-shaped product version shared by both server
-//! modes; [`HitSource`] is the `_source` projection of a stored query, emitted by
-//! both the `_doc` read path and the percolate/search hits. Endpoint-specific
-//! request/response shapes live with their handler in [`crate::handlers`].
+//! [`rank_program_error`] keeps profile compilation failures consistent across
+//! bounded and exhaustive APIs; [`ApiVersion`] is the honest ES/OS-shaped product
+//! version shared by both server modes; [`HitSource`] is the `_source` projection
+//! of a stored query, emitted by both the `_doc` read path and the percolate/search
+//! hits. Endpoint-specific request/response shapes live with their handler in
+//! [`crate::handlers`].
 
 use axum::{http::StatusCode, Json};
 use serde::Serialize;
@@ -61,6 +63,16 @@ impl ApiError {
             }),
         )
     }
+}
+
+pub(crate) fn rank_program_error(
+    error: &reverse_rusty::RankProgramError,
+) -> (StatusCode, Json<ApiError>) {
+    let kind = match error {
+        reverse_rusty::RankProgramError::UnsupportedField(_) => "unsupported_rank_field",
+        reverse_rusty::RankProgramError::UnknownProfile(_) => "unknown_rank_profile",
+    };
+    ApiError::response(StatusCode::BAD_REQUEST, kind, error.to_string())
 }
 
 /// The `_source` of a stored query — its original DSL text. Shared by the `_doc`

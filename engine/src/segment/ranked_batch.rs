@@ -134,6 +134,12 @@ impl EngineSnapshot {
             ));
         }
         let threshold = usize::try_from(options.track_total_hits_up_to).unwrap_or(MAX_TOP_K);
+        // As in the scalar path, queue time is part of the deadline. Check
+        // before allocating/scanning title features, then between titles so a
+        // large batch cannot preprocess every remaining title after expiry.
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            return Err(RankedMatchError::Cancelled(crate::segment::MatchCancelled));
+        }
         let view = MatchView {
             norm: &self.norm,
             dict: &self.dict,
@@ -144,8 +150,20 @@ impl EngineSnapshot {
         };
         let mut opts = batch_opts;
         opts.include_broad = options.query_scope == QueryScope::WithBroad;
+        let title_features: Vec<_> = if program.is_static_profile() {
+            Vec::new()
+        } else {
+            let mut features = Vec::with_capacity(titles.len());
+            for title in titles {
+                if deadline.is_some_and(|at| Instant::now() >= at) {
+                    return Err(RankedMatchError::Cancelled(crate::segment::MatchCancelled));
+                }
+                features.push(crate::rank::RankTitleFeatures::from_title(title.as_ref()));
+            }
+            features
+        };
         let (slots, stats) = if let Some(at) = deadline {
-            let scorer = self.program_scorer_with_poll(program);
+            let scorer = self.program_scorer_with_poll(program, &title_features);
             try_batch_top_k(
                 &view,
                 titles,
@@ -158,7 +176,7 @@ impl EngineSnapshot {
             )
             .map_err(RankedMatchError::Cancelled)?
         } else {
-            let scorer = self.program_scorer(program);
+            let scorer = self.program_scorer(program, &title_features);
             batch_top_k(
                 &view,
                 titles,

@@ -210,10 +210,23 @@ impl EngineSnapshot {
         let canonical = move |source, local, logical, should_stop: &mut dyn FnMut() -> bool| {
             deduper.is_first_matching(source, local, logical, should_stop)
         };
+        let title_features = program.map_or_else(crate::rank::RankTitleFeatures::default, |rank| {
+            if rank.is_static_profile() {
+                crate::rank::RankTitleFeatures::default()
+            } else {
+                crate::rank::RankTitleFeatures::from_title(title)
+            }
+        });
         let scorer = |logical_id, should_stop: &mut dyn FnMut() -> bool| {
             program.and_then(|rank| {
-                self.rank_metadata_for_logical_with_poll(logical_id, should_stop)
-                    .map(|(values, tags)| crate::rank::score_program(values, tags, rank))
+                self.rank_metadata_for_logical_with_poll_mode(
+                    logical_id,
+                    should_stop,
+                    !rank.is_static_profile(),
+                )
+                .map(|(values, query, tags)| {
+                    crate::rank::score_program(values, tags, query, title_features, rank)
+                })
             })
         };
         let mut collector =
@@ -297,34 +310,60 @@ impl EngineSnapshot {
         crate::rank::compile_rank_program(&self.tag_dict, spec)
     }
 
+    /// Compile a bounded-ranking program against an operator-loaded profile
+    /// registry. Request setup resolves the model once; scoring stays
+    /// allocation-free and integer-only.
+    pub fn compile_rank_program_with_profiles(
+        &self,
+        spec: &crate::rank::RankProgramSpec,
+        profiles: &crate::rank::RankProfiles,
+    ) -> Result<crate::rank::CompiledRankProgram, crate::rank::RankProgramError> {
+        crate::rank::compile_rank_program_with_profiles(&self.tag_dict, spec, profiles)
+    }
+
     pub(super) fn tags_for_logical(&self, logical_id: u64) -> Option<&[crate::tagdict::TagId]> {
         self.source_metadata_for_logical(logical_id)
             .map(|(_, _, tags)| tags)
     }
 
-    /// Newest-live typed rank values and tags for a logical id. The same reverse
-    /// walk as compatibility ranking prevents an older physical duplicate from
-    /// determining score merely because it emitted first.
-    pub(super) fn rank_metadata_for_logical(
-        &self,
-        logical_id: u64,
-    ) -> Option<(crate::rank::RankValues, &[crate::tagdict::TagId])> {
-        self.rank_metadata_for_logical_with_poll(logical_id, &mut || false)
-    }
-
-    /// Cancellable exhaustive counterpart to [`Self::rank_metadata_for_logical`].
-    /// A legacy logical id may have arbitrarily many newer tombstoned physical
-    /// copies, so poll between reverse-index entries rather than turning score
-    /// resolution into one uninterruptible scan.
+    /// Test seam for the cancellable newest-live metadata walk. A legacy logical
+    /// id may have arbitrarily many newer tombstoned physical copies, so the
+    /// production scorer polls between reverse-index entries.
+    #[cfg(test)]
     pub(super) fn rank_metadata_for_logical_with_poll<C>(
         &self,
         logical_id: u64,
         should_stop: &mut C,
-    ) -> Option<(crate::rank::RankValues, &[crate::tagdict::TagId])>
+    ) -> Option<(
+        crate::rank::RankValues,
+        crate::rank::RankQueryFeatures,
+        &[crate::tagdict::TagId],
+    )>
     where
         C: FnMut() -> bool + ?Sized,
     {
-        let mut best: Option<(u64, crate::rank::RankValues, &[crate::tagdict::TagId])> = None;
+        self.rank_metadata_for_logical_with_poll_mode(logical_id, should_stop, true)
+    }
+
+    fn rank_metadata_for_logical_with_poll_mode<C>(
+        &self,
+        logical_id: u64,
+        should_stop: &mut C,
+        include_query_features: bool,
+    ) -> Option<(
+        crate::rank::RankValues,
+        crate::rank::RankQueryFeatures,
+        &[crate::tagdict::TagId],
+    )>
+    where
+        C: FnMut() -> bool + ?Sized,
+    {
+        let mut best: Option<(
+            u64,
+            crate::rank::RankValues,
+            crate::rank::RankQueryFeatures,
+            &[crate::tagdict::TagId],
+        )> = None;
         for &local in self.memtable.locals_for_logical(logical_id).iter().rev() {
             if should_stop() {
                 return None;
@@ -332,7 +371,7 @@ impl EngineSnapshot {
             if self.memtable.is_alive(local) {
                 let source_generation = self.memtable.source_generation_of(local);
                 let replace = match best {
-                    Some((best_generation, _, _)) => source_generation > best_generation,
+                    Some((best_generation, _, _, _)) => source_generation > best_generation,
                     None => true,
                 };
                 if !replace {
@@ -343,7 +382,16 @@ impl EngineSnapshot {
                 if rank.priority == 0 {
                     rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
                 }
-                best = Some((source_generation, rank, tags));
+                best = Some((
+                    source_generation,
+                    rank,
+                    if include_query_features {
+                        self.memtable.rank_query_features(local)
+                    } else {
+                        crate::rank::RankQueryFeatures::default()
+                    },
+                    tags,
+                ));
             }
         }
         for seg in self.segments.iter().rev() {
@@ -354,7 +402,7 @@ impl EngineSnapshot {
                 if seg.is_alive(local) {
                     let source_generation = seg.source_generation_of(local);
                     let replace = match best {
-                        Some((best_generation, _, _)) => source_generation > best_generation,
+                        Some((best_generation, _, _, _)) => source_generation > best_generation,
                         None => true,
                     };
                     if !replace {
@@ -365,11 +413,20 @@ impl EngineSnapshot {
                     if rank.priority == 0 {
                         rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
                     }
-                    best = Some((source_generation, rank, tags));
+                    best = Some((
+                        source_generation,
+                        rank,
+                        if include_query_features {
+                            seg.rank_query_features(local)
+                        } else {
+                            crate::rank::RankQueryFeatures::default()
+                        },
+                        tags,
+                    ));
                 }
             }
         }
-        best.map(|(_, rank, tags)| (rank, tags))
+        best.map(|(_, rank, query, tags)| (rank, query, tags))
     }
 
     /// Build the newest-live integer scorer for one compiled rank program —
@@ -378,12 +435,23 @@ impl EngineSnapshot {
     pub(in crate::segment) fn program_scorer<'a>(
         &'a self,
         program: &'a crate::rank::CompiledRankProgram,
-    ) -> impl Fn(u64) -> i64 + Sync + 'a {
-        move |logical_id| {
-            self.rank_metadata_for_logical(logical_id)
-                .map_or(0, |(values, tags)| {
-                    crate::rank::score_program(values, tags, program)
-                })
+        title_features: &'a [crate::rank::RankTitleFeatures],
+    ) -> impl Fn(usize, u64) -> i64 + Sync + 'a {
+        move |title_index, logical_id| {
+            self.rank_metadata_for_logical_with_poll_mode(
+                logical_id,
+                &mut || false,
+                !program.is_static_profile(),
+            )
+            .map_or(0, |(values, query, tags)| {
+                crate::rank::score_program(
+                    values,
+                    tags,
+                    query,
+                    title_features.get(title_index).copied().unwrap_or_default(),
+                    program,
+                )
+            })
         }
     }
 
@@ -394,21 +462,32 @@ impl EngineSnapshot {
     pub(in crate::segment) fn program_scorer_with_poll<'a>(
         &'a self,
         program: &'a crate::rank::CompiledRankProgram,
-    ) -> impl Fn(u64, &mut dyn FnMut() -> bool) -> Option<i64> + Sync + 'a {
-        move |logical_id, should_stop| {
+        title_features: &'a [crate::rank::RankTitleFeatures],
+    ) -> impl Fn(usize, u64, &mut dyn FnMut() -> bool) -> Option<i64> + Sync + 'a {
+        move |title_index, logical_id, should_stop| {
             let mut stopped = should_stop();
             if stopped {
                 return None;
             }
-            let metadata = self.rank_metadata_for_logical_with_poll(logical_id, &mut || {
-                stopped = should_stop();
-                stopped
-            });
+            let metadata = self.rank_metadata_for_logical_with_poll_mode(
+                logical_id,
+                &mut || {
+                    stopped = should_stop();
+                    stopped
+                },
+                !program.is_static_profile(),
+            );
             if stopped {
                 None
             } else {
-                Some(metadata.map_or(0, |(values, tags)| {
-                    crate::rank::score_program(values, tags, program)
+                Some(metadata.map_or(0, |(values, query, tags)| {
+                    crate::rank::score_program(
+                        values,
+                        tags,
+                        query,
+                        title_features.get(title_index).copied().unwrap_or_default(),
+                        program,
+                    )
                 }))
             }
         }

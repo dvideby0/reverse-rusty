@@ -113,6 +113,8 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
     let mut forbidden: Vec<FeatureId> = Vec::new();
     let mut anyof: Vec<Vec<FeatureId>> = Vec::new();
     let mut anyof_predicates: Vec<AnyOfPredicate> = Vec::new();
+    let mut semantic_anyof_groups = 0u32;
+    let mut semantic_anyof_terms = 0u32;
     let mut forbidden_conjunctions: Vec<Vec<FeatureId>> = Vec::new();
     let mut required_phrases = Vec::new();
     let mut forbidden_phrases = Vec::new();
@@ -182,6 +184,16 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
                             required.extend_from_slice(requirement);
                         }
                     } else if !semantic_members.is_empty() {
+                        semantic_anyof_groups = semantic_anyof_groups.saturating_add(1);
+                        semantic_anyof_terms = semantic_anyof_terms.saturating_add(
+                            semantic_members
+                                .iter()
+                                .map(|member| {
+                                    u32::try_from(member.requirements.len()).unwrap_or(u32::MAX)
+                                })
+                                .min()
+                                .unwrap_or(0),
+                        );
                         let mut proxies = Vec::with_capacity(semantic_members.len());
                         for member in &semantic_members {
                             if let Some(proxy) = member
@@ -242,6 +254,8 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
         required,
         forbidden,
         anyof,
+        semantic_anyof_groups,
+        semantic_anyof_terms,
         anyof_predicates,
         forbidden_conjunctions,
         required_phrases,
@@ -265,6 +279,8 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
     let mut forbidden: Vec<FeatureId> = Vec::new();
     let mut anyof: Vec<Vec<FeatureId>> = Vec::new();
     let mut anyof_predicates: Vec<AnyOfPredicate> = Vec::new();
+    let mut semantic_anyof_groups = 0u32;
+    let mut semantic_anyof_terms = 0u32;
     let mut forbidden_conjunctions: Vec<Vec<FeatureId>> = Vec::new();
     let mut required_phrases = Vec::new();
     let mut forbidden_phrases = Vec::new();
@@ -322,6 +338,16 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
                             required.extend_from_slice(requirement);
                         }
                     } else if !semantic_members.is_empty() {
+                        semantic_anyof_groups = semantic_anyof_groups.saturating_add(1);
+                        semantic_anyof_terms = semantic_anyof_terms.saturating_add(
+                            semantic_members
+                                .iter()
+                                .map(|member| {
+                                    u32::try_from(member.requirements.len()).unwrap_or(u32::MAX)
+                                })
+                                .min()
+                                .unwrap_or(0),
+                        );
                         let mut proxies = Vec::with_capacity(semantic_members.len());
                         for member in &semantic_members {
                             if let Some(proxy) = member
@@ -363,6 +389,8 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
         required,
         forbidden,
         anyof,
+        semantic_anyof_groups,
+        semantic_anyof_terms,
         anyof_predicates,
         forbidden_conjunctions,
         required_phrases,

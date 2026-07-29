@@ -121,6 +121,7 @@ fn grpc_live_handoff_under_sustained_writes() {
     cluster.ingest(&queries).expect("ingest corpus");
     let rank_program = cluster
         .compile_rank_program(&RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: Vec::new(),
         })

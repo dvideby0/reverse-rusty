@@ -61,6 +61,58 @@ async fn v2_defaults_rank_by_priority_and_enrich_winners_only() {
 }
 
 #[tokio::test]
+async fn v2_selects_loaded_cpu_profile_and_rejects_unknown_profile() {
+    let mut engine = reverse_rusty::segment::Engine::new(
+        reverse_rusty::Normalizer::default_vocab().expect("vocab"),
+    );
+    engine.insert_live("acme", 1, 1);
+    engine.insert_live("acme chrome pro", 2, 1);
+    let mut state = state_with(engine, false);
+    let profiles = reverse_rusty::RankProfiles::from_json_slice(
+        br#"{
+          "version": 1,
+          "profiles": {
+            "linear_v1": {
+              "kind": "linear",
+              "weights": [
+                {"feature": "query_positive_terms", "weight": 100}
+              ]
+            }
+          }
+        }"#,
+    )
+    .expect("profiles");
+    Arc::get_mut(&mut state)
+        .expect("unique state")
+        .rank_profiles = Arc::new(profiles);
+
+    let (status, json) = routed_v2_search(
+        &state,
+        "/v2/_search",
+        serde_json::json!({
+            "document": {"title": "acme chrome pro update"},
+            "rank": {"profile": "linear_v1", "priority_field": "priority"}
+        }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+    assert_eq!(json["hits"]["hits"][0]["_id"], 2, "{json}");
+    assert_eq!(json["hits"]["hits"][0]["_score"], 300, "{json}");
+
+    let (status, json) = routed_v2_search(
+        &state,
+        "/v2/_search",
+        serde_json::json!({
+            "document": {"title": "acme"},
+            "rank": {"profile": "missing_v1"}
+        }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["type"], "unknown_rank_profile", "{json}");
+}
+
+#[tokio::test]
 async fn v2_route_supports_es_controls_and_rejects_ambiguous_or_unknown_input() {
     let state = state_with(ranked_engine(), false);
     let (status, json) = routed_v2_search(

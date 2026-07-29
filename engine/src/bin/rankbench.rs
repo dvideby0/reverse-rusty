@@ -1,4 +1,5 @@
-//! Deterministic ranked-delivery baseline + bounded local capture (ADR-107/108).
+//! Deterministic ranked-delivery baseline + bounded local capture
+//! (ADR-107/108/162).
 //!
 //! Measures the current collect-all/rank-after-match path and records stable
 //! semantic checksums alongside informational timings. The generated corpus is
@@ -8,7 +9,10 @@
 use reverse_rusty::cluster::{ClusterConfig, ClusterEngine};
 use reverse_rusty::gen::{generate, Dataset, GenConfig};
 use reverse_rusty::segment::{Engine, MatchScratch};
-use reverse_rusty::{Normalizer, QueryScope, RankProgramSpec, RankSpec, TopKOptions};
+use reverse_rusty::{
+    Normalizer, QueryScope, RankProfiles, RankProgramSpec, RankSpec, TopKOptions,
+    STATIC_RANK_PROFILE,
+};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
@@ -66,8 +70,25 @@ fn main() {
     let num_titles = arg_usize(&args, 2, DEFAULT_TITLES);
     let shards = arg_usize(&args, 3, DEFAULT_SHARDS).max(1);
     let seed = arg_u64(&args, 4, DEFAULT_SEED);
+    let profiles = args
+        .get(5)
+        .map(RankProfiles::load_json)
+        .transpose()
+        .expect("valid ranking profile file")
+        .unwrap_or_default();
+    let profile_name = args
+        .get(6)
+        .map_or(STATIC_RANK_PROFILE, String::as_str)
+        .to_string();
+    assert!(
+        profiles.contains(&profile_name),
+        "unknown ranking profile `{profile_name}`"
+    );
+    let profile_fingerprint = profiles
+        .fingerprint(&profile_name)
+        .expect("admitted profile has a fingerprint");
 
-    println!("Reverse Rusty ranked-delivery synthetic baseline (ADR-107/108/110)");
+    println!("Reverse Rusty ranked-delivery synthetic baseline (ADR-107/108/110/162)");
     println!(
         "host: os={} arch={} profile={} crate={}",
         std::env::consts::OS,
@@ -80,7 +101,8 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
     println!(
-        "config: queries={num_queries} titles={num_titles} shards={shards} seed=0x{seed:016x} K={KS:?}"
+        "config: queries={num_queries} titles={num_titles} shards={shards} seed=0x{seed:016x} \
+         profile={profile_name} fingerprint=fnv1a64:{profile_fingerprint:016x} K={KS:?}"
     );
 
     let workloads = [
@@ -115,7 +137,7 @@ fn main() {
     ];
 
     for (name, data) in &workloads {
-        run_workload(name, data, shards);
+        run_workload(name, data, shards, &profiles, &profile_name);
     }
 }
 
@@ -192,7 +214,13 @@ fn workload(
     (name, data)
 }
 
-fn run_workload(name: &str, data: &Dataset, shards: usize) {
+fn run_workload(
+    name: &str,
+    data: &Dataset,
+    shards: usize,
+    profiles: &RankProfiles,
+    profile_name: &str,
+) {
     let tags: Vec<Vec<(String, String)>> = data
         .queries
         .iter()
@@ -220,12 +248,13 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
     let compiled = snap.compile_rank_spec(&rank);
     let capture = capture_local(&snap, &data.titles, &compiled);
     let program_spec = RankProgramSpec {
+        profile: (profile_name != STATIC_RANK_PROFILE).then(|| profile_name.to_string()),
         priority_field: Some("priority".to_string()),
         boosts: rank.boosts.clone(),
     };
     let bounded_program = snap
-        .compile_rank_program(&program_spec)
-        .expect("fixed priority rank program");
+        .compile_rank_program_with_profiles(&program_spec, profiles)
+        .expect("local rank program");
 
     let cluster = ClusterEngine::build_with_tags(
         Normalizer::default_vocab().expect("built-in normalizer"),
@@ -239,8 +268,8 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
     )
     .expect("synthetic tagged cluster build");
     let cluster_program = cluster
-        .compile_rank_program(&program_spec)
-        .expect("cluster priority rank program");
+        .compile_rank_program_with_profiles(&program_spec, profiles)
+        .expect("cluster rank program");
     let bounded: Vec<BoundedCapture> = KS
         .into_iter()
         .map(|k| {
@@ -248,7 +277,7 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
                 &snap,
                 &cluster,
                 &data.titles,
-                &compiled,
+                bounded_program.is_static_profile().then_some(&compiled),
                 &bounded_program,
                 &cluster_program,
                 k,

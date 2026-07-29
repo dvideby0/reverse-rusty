@@ -39,6 +39,7 @@ fn rank_spec() -> RankSpec {
 
 fn rank_program() -> RankProgramSpec {
     RankProgramSpec {
+        profile: None,
         priority_field: Some("priority".to_string()),
         boosts: vec![
             ("category".to_string(), "items".to_string(), 1_000),
@@ -220,6 +221,7 @@ fn global_threshold_overflow_and_generation_drift_fail_closed() {
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("cluster build");
     let program = cluster
         .compile_rank_program(&RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: Vec::new(),
         })
@@ -295,6 +297,7 @@ fn top_k_preserves_dynamic_vocab_canonical_members_and_current_view_fetch() {
         )
         .expect("canonical-body member 11");
     let raw = RankProgramSpec {
+        profile: None,
         priority_field: None,
         boosts: vec![
             ("tier".to_string(), "gold".to_string(), 20),

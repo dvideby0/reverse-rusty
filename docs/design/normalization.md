@@ -210,6 +210,7 @@ and must not publish a snapshot between those calls. Single-node durable deploym
 the same vocabulary file used on reopen; clusters checkpoint the vocabulary in coordinator state. See
 [`../reference/api/vocab.md`](../reference/api/vocab.md).
 
-Compiler semantics version 5 removed earlier special-purpose feature categories. This project has
-no compatibility requirement for prototype data: persisted query state written with an earlier
+Compiler semantics version 5 removed earlier special-purpose feature categories; version 6 also
+preserves pre-dedup semantic any-of counts for deterministic ranking. This project has no
+compatibility requirement for prototype data: persisted query state written with an earlier
 compiler semantics version must be rebuilt from source rather than upgraded in place.

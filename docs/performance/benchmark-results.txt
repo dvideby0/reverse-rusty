@@ -44,6 +44,8 @@ HOW TO RUN
   cargo run --release --bin snapbench -- 1000000 200        # snapshot-publish cost (ADR-016)
   cargo run --release --bin clusterbench -- 100000 5000 8 0.05  # CLUSTER fan-out + candidate structure
   cargo run --release --bin rankbench -- 20000 500 8 275775489  # local/distributed bounded top-K + fetch
+  cargo run --release --bin rankbench -- 20000 500 8 275775489 \
+      ../deploy/ranking-profiles.example.json linear_v1        # selected CPU profile
   cargo run --release --bin learn -- 500000 50 0.30         # NPMI corpus learner (see appendix)
   cargo test --release --test stress cancellation::large_segment_overshoot_benchmark \
       -- --ignored --nocapture                               # ADR-123 bounded cancellation evidence
@@ -54,7 +56,7 @@ HOW TO RUN
   segbench args:     <num_queries> <num_titles> <broad_frac> <seed>
   snapbench args:    <num_queries> <iters>
   clusterbench args: <num_queries> <num_titles> <num_shards> <broad_frac> <seed>
-  rankbench args:    <num_queries> <num_titles> <num_shards> <seed>
+  rankbench args:    <num_queries> <num_titles> <num_shards> <seed> [profile_file] [profile_name]
   Seeds default to 0x00C0FFEE so runs are reproducible. Budget: each is <~30s except the 5M+
   bench memory passes (they build the corpus to disk twice — a few minutes) and the 10M soak.
 
@@ -183,6 +185,36 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-07-28] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64, rustc 1.95.0.
+              ADR-157 VERSIONED CPU RANKING PROFILES. Release+LTO,
+              RAYON_NUM_THREADS=4; sequential rankbench runs:
+                20000 queries / 500 titles / 8 shards / seed 275775489.
+              The checked-in examples are cost fixtures, NOT trained quality models:
+                static_v1 fnv1a64:af63bd4c8601b7df;
+                linear_v1 fnv1a64:b79de9ce5a0231d6 (3 terms);
+                ltr_v1 fnv1a64:f11561d8f5fd9d88 (2 depth-1 trees).
+  INVARIANTS:
+    all three profiles evaluated the identical confirmed-match counts; every bounded local result,
+      total, and score vector equaled the in-process K=8 cluster result for every title and K;
+    evaluations at K=100 were 500 ordinary, 19,794 broad-heavy, 5,866 body-duplicate, and
+      500 placement-duplicate for every profile — K bounds retention/delivery, not scoring work;
+    the legacy static compatibility checksums reproduced:
+      ordinary afbe1fc4b6e8bc2e/9190396adafa380f;
+      broad-heavy a9e947e26d438afc/4d6f09530beed907;
+      body-duplicate a7f27c3c79064c3d/0cfa3e2386f29cef;
+      placement-duplicate 0ec5dda03607d01f/77575a4edc1f29e7 (local/cluster).
+  LOCAL BOUNDED MATCH+RANK AT K=100, milliseconds over the whole workload:
+                         static_v1   linear_v1   ltr_v1
+    ordinary (500 t)        0.785       1.220      1.091
+    broad-heavy (500 t)     2.133       2.938      2.811
+    body-duplicate (500 t)  1.183       1.642      1.646
+    placement (1000 t)      1.018       1.632      1.653
+    On this tiny model fixture the learned-profile increment was 0.306–0.805 ms per workload,
+      or roughly 0.6–1.6 us/title; percentage overhead was 32–62% because the absolute static
+      workload is sub-millisecond to ~2 ms. Tree cost scales with actual paths evaluated, so these
+      two stumps do not predict a production LambdaMART ensemble. Timings are indicative one-run
+      captures; compare only same-machine sequential reruns.
+
 [2026-07-26] ADR-124 MERGE-BLOCKING PERFORMANCE CONTRACT. Runner pinned to GitHub-hosted
               public-standard ubuntu-24.04 x64, 4 vCPU / 16 GiB, Rayon=4. Timing history from
               six successful post-compiler-semantics CI runs: 30177502753, 30178825241,

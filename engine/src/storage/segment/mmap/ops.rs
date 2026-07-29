@@ -40,6 +40,47 @@ impl MmapSegment {
         crate::rank::RankValues { priority }
     }
 
+    /// Query-side ranking evidence derived from existing verified columns.
+    pub(crate) fn rank_query_features(&self, local: u32) -> crate::rank::RankQueryFeatures {
+        let i = local as usize;
+        let proxy_anyof_groups = u32::from(self.q_group_count().get(i).copied().unwrap_or(0));
+        let predicate_features = self
+            .predicate_off()
+            .get(i)
+            .zip(self.predicate_len().get(i))
+            .map_or(
+                (proxy_anyof_groups, 0, proxy_anyof_groups),
+                |(&off, &len)| {
+                    let start = off as usize;
+                    let end = start + len as usize;
+                    crate::exact::predicate_rank_term_counts(
+                        &self.predicate_blob()[start..end],
+                        proxy_anyof_groups,
+                    )
+                },
+            );
+        crate::rank::RankQueryFeatures {
+            positive_terms: self
+                .req_mask()
+                .get(i)
+                .copied()
+                .unwrap_or(0)
+                .count_ones()
+                .saturating_add(u32::from(self.req_len().get(i).copied().unwrap_or(0)))
+                .saturating_add(predicate_features.0),
+            negative_terms: self
+                .forb_mask()
+                .get(i)
+                .copied()
+                .unwrap_or(0)
+                .count_ones()
+                .saturating_add(u32::from(self.forb_len().get(i).copied().unwrap_or(0)))
+                .saturating_add(predicate_features.1),
+            any_of_groups: predicate_features.2,
+            tag_count: u32::from(self.tag_len().get(i).copied().unwrap_or(0)),
+        }
+    }
+
     /// Allocation-free ADR-109 placement view. Pre-v7 standalone segments expose
     /// the reserved standalone identity without touching absent columns.
     #[inline]

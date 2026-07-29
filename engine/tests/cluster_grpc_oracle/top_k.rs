@@ -51,6 +51,7 @@ fn grpc_top_k_and_winner_fetch_match_single_node() {
         })
         .collect();
     let raw = RankProgramSpec {
+        profile: None,
         priority_field: None,
         boosts: vec![
             ("tier".to_string(), "gold".to_string(), 17),
@@ -213,6 +214,7 @@ fn grpc_caps_reject_oversize_top_k_and_fetch_items() {
     );
     let program = cluster
         .compile_rank_program(&RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: Vec::new(),
         })
@@ -277,6 +279,7 @@ fn grpc_caps_reject_oversize_top_k_and_fetch_items() {
     );
     let program = cluster
         .compile_rank_program(&RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: Vec::new(),
         })

@@ -126,6 +126,17 @@ impl ClusterEngine {
         crate::rank::compile_rank_program(&self.tag_dict, spec)
     }
 
+    /// Compile against an operator-loaded profile registry. In-process shards
+    /// receive the compiled integer program directly; remote shards fail loud
+    /// at their wire boundary for non-static profiles.
+    pub fn compile_rank_program_with_profiles(
+        &self,
+        spec: &RankProgramSpec,
+        profiles: &crate::rank::RankProfiles,
+    ) -> Result<CompiledRankProgram, RankProgramError> {
+        crate::rank::compile_rank_program_with_profiles(&self.tag_dict, spec, profiles)
+    }
+
     /// Exact distributed top K. Every required routed shard must succeed; shard
     /// rows are bounded by K, ownership-disjoint, and ordered identically before
     /// the coordinator merges and truncates them.

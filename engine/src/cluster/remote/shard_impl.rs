@@ -6,6 +6,18 @@ use super::{
     ShardRankedMatch, ShardRankedTitle, TagPredicate,
 };
 
+fn refuse_nonstatic_rank_program(
+    program: &crate::rank::CompiledRankProgram,
+) -> Result<(), ShardError> {
+    if program.is_static_profile() {
+        Ok(())
+    } else {
+        Err(ShardError::RankProfileUnsupported(
+            program.profile_name().to_string(),
+        ))
+    }
+}
+
 impl Shard for RemoteShard {
     fn percolate_filtered(
         &self,
@@ -150,6 +162,9 @@ impl Shard for RemoteShard {
         sink: &mut dyn crate::delivery::ChunkSink,
     ) -> Result<crate::delivery::ExhaustiveMatchResult, ShardError> {
         self.validate_ownership(current_position, context.generation(), context.num_shards())?;
+        if let Some(program) = program {
+            refuse_nonstatic_rank_program(program)?;
+        }
         if chunk_size == 0 || chunk_size > crate::delivery::MAX_MATCH_CHUNK_SIZE {
             return Err(ShardError::Config(format!(
                 "exhaustive chunk size {chunk_size} is outside 1..={}",
@@ -399,6 +414,7 @@ impl Shard for RemoteShard {
         deadline: Option<Instant>,
     ) -> Result<ShardRankedMatch, ShardError> {
         self.validate_ownership(current_position, context.generation(), context.num_shards())?;
+        refuse_nonstatic_rank_program(program)?;
         let absolute = self.bounded_deadline(deadline)?;
         let base = proto::PercolateTopKRequest {
             title: title.to_string(),
@@ -479,6 +495,7 @@ impl Shard for RemoteShard {
                 request.context.num_shards(),
             )?;
         }
+        refuse_nonstatic_rank_program(program)?;
         let absolute = self.bounded_deadline(deadline)?;
         let base = proto::PercolateTopKBatchRequest {
             titles: titles

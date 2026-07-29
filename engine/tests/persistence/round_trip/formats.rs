@@ -161,7 +161,7 @@ fn quoted_phrase_predicates_round_trip_through_v10_mmap() {
     );
     assert_eq!(
         u32::from_le_bytes(bytes[12..16].try_into().expect("semantics")),
-        5
+        6
     );
     drop(engine);
 
@@ -247,7 +247,7 @@ fn semantics_two_materialization_is_source_rebuilt_for_quoted_adjacency() {
         reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
             .expect("migrated segment")
             .compiler_semantics_version()
-            == 5
+            == 6
     }));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -300,7 +300,7 @@ fn semantics_one_anyof_materialization_rebuilds_before_serving() {
         reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
             .expect("open migrated segment")
             .compiler_semantics_version()
-            == 5
+            == 6
     }));
 
     drop(reopened);

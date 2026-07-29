@@ -57,6 +57,7 @@ fn state_with(eng: Engine, include_broad: bool) -> Arc<AppState> {
         search_permits: None,
         ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
         exhaustive_jobs: crate::jobs::ExhaustiveJobs::for_tests(prom.clone()),
+        rank_profiles: Arc::new(reverse_rusty::RankProfiles::default()),
         max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
         include_broad,
         prom,

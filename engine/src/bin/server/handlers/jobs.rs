@@ -23,8 +23,10 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
-use crate::dto::ApiError;
-use crate::jobs::{DeleteOutcome, ExhaustiveJobs, JobView, StartError, StreamError};
+use crate::dto::{rank_program_error, ApiError};
+use crate::jobs::{
+    DeleteOutcome, ExhaustiveJobs, JobExecutionError, JobView, StartError, StreamError,
+};
 use crate::state::{AppState, ClusterAppState};
 #[cfg(test)]
 use request::DocumentBody;
@@ -125,7 +127,7 @@ impl From<JobView> for GetJobResponse {
         let is_partial = job.state != crate::jobs::JobPhase::Completed;
         let error = match job.state {
             crate::jobs::JobPhase::Failed => Some(GetJobError {
-                error_type: "exhaustive_job_failed",
+                error_type: job.failure_type.unwrap_or("exhaustive_job_failed"),
                 reason: job
                     .failure
                     .clone()
@@ -271,8 +273,8 @@ fn create_job_inner(
     let program = match prepared.rank.as_ref() {
         Some(spec) => {
             let compiled = snapshot
-                .compile_rank_program(spec)
-                .map_err(|error| validation(format!("invalid rank program: {error}")))?;
+                .compile_rank_program_with_profiles(spec, &state.rank_profiles)
+                .map_err(|error| rank_program_error(&error))?;
             validate_resolved_boosts(spec, &compiled)?;
             Some(compiled)
         }
@@ -310,7 +312,7 @@ fn create_job_inner(
                         sink,
                     )
                     .map(|result| result.summary)
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| JobExecutionError::generic(error.to_string()))
             },
         )
         .map(start_response)
@@ -339,8 +341,8 @@ fn cluster_create_job_inner(
         match prepared.rank.as_ref() {
             Some(spec) => {
                 let compiled = cluster
-                    .compile_rank_program(spec)
-                    .map_err(|error| validation(format!("invalid rank program: {error}")))?;
+                    .compile_rank_program_with_profiles(spec, &state.rank_profiles)
+                    .map_err(|error| rank_program_error(&error))?;
                 validate_resolved_boosts(spec, &compiled)?;
                 Some(compiled)
             }
@@ -382,7 +384,15 @@ fn cluster_create_job_inner(
                         sink,
                     )
                     .map(|result| result.summary)
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| match error {
+                        error @ reverse_rusty::cluster::ShardError::RankProfileUnsupported(_) => {
+                            JobExecutionError::new(
+                                "rank_profile_transport_unsupported",
+                                error.to_string(),
+                            )
+                        }
+                        error => JobExecutionError::generic(error.to_string()),
+                    })
             },
         )
         .map(start_response)

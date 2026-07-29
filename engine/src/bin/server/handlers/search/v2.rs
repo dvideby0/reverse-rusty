@@ -17,7 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use crate::dto::{ApiError, HitSource};
+use crate::dto::{rank_program_error, ApiError, HitSource};
 use crate::metrics::PrometheusMetrics;
 use crate::state::{AppState, ClusterAppState};
 
@@ -49,6 +49,7 @@ struct BoostBody {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RankProgramBody {
+    profile: Option<String>,
     priority_field: Option<String>,
     #[serde(default)]
     boosts: Vec<BoostBody>,
@@ -57,6 +58,7 @@ struct RankProgramBody {
 impl RankProgramBody {
     fn into_spec(self) -> reverse_rusty::RankProgramSpec {
         reverse_rusty::RankProgramSpec {
+            profile: self.profile,
             priority_field: Some(
                 self.priority_field
                     .unwrap_or_else(|| "priority".to_string()),
@@ -539,15 +541,12 @@ async fn v2_search_inner(
         ..options
     };
     let mint = plan.mint;
-    let program = match snap.compile_rank_program(&raw_program) {
+    let program = match snap.compile_rank_program_with_profiles(&raw_program, &state.rank_profiles)
+    {
         Ok(program) => program,
         Err(error) => {
             record_outcome(&state.prom, "validation", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::BAD_REQUEST,
-                "unsupported_rank_field",
-                error.to_string(),
-            ));
+            return Err(rank_program_error(&error));
         }
     };
     let predicate = snap.compile_tag_predicate(&filter);
@@ -647,15 +646,12 @@ async fn cluster_v2_search_inner(
     // blocking closure, so the gap between here and there stays fail-closed.
     let (program, mint) = {
         let cluster = state.cluster.read();
-        let program = match cluster.compile_rank_program(&rank) {
+        let program = match cluster.compile_rank_program_with_profiles(&rank, &state.rank_profiles)
+        {
             Ok(program) => program,
             Err(error) => {
                 record_outcome(&state.prom, "validation", options.query_scope);
-                return Err(ApiError::response(
-                    StatusCode::BAD_REQUEST,
-                    "unsupported_rank_field",
-                    error.to_string(),
-                ));
+                return Err(rank_program_error(&error));
             }
         };
         let mint = match pit {

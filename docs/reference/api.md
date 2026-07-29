@@ -26,6 +26,7 @@ Options:
 | `--data-dir` | *(in-memory)* | Persistence directory for segments and WAL |
 | `--load-file` | — | Pre-load queries from a CSV or JSONL file at startup |
 | `--vocab-file` | — | Load vocabulary from a JSON file at startup |
+| `--ranking-profiles-file` | — | Load strict, fingerprintable CPU ranking profiles from JSON; `static_v1` remains built in (ADR-162) |
 | `--threads` | *(physical cores)* | Number of rayon worker threads |
 | `--max-concurrent-searches` | 0 *(unbounded)* | Max `/_search`+`/_mpercolate` requests occupying the match pool at once; excess queue within their own timeout (`timeout` or `timeout_ms`, ADR-099) |
 | `--max-ranked-enrichment-bytes` | 16777216 (16 MiB) | Maximum winner source bytes fetched by one local or cluster `/v2/_search` or `/v2/_mpercolate`; overflow fails the whole response with `413 rank_enrichment_limit` (ADR-110/112) |
@@ -64,6 +65,7 @@ cargo run --release --bin server -- \
   --port 9200 \
   --data-dir ./data \
   --vocab-file vocab.json \
+  --ranking-profiles-file ../deploy/ranking-profiles.example.json \
   --load-file queries.csv \
   --threads 8 \
   --log-format json
@@ -71,6 +73,31 @@ cargo run --release --bin server -- \
 
 The server handles SIGINT/SIGTERM gracefully — it drains in-flight requests, flushes the memtable,
 and syncs the WAL before exiting.
+
+### Ranking profile file
+
+`--ranking-profiles-file` loads one strict schema-v1 JSON object before the server binds. The
+checked-in [`ranking-profiles.example.json`](../../deploy/ranking-profiles.example.json) shows both
+supported custom kinds. It is format documentation only, not a trained model.
+
+- `linear` accepts optional `intercept` and unique `{feature, weight}` entries.
+- `tree_ensemble` accepts optional `base_score` and flat trees rooted at node zero. A split names
+  `feature`, inclusive `threshold`, `left`, and `right`; a leaf names `value`.
+- `expected_fingerprint` may pin the compiled semantic identity as `fnv1a64:<16 lowercase hex>`.
+  Startup computes and logs every profile identity and refuses a mismatch.
+- Feature names are `query_positive_terms`, `query_negative_terms`, `query_any_of_groups`,
+  `query_tag_count`, `title_tokens`, `title_bytes`, `title_digits`,
+  `positive_coverage_milli`, and `unmatched_title_tokens`.
+- Query term counts include predicate-backed semantics: quoted graphs count analyzer positions,
+  forbidden conjunctions count their features, and a compound any-of counts the shortest member
+  that can satisfy the group. `query_any_of_groups` counts semantic groups independently before
+  retrieval proxies are deduplicated; repeated compound groups likewise retain each group's term
+  contribution even when their exact predicates deduplicate.
+
+`static_v1` is always present and cannot be redefined with another kind. Unknown fields, duplicate
+profile names, invalid graphs, oversized models, and malformed fingerprints refuse startup. The
+complete bounds and serving rationale are in
+[ADR-162](../decisions/adr-162-versioned-cpu-ranking-profiles.md).
 
 Many of these knobs are also tunable at runtime via [`PUT /_settings`](api/settings.md#put-_settings--update-settings)
 (the dynamic subset); the CLI flags remain the durable startup source.

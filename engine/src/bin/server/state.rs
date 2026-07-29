@@ -72,6 +72,8 @@ pub(crate) struct AppState {
     pub(crate) ranked_search_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Separate pool/admission/registry for ADR-114 exhaustive jobs.
     pub(crate) exhaustive_jobs: Arc<crate::jobs::ExhaustiveJobs>,
+    /// Startup-loaded, immutable CPU ranking profile registry (ADR-162).
+    pub(crate) rank_profiles: Arc<reverse_rusty::RankProfiles>,
     pub(crate) max_ranked_enrichment_bytes: usize,
     pub(crate) include_broad: bool,
     pub(crate) prom: PrometheusMetrics,
@@ -161,6 +163,8 @@ pub(crate) struct ClusterAppState {
     /// Always-bounded v2 ranked-search admission, symmetric with local mode.
     pub(crate) ranked_search_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) exhaustive_jobs: Arc<crate::jobs::ExhaustiveJobs>,
+    /// Coordinator copy of the immutable CPU ranking profile registry.
+    pub(crate) rank_profiles: Arc<reverse_rusty::RankProfiles>,
     pub(crate) max_ranked_enrichment_bytes: usize,
     pub(crate) include_broad: bool,
     pub(crate) prom: PrometheusMetrics,

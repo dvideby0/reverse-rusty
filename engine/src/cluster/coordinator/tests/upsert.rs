@@ -265,6 +265,8 @@ fn legacy_tail_is_folded_before_current_placement_validation() {
             .norm
             .compile_features_readonly("used", &cluster.dict, &mut lc),
         anyof: Vec::new(),
+        semantic_anyof_groups: 0,
+        semantic_anyof_terms: 0,
         anyof_predicates: Vec::new(),
         forbidden_conjunctions: Vec::new(),
         required_phrases: Vec::new(),

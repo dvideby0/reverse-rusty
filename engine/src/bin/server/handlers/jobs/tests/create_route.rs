@@ -265,3 +265,18 @@ async fn non_exhaustive_result_mode_has_a_named_error() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
     assert_eq!(json["error"]["type"], "unsupported_result_mode", "{json}");
 }
+
+#[tokio::test]
+async fn unknown_rank_profile_has_the_shared_typed_error() {
+    let state = state(0, 8);
+    let (status, json) = send(
+        route(&state),
+        "/_percolate/jobs",
+        r#"{"document":{"title":"x"},"rank":{"profile":"missing"}}"#,
+        Some("application/json"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["type"], "unknown_rank_profile", "{json}");
+}

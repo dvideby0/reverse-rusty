@@ -82,8 +82,10 @@ pub use explain::{
 pub use normalize::{Normalizer, NormalizerBuilder, PunctClass};
 pub use pit::{PitConfig, PitError, PitId, PitRegistry};
 pub use rank::{
-    BatchRankedMatch, BatchRankedTitle, CompiledRankProgram, CompiledRankSpec, RankProgramError,
-    RankProgramSpec, RankSpec, RankStats, RankValues, RankedHit, RankedMatch, RankedMatchError,
+    BatchRankedMatch, BatchRankedTitle, CompiledRankProgram, CompiledRankSpec, RankFeature,
+    RankProfileError, RankProfiles, RankProgramError, RankProgramSpec, RankQueryFeatures, RankSpec,
+    RankStats, RankTitleFeatures, RankValues, RankedHit, RankedMatch, RankedMatchError,
+    STATIC_RANK_PROFILE,
 };
 pub use result::{
     ranked_beats, ranked_order, QueryScope, ResultMode, TopKAdmissionError, TopKOptions, TotalHits,

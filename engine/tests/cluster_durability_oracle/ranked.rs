@@ -16,6 +16,7 @@ type RankedView = (
 fn ranked_view(cluster: &ClusterEngine) -> RankedView {
     let program = cluster
         .compile_rank_program(&RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: vec![
                 ("tier".to_string(), "gold".to_string(), 50),

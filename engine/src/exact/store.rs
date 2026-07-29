@@ -7,8 +7,9 @@
 //! the compaction copy/re-anchor helpers, and the serialization slice accessors.
 
 use super::{
-    encode_predicate, eval_batch_slices, predicate_has_phrases, query_passes_tags,
-    verify_predicate, BatchEvalError, TagPredicate, TitleView,
+    encode_predicate, eval_batch_slices, predicate_boolean_program, predicate_has_phrases,
+    predicate_rank_term_counts, query_passes_tags, verify_predicate, BatchEvalError, TagPredicate,
+    TitleView,
 };
 use crate::compile::Extracted;
 use crate::dict::{Dict, FeatureId, NO_MASK_BIT};

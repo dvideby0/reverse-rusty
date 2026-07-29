@@ -31,8 +31,8 @@ use super::delivery::{
     failure_response, run_bounded, DeliveryError, DeliveryFailure, RankedSearchCtx,
 };
 use super::{
-    prepare_failure, record_outcome, validation, PrepareFailure, RankProgramBody, RankedHitBody,
-    RankedHitsBody, Shards,
+    prepare_failure, rank_program_error, record_outcome, validation, PrepareFailure,
+    RankProgramBody, RankedHitBody, RankedHitsBody, Shards,
 };
 
 /// Batch document DTO: unlike the permissive shared `DocBody`, unknown fields
@@ -346,15 +346,12 @@ async fn v2_mpercolate_inner(
         titles.len(),
         snap.config().max_percolate_batch,
     )?;
-    let program = match snap.compile_rank_program(&raw_program) {
+    let program = match snap.compile_rank_program_with_profiles(&raw_program, &state.rank_profiles)
+    {
         Ok(program) => program,
         Err(error) => {
             record_outcome(&state.prom, "validation", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::BAD_REQUEST,
-                "unsupported_rank_field",
-                error.to_string(),
-            ));
+            return Err(rank_program_error(&error));
         }
     };
     let predicate = snap.compile_tag_predicate(&filter);
@@ -415,15 +412,11 @@ async fn cluster_v2_mpercolate_inner(
     let (program, max_batch) = {
         let cluster = state.cluster.read();
         let max_batch = cluster.per_shard_config().max_percolate_batch;
-        match cluster.compile_rank_program(&rank) {
+        match cluster.compile_rank_program_with_profiles(&rank, &state.rank_profiles) {
             Ok(program) => (program, max_batch),
             Err(error) => {
                 record_outcome(&state.prom, "validation", options.query_scope);
-                return Err(ApiError::response(
-                    StatusCode::BAD_REQUEST,
-                    "unsupported_rank_field",
-                    error.to_string(),
-                ));
+                return Err(rank_program_error(&error));
             }
         }
     };

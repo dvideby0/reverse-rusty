@@ -133,6 +133,18 @@ candidate's two mask words. The historical p99 latency of ~2–3 µs for the ful
 → verify cycle reflects this. The generic fixture now has permanent absolute timing safety limits;
 its more sensitive variance history is pending the reviewed CI rebaseline.
 
+### CPU rank-profile cost
+
+ADR-162's ranking remains post-match: `static_v1`, linear, and tree profiles see the same confirmed
+members, and K reduces retained/delivered rows rather than evaluations. On the dated 20k-query
+`rankbench` capture, the illustrative three-term linear profile and two-stump tree profile added
+roughly 0.6–1.6 microseconds per title over static scoring across the four workload shapes. The
+percentage delta looks larger because the complete static workloads take only about one to two
+milliseconds for hundreds of titles. This is evidence that feature extraction plus tiny CPU models
+is practical, not a production LambdaMART forecast: tree cost grows with the number and depth of
+paths actually evaluated, and broad match counts multiply that work. Exact numbers, fingerprints,
+commands, and caveats are in [`benchmark-results.txt`](benchmark-results.txt).
+
 ---
 
 ## 5. Current memory and durable-size profile

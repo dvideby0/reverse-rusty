@@ -9,18 +9,20 @@ impl Engine {
         }) || (!self.memtable.is_empty() && self.memtable.compiler_semantics_version() < current)
     }
 
-    /// Whether serving this engine requires the ADR-118/119/120/#123 source-driven
+    /// Whether serving this engine requires the ADR-118/119/120/#123/162 source-driven
     /// compiler migration. Every live row below the current stamp is suspect;
     /// only recompilation from the retained DSL can recover clause boundaries,
-    /// any-of member boundaries, quoted adjacency, and complete forbidden terms.
+    /// any-of member boundaries, quoted adjacency, complete forbidden terms,
+    /// and pre-dedup ranking feature counts.
     pub(crate) fn needs_compiler_semantics_migration(&self) -> bool {
         self.has_legacy_compiler_segments()
     }
 
-    /// Standalone upgrade path for ADR-118/119/120/#123. The normalizer and dict do not
+    /// Standalone upgrade path for ADR-118/119/120/#123/162. The normalizer and dict do not
     /// change, but every live source must be re-lowered so clause and any-of
-    /// member boundaries, quoted adjacency, and complete forbidden terms are reflected in exact
-    /// predicates, signatures, and placement.
+    /// member boundaries, quoted adjacency, complete forbidden terms, and
+    /// ranking feature counts are reflected in exact predicates, signatures,
+    /// and placement.
     pub(crate) fn migrate_legacy_compiler_semantics(&mut self) -> std::io::Result<()> {
         if !self.needs_compiler_semantics_migration() {
             return Ok(());

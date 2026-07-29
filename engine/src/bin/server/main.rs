@@ -166,10 +166,35 @@ async fn main() {
         }
     }
 
+    let rank_profiles = match &cli.ranking_profiles_file {
+        Some(path) => match reverse_rusty::RankProfiles::load_json(path) {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                error!(path = ?path, error = %error, "invalid ranking profile configuration");
+                std::process::exit(1);
+            }
+        },
+        None => reverse_rusty::RankProfiles::default(),
+    };
+    let mut profile_descriptions: Vec<_> = rank_profiles
+        .names()
+        .map(|name| {
+            let fingerprint = rank_profiles.fingerprint(name).map_or(0, |value| value);
+            format!("{name}@fnv1a64:{fingerprint:016x}")
+        })
+        .collect();
+    profile_descriptions.sort_unstable();
+    info!(
+        path = ?cli.ranking_profiles_file,
+        profiles = ?profile_descriptions,
+        "ranking profiles active"
+    );
+    let rank_profiles = Arc::new(rank_profiles);
+
     // Coordinator (cluster) mode: the same REST dialect over a ClusterEngine
     // (ADR-070). Everything below this branch is the single-node path.
     if cli.cluster {
-        cluster_mode::run(cli, auth_config).await;
+        cluster_mode::run(cli, auth_config, rank_profiles).await;
         return;
     }
     if !cli.shard_endpoint.is_empty() {
@@ -427,6 +452,7 @@ async fn main() {
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
         ranked_search_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(ranked_workers)),
         exhaustive_jobs,
+        rank_profiles,
         max_ranked_enrichment_bytes: cli.max_ranked_enrichment_bytes,
         include_broad: cli.include_broad,
         prom,

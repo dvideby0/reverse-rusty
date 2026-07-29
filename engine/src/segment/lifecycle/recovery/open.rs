@@ -282,12 +282,13 @@ impl Engine {
         // Replay WAL entries after last checkpoint
         replay_wal_tail(&mut engine, &wal_path, manifest.wal_seq_watermark)?;
 
-        // ADR-118/119/120/#123 compiler-semantics migration. Rebuild every older live
+        // ADR-118/119/120/#123/162 compiler-semantics migration. Rebuild every older live
         // materialization from retained `_source` before returning an engine
         // that could serve it: semantics 0 joined positive terms across clause
         // boundaries, semantics 1 discarded all but one feature from a
         // multi-token any-of member, semantics 2 flattened quoted adjacency,
-        // and semantics 3 flattened multi-feature negated bare terms. The
+        // semantics 3 flattened multi-feature negated bare terms, and semantics
+        // 5 did not retain pre-dedup ranking feature counts. The
         // header stamp makes this idempotent; a
         // missing/inconsistent source sidecar or failed durable commit refuses
         // startup rather than retaining a silent false negative.

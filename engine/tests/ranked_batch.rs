@@ -12,8 +12,8 @@ use reverse_rusty::exact::TagPredicate;
 use reverse_rusty::gen::{generate, Dataset, GenConfig};
 use reverse_rusty::segment::{BatchMatchOptions, BroadStrategy, Engine, MatchScratch};
 use reverse_rusty::{
-    EngineSnapshot, Normalizer, QueryScope, RankProgramSpec, RankedMatchError, TopKAdmissionError,
-    TopKOptions, TotalHits,
+    EngineSnapshot, Normalizer, QueryScope, RankProfiles, RankProgramSpec, RankedMatchError,
+    TopKAdmissionError, TopKOptions, TotalHits,
 };
 
 fn norm() -> Normalizer {
@@ -83,9 +83,68 @@ fn build_tagged_multi(data: &Dataset) -> Engine {
 
 fn program_spec() -> RankProgramSpec {
     RankProgramSpec {
+        profile: None,
         priority_field: Some("priority".into()),
         boosts: vec![("tier".into(), "gold".into(), 100)],
     }
+}
+
+#[test]
+fn title_dependent_profile_keeps_global_title_alignment_across_chunks() {
+    let profiles = reverse_rusty::RankProfiles::from_json_slice(
+        br#"{
+          "version": 1,
+          "profiles": {
+            "ltr_v1": {
+              "kind": "tree_ensemble",
+              "trees": [{
+                "nodes": [
+                  {"kind": "split", "feature": "title_tokens",
+                   "threshold": 2, "left": 1, "right": 2},
+                  {"kind": "leaf", "value": 10},
+                  {"kind": "leaf", "value": 20}
+                ]
+              }]
+            }
+          }
+        }"#,
+    )
+    .expect("profiles");
+    let mut engine = Engine::new(norm());
+    engine.insert_live("acme", 1, 1);
+    engine.insert_live("acme chrome", 2, 1);
+    let snapshot = engine.snapshot();
+    let program = snapshot
+        .compile_rank_program_with_profiles(
+            &RankProgramSpec {
+                profile: Some("ltr_v1".into()),
+                priority_field: None,
+                boosts: Vec::new(),
+            },
+            &profiles,
+        )
+        .expect("tree program");
+    let titles = vec![
+        "acme".to_string(),
+        "acme chrome".to_string(),
+        "acme chrome pro update".to_string(),
+    ];
+    assert_batch_equals_scalar(
+        &snapshot,
+        &titles,
+        BatchMatchOptions {
+            broad_batch_size: 1,
+            ..BatchMatchOptions::default()
+        },
+        TopKOptions {
+            size: 10,
+            track_total_hits_up_to: 10,
+            ..TopKOptions::default()
+        },
+        &program,
+        &TagPredicate::empty(),
+        "title-dependent chunk alignment",
+    );
 }
 
 /// The scalar per-title bounded reference.
@@ -396,7 +455,21 @@ fn expired_deadline_fails_the_whole_batch() {
     let data = gen_data(0xAD12_0004, 4_000, 100, 0.05);
     let eng = build_tagged_multi(&data);
     let snap = eng.snapshot();
-    let program = snap.compile_rank_program(&program_spec()).expect("program");
+    let profiles = RankProfiles::from_json_slice(
+        br#"{"version":1,"profiles":{"deadline_v1":{"kind":"linear","weights":[
+          {"feature":"title_tokens","weight":1}
+        ]}}}"#,
+    )
+    .expect("rich profile");
+    let program = snap
+        .compile_rank_program_with_profiles(
+            &RankProgramSpec {
+                profile: Some("deadline_v1".into()),
+                ..RankProgramSpec::default()
+            },
+            &profiles,
+        )
+        .expect("program");
     let empty = TagPredicate::empty();
     let expired = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_millis(1))

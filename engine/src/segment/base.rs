@@ -137,6 +137,13 @@ impl BaseSegment {
         }
     }
 
+    pub fn rank_query_features(&self, local_id: u32) -> crate::rank::RankQueryFeatures {
+        match self {
+            BaseSegment::Memory(s) => s.rank_query_features(local_id),
+            BaseSegment::Mmap(s) => s.rank_query_features(local_id),
+        }
+    }
+
     pub fn placement(&self, local_id: u32) -> crate::ownership::QueryPlacementRef<'_> {
         match self {
             BaseSegment::Memory(s) => s.placement(local_id),

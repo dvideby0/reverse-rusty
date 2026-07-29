@@ -129,7 +129,7 @@ pub(crate) fn rank_program_to_proto(spec: &crate::rank::CompiledRankProgram) -> 
 }
 
 pub(crate) fn rank_program_from_proto(p: RankProgram) -> crate::rank::CompiledRankProgram {
-    crate::rank::CompiledRankProgram::new(
+    crate::rank::CompiledRankProgram::new_static(
         p.use_priority,
         p.boosts.into_iter().map(|b| (b.tag_id, b.weight)).collect(),
     )

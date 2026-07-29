@@ -366,6 +366,8 @@ impl Segment {
                     required,
                     forbidden: Vec::new(),
                     anyof,
+                    semantic_anyof_groups: 0,
+                    semantic_anyof_terms: 0,
                     anyof_predicates: Vec::new(),
                     forbidden_conjunctions: Vec::new(),
                     required_phrases: Vec::new(),

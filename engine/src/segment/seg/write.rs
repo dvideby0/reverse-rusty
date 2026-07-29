@@ -322,6 +322,10 @@ impl Segment {
         self.exact.rank_values(local_id)
     }
 
+    pub fn rank_query_features(&self, local_id: u32) -> crate::rank::RankQueryFeatures {
+        self.exact.rank_query_features(local_id)
+    }
+
     pub fn placement(&self, local_id: u32) -> crate::ownership::QueryPlacementRef<'_> {
         self.exact.placement(local_id)
     }

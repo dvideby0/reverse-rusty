@@ -19,6 +19,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   to short outcome statements.
 - Reframed project tracking: this changelog owns shipped history, while the roadmap owns unfinished
   work and its full proposal text.
+- Added startup-loaded, fingerprinted `static_v1`, linear, and quantized-tree CPU ranking profiles
+  for native bounded/exhaustive delivery, with deterministic post-match scoring, strict model
+  bounds, title-dependent batch support, pre-dedup semantic feature persistence plus source-driven
+  legacy migration, benchmark selection, and fail-loud remote-wire refusal
+  ([ADR-162](decisions/adr-162-versioned-cpu-ranking-profiles.md)).
 - Aligned document deletion with the ES/OpenSearch shape and refresh controls, made logical delete
   counts placement-independent, and exposed the existing remote partial-repair contract accurately
   ([ADR-125](decisions/adr-125-delete-document-contract.md)).

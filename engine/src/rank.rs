@@ -9,17 +9,24 @@
 //!   path is byte-identical to the pre-ranking engine. Tags never gate here, just
 //!   as in [`crate::exact::TagPredicate`] — ranking is presentation, not matching.
 //!
-//! Score model (additive): `score = Σ(weight for each (key,value) boost the query's
-//! tags match) + (numeric value of the query's `priority_key` tag)`. The caller
-//! tie-breaks equal scores by ascending `_id` for a total, byte-stable order. An
-//! additive single score (vs strict `(boost, priority)` lexicographic) is the
-//! simpler ES-`function_score`-"sum"-style realization and fits this workload,
-//! where operator-supplied boosts are meant to be commensurate with priority;
-//! strict dominance is achievable by choosing boost magnitudes above the priority
-//! range — a request-shaping choice, not a code branch.
+//! Score model: bounded native ranking adds a named profile's relevance score
+//! to the existing business score:
+//! `score = profile_relevance + priority + Σ(tag boosts)`. `static_v1` has zero
+//! relevance and is byte-compatible with the historical implementation. The
+//! caller tie-breaks equal scores by ascending `_id` for a total, byte-stable
+//! order.
 
 use crate::tagdict::{TagDict, TagId};
 use crate::util::FastMap;
+use std::sync::Arc;
+
+mod profiles;
+
+pub use profiles::{
+    RankFeature, RankProfileError, RankProfiles, RankQueryFeatures, RankTitleFeatures,
+    STATIC_RANK_PROFILE,
+};
+use profiles::{RankFeatureView, RankProfileProgram};
 
 /// Fixed typed rank columns stored beside the exact-verification rows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -27,10 +34,11 @@ pub struct RankValues {
     pub priority: i64,
 }
 
-/// Raw bounded-ranking program. Increment 2 supports one fixed typed field;
-/// boosts retain the existing integer tag-id scoring model.
+/// Raw bounded-ranking program. The optional profile defaults to `static_v1`;
+/// priority and boosts remain an additive business-policy layer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RankProgramSpec {
+    pub profile: Option<String>,
     pub priority_field: Option<String>,
     pub boosts: Vec<(String, String, i64)>,
 }
@@ -38,6 +46,7 @@ pub struct RankProgramSpec {
 impl Default for RankProgramSpec {
     fn default() -> Self {
         Self {
+            profile: None,
             priority_field: Some("priority".to_string()),
             boosts: Vec::new(),
         }
@@ -45,18 +54,41 @@ impl Default for RankProgramSpec {
 }
 
 /// Integer-only compiled bounded-ranking program.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CompiledRankProgram {
+    profile_name: String,
+    profile: Arc<RankProfileProgram>,
+    profile_fingerprint: u64,
     use_priority: bool,
     boosts: FastMap<TagId, i64>,
 }
 
 impl CompiledRankProgram {
-    pub(crate) fn new(use_priority: bool, boosts: FastMap<TagId, i64>) -> Self {
+    fn new(
+        profile_name: String,
+        profile: Arc<RankProfileProgram>,
+        profile_fingerprint: u64,
+        use_priority: bool,
+        boosts: FastMap<TagId, i64>,
+    ) -> Self {
         Self {
+            profile_name,
+            profile,
+            profile_fingerprint,
             use_priority,
             boosts,
         }
+    }
+
+    #[cfg(feature = "distributed")]
+    pub(crate) fn new_static(use_priority: bool, boosts: FastMap<TagId, i64>) -> Self {
+        Self::new(
+            STATIC_RANK_PROFILE.to_string(),
+            Arc::new(RankProfileProgram::Static),
+            RankProfileProgram::Static.fingerprint(),
+            use_priority,
+            boosts,
+        )
     }
 
     #[must_use]
@@ -67,18 +99,49 @@ impl CompiledRankProgram {
     pub fn boosts(&self) -> impl Iterator<Item = (TagId, i64)> + '_ {
         self.boosts.iter().map(|(&tag, &weight)| (tag, weight))
     }
+
+    #[must_use]
+    pub fn profile_name(&self) -> &str {
+        &self.profile_name
+    }
+
+    #[must_use]
+    pub fn profile_fingerprint(&self) -> u64 {
+        self.profile_fingerprint
+    }
+
+    /// The current gRPC rank wire carries only the historical static program.
+    /// Remote callers use this predicate to reject richer profiles before flight.
+    #[must_use]
+    pub fn is_static_profile(&self) -> bool {
+        self.profile.is_static()
+    }
+}
+
+impl Default for CompiledRankProgram {
+    fn default() -> Self {
+        Self {
+            profile_name: STATIC_RANK_PROFILE.to_string(),
+            profile: Arc::new(RankProfileProgram::Static),
+            profile_fingerprint: RankProfileProgram::Static.fingerprint(),
+            use_priority: false,
+            boosts: FastMap::default(),
+        }
+    }
 }
 
 /// Compile-time rejection for rank fields not implemented by this increment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RankProgramError {
     UnsupportedField(String),
+    UnknownProfile(String),
 }
 
 impl std::fmt::Display for RankProgramError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedField(field) => write!(f, "unsupported rank field `{field}`"),
+            Self::UnknownProfile(profile) => write!(f, "unknown ranking profile `{profile}`"),
         }
     }
 }
@@ -154,17 +217,35 @@ pub(crate) fn compile_rank_program(
     tag_dict: &crate::tagdict::TagDict,
     spec: &RankProgramSpec,
 ) -> Result<CompiledRankProgram, RankProgramError> {
+    compile_rank_program_with_profiles(tag_dict, spec, &RankProfiles::default())
+}
+
+pub(crate) fn compile_rank_program_with_profiles(
+    tag_dict: &crate::tagdict::TagDict,
+    spec: &RankProgramSpec,
+    profiles: &RankProfiles,
+) -> Result<CompiledRankProgram, RankProgramError> {
     let use_priority = match spec.priority_field.as_deref() {
         None => false,
         Some("priority") => true,
         Some(field) => return Err(RankProgramError::UnsupportedField(field.to_string())),
     };
+    let profile_name = spec.profile.as_deref().unwrap_or(STATIC_RANK_PROFILE);
+    let profile = profiles
+        .get(profile_name)
+        .ok_or_else(|| RankProgramError::UnknownProfile(profile_name.to_string()))?;
     let boosts = spec
         .boosts
         .iter()
         .map(|(key, value, weight)| (tag_dict.get_or_synthetic(key, value), *weight))
         .collect();
-    Ok(CompiledRankProgram::new(use_priority, boosts))
+    Ok(CompiledRankProgram::new(
+        profile_name.to_string(),
+        profile.program.clone(),
+        profile.fingerprint,
+        use_priority,
+        boosts,
+    ))
 }
 
 /// The shared saturating boost sum — the ADR-059 compatibility scorer and the
@@ -183,15 +264,25 @@ fn boost_sum(tags: &[TagId], boosts: &FastMap<TagId, i64>) -> i64 {
     sum
 }
 
-/// Score newest-live typed metadata and tag boosts with saturating addition.
+/// Score newest-live metadata with deterministic saturating integer arithmetic.
 #[must_use]
-pub(crate) fn score_program(values: RankValues, tags: &[TagId], spec: &CompiledRankProgram) -> i64 {
+pub(crate) fn score_program(
+    values: RankValues,
+    tags: &[TagId],
+    query: RankQueryFeatures,
+    title: RankTitleFeatures,
+    spec: &CompiledRankProgram,
+) -> i64 {
     let base = if spec.use_priority {
         values.priority
     } else {
         0
     };
-    base.saturating_add(boost_sum(tags, &spec.boosts))
+    let business = base.saturating_add(boost_sum(tags, &spec.boosts));
+    business.saturating_add(
+        spec.profile
+            .relevance_score(RankFeatureView::new(query, title)),
+    )
 }
 
 /// A ranking request in raw, pre-resolution form (ADR-049 §5.4). Built from the

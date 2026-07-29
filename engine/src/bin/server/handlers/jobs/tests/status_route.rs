@@ -144,6 +144,35 @@ async fn failed_status_preserves_the_diagnostic_and_adds_a_structured_error() {
 }
 
 #[tokio::test]
+async fn failed_status_preserves_a_specific_execution_error_type() {
+    let state = state(0, 8);
+    let started = state
+        .exhaustive_jobs
+        .start(
+            "status-profile-transport".into(),
+            [0xA5; 32],
+            reverse_rusty::QueryScope::Standard,
+            Duration::from_secs(1),
+            |_sink, _deadline| {
+                Err(JobExecutionError::new(
+                    "rank_profile_transport_unsupported",
+                    "remote shard cannot execute ranking profile `linear_v1`",
+                ))
+            },
+        )
+        .expect("job admitted");
+    let terminal = wait_terminal(&state, &started.job.job_id).await;
+    assert_eq!(terminal.state, crate::jobs::JobPhase::Failed);
+
+    let uri = format!("/_percolate/jobs/{}", started.job.job_id);
+    let (status, json, _) = send(route(&state), &uri).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["state"], "failed");
+    assert_eq!(json["error"]["type"], "rank_profile_transport_unsupported");
+    assert_eq!(json["error"]["reason"], json["failure"]);
+}
+
+#[tokio::test]
 async fn query_contract_is_strict_and_retention_controls_fail_loud() {
     let state = state(0, 8);
     let created = create(&state, "status-controls").await;
