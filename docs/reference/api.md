@@ -212,7 +212,7 @@ The full method/path matrix is below.
 | `/_vocab/aliases/learn_and_apply` | POST | Strict native stored-corpus alias learning and synchronous apply with positive `min_count`, timing, bounded off-runtime execution, and fail-loud durability (ADR-153) |
 | `/_vocab/aliases/discover` | POST | Strict native distributional alias discovery: timed, bounded, compute-only proposals over standalone stored queries or an explicit corpus in either mode (ADR-102/154) |
 | `/_vocab/aliases/discover_and_record` | POST | Strict native standalone stored-corpus discovery + review-candidate recording with timing, live-only persistence, and no matching change; coordinator mode returns the reviewed install alternative (ADR-102/155) |
-| `/_vocab/aliases/feedback` | GET | Match-feedback evidence per tracked candidate pair (ADR-103): title counts, surviving sampled queries, Jaccard `overlap`, `validated` — thresholds `?min_overlap=0.5&min_titles=50&min_queries=20` echoed (capture is opt-in: `alias_feedback_capture`) |
+| `/_vocab/aliases/feedback` | GET/HEAD | Strict native match-feedback evidence with positive thresholds, familiar bounded `from`/`size` paging, total `count`, timing, and no-store off-runtime execution (ADR-103/156; capture is opt-in) |
 | `/_vocab/aliases/feedback/reset` | POST | Wipe accumulated feedback evidence (a measurement-window boundary) |
 | `/_vocab/aliases/validate_and_apply` | POST | Stamp validated pairs into the registry (evidence + confidence — metadata-only, no recompile); `?activate=true` additionally promotes them (refuses operator-rejected groups) via the full recompile path |
 | `/_settings` | GET | Read live engine settings (`?include_defaults`) |

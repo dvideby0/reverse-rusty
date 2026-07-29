@@ -60,40 +60,6 @@ impl FeedbackThresholds {
 }
 
 #[derive(Serialize)]
-struct FeedbackResponse {
-    capture_enabled: bool,
-    tracked_pairs: usize,
-    min_overlap: f64,
-    min_titles: u64,
-    min_queries: u64,
-    pairs: Vec<reverse_rusty::vocab::PairFeedback>,
-}
-
-/// GET /_vocab/aliases/feedback — the per-candidate-pair evidence report (ADR-103). Reads the
-/// aggregator + the lock-free snapshot (for the degenerate-evidence exclusion's source
-/// lookups); thresholds are echoed so the caller sees what `validated` meant.
-pub(crate) async fn get_alias_feedback(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<FeedbackThresholds>,
-) -> impl IntoResponse {
-    let (min_overlap, min_titles, min_queries) = q.sanitized();
-    let snap = state.snapshot.load();
-    let capture_enabled = snap.config().alias_feedback_capture;
-    let fb = state.feedback.lock();
-    let pairs = fb.report(min_overlap, min_titles, min_queries, |id| {
-        snap.get_query_source(id)
-    });
-    Json(FeedbackResponse {
-        capture_enabled,
-        tracked_pairs: fb.tracked_pairs(),
-        min_overlap,
-        min_titles,
-        min_queries,
-        pairs,
-    })
-}
-
-#[derive(Serialize)]
 struct ValidateApplyResponse {
     acknowledged: bool,
     /// Pairs that met the thresholds this pass.

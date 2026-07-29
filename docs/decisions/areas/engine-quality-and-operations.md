@@ -32,6 +32,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [153](../adr-153-alias-learn-apply-api-contract.md) | Alias learn-and-apply REST API contract | Makes stored-corpus alias learning strict, bounded, off-runtime, durable, and mode-consistent. | Accepted |
 | [154](../adr-154-alias-discover-api-contract.md) | Alias discovery REST API contract | Makes review-first distributional discovery strict, bounded, off-runtime, and mode-consistent. | Accepted |
 | [155](../adr-155-alias-discover-record-api-contract.md) | Alias discover-and-record REST API contract | Makes candidate recording strict, bounded, off-runtime, and explicit about live-only persistence. | Accepted |
+| [156](../adr-156-alias-feedback-read-api-contract.md) | Alias-feedback read REST API contract | Makes behavioral-evidence review strict, pageable, bounded, off-runtime, and mode-consistent. | Accepted |
 
 ---
 

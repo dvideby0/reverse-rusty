@@ -626,12 +626,22 @@ two-form candidate. Capture is single-node, in memory, default off, and applies 
 `/_search` and `/_mpercolate` traffic. Enable it with the dynamic settings
 `alias_feedback_capture=true`; `alias_feedback_max_pairs` bounds the tracked candidate set.
 
-`GET /_vocab/aliases/feedback` returns the rolling evidence. Threshold query parameters default to
-`min_overlap=0.5`, `min_titles=50`, and `min_queries=20`:
+`GET` and `HEAD /_vocab/aliases/feedback` return the rolling evidence. This is a native behavioral
+report, not an Elasticsearch/OpenSearch synonym-rule API: those systems manage explicit rules rather
+than compare passive reverse-query match populations. The route adopts Elasticsearch-familiar
+`from`/`size` paging and a total `count` without claiming synonym-set semantics.
+
+Threshold query parameters default to `min_overlap=0.5`, `min_titles=50`, and `min_queries=20`.
+`min_overlap` must be finite within `[0,1]`; title and query thresholds must be positive. `from`
+defaults to zero and `size` defaults to 256, with a maximum of 256. Unknown, duplicate, malformed,
+or out-of-range parameters fail with 400. Out-of-range `from` and `size=0` return an empty page:
 
 ```json
 {
+  "took": 3,
+  "took_ms": 3.42,
   "capture_enabled": true,
+  "count": 1,
   "tracked_pairs": 1,
   "min_overlap": 0.5,
   "min_titles": 50,
@@ -650,6 +660,17 @@ two-form candidate. Capture is single-node, in memory, default off, and applies 
 }
 ```
 
+`count` is the total tracked-pair cardinality before paging. `tracked_pairs` is retained as an equal
+compatibility spelling; `pairs` contains the selected page. Every response is no-store and uses the
+fixed `vocab_aliases_feedback_get` telemetry label.
+
+The request body must be empty, with a 64 KiB extraction ceiling and 250 ms read deadline. The
+serialized page is capped at 1 MiB. The request waits asynchronously for the shared administrative
+slot; a blocking worker clones only the page under the feedback mutex, captures the corresponding
+engine snapshot, and releases the mutex before source lookup, exclusion filtering, overlap
+calculation, and serialization. Closed admission returns 503 and internal worker/serialization
+failure returns 500.
+
 `POST /_vocab/aliases/validate_and_apply` with the same thresholds stamps evidence and raises
 confidence for validated candidates without changing matching. Add `?activate=true` to explicitly
 promote eligible validated candidates through the full recompile path; rejected or mixed-kind
@@ -657,6 +678,8 @@ entries are never resurrected by automation. The response reports `validated`, `
 `activated`, `recompiled`, and the status `summary`.
 
 `POST /_vocab/aliases/feedback/reset` clears the process-local evidence window and returns
-`{"acknowledged":true}`. All three feedback endpoints return 501 in cluster mode; run capture on a
-single-node replica of the title stream and install reviewed activations through cluster
-`PUT /_vocab`.
+`{"acknowledged":true}`. All three feedback endpoints return 501 in cluster mode; the evidence read
+first validates its shared GET/HEAD, threshold, paging, and body contract and returns an observed
+no-store alternative. Run capture on a single-node replica of the title stream and install reviewed
+activations through cluster `PUT /_vocab`. The read contract is recorded in
+[ADR-156](../../decisions/adr-156-alias-feedback-read-api-contract.md).

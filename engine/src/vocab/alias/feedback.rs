@@ -245,6 +245,23 @@ impl AliasFeedback {
         self.pairs.len()
     }
 
+    /// Clone one bounded report page while the caller holds the feedback
+    /// aggregator guard. The returned snapshot owns only the selected pairs, so
+    /// source lookup, exclusion filtering, and overlap calculation can continue
+    /// after the live capture mutex is released.
+    #[must_use]
+    pub fn snapshot_page(&self, from: usize, size: usize) -> (usize, Self) {
+        let count = self.pairs.len();
+        let start = from.min(count);
+        let end = start.saturating_add(size).min(count);
+        (
+            count,
+            Self {
+                pairs: self.pairs[start..end].to_vec(),
+            },
+        )
+    }
+
     /// Render the per-pair report. `lookup` resolves a sampled query id to its source text —
     /// the **degenerate-evidence exclusion** (the correctness core, ADR-103): a sampled query
     /// whose OWN text references either form is dropped before the overlap is computed. Why: a
@@ -436,6 +453,29 @@ mod tests {
             .map(|r| r.forms)
             .collect();
         assert_eq!(f1, f2);
+    }
+
+    #[test]
+    fn snapshot_page_is_bounded_and_preserves_total_order_and_evidence() {
+        let reg = registry_with_candidates(&[
+            ("alpha", "alphas", 0.9),
+            ("bravo", "bravos", 0.8),
+            ("charlie", "charlies", 0.7),
+        ]);
+        let mut fb = AliasFeedback::default();
+        fb.sync_tracked(&reg, 3);
+        fb.observe(&s(&["bravo", "vertex"]), &[1]);
+
+        let (count, page) = fb.snapshot_page(1, 1);
+        assert_eq!(count, 3);
+        assert_eq!(page.tracked_pairs(), 1);
+        let report = page.report(0.5, 1, 1, |_| Some("vertex gamma".to_string()));
+        assert_eq!(report[0].forms, s(&["bravo", "bravos"]));
+        assert_eq!(report[0].titles_a + report[0].titles_b, 1);
+
+        let (count, empty) = fb.snapshot_page(usize::MAX, usize::MAX);
+        assert_eq!(count, 3);
+        assert_eq!(empty.tracked_pairs(), 0);
     }
 
     #[test]
