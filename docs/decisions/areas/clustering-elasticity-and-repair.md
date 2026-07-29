@@ -14,6 +14,7 @@ Allocation, handoff, autoscaling, resize, reconciliation, and repair after parti
 | [048](../adr-048-reliability-hardening.md) | Reliability hardening | Adds abort-safe unfencing, lease expiry, and autoscaler-driven handoff execution. | Accepted |
 | [065](../adr-065-distributed-v1-graduation.md) | Distributed v1 graduation criteria | Defines the release-candidate program; each graduation deliverable is captured in its own ADR. | Accepted |
 | [090](../adr-090-data-moving-reassignment.md) | Data-moving live reassignment | Moves shard data before committing ownership, so routing always points to a data-bearing source. | Accepted |
+| [166](../adr-166-cluster-rebalance-api-contract.md) | Cluster-rebalance REST API contract | Makes native whole-cluster rebalance strict, bounded, topology-safe by default, and explicit about its ES/OpenSearch boundary. | Accepted |
 
 ---
 

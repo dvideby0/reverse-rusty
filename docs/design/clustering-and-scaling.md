@@ -265,7 +265,7 @@ assignments, or physical data. A manager role is eligibility metadata, while the
 changed separately through joint consensus. The REST boundary reserves bootstrap `NodeId(0)`,
 requires an HTTP(S) mesh origin, and reports the exact committed application version; replacement
 must name the same recovered logical node unless data was moved safely first. The full operator
-contract is in the [cluster-membership API reference](../reference/api/cluster.md).
+contract is in the [cluster-control API reference](../reference/api/cluster.md).
 
 Deregistration is the symmetric descriptor-only transition. It reserves the same bootstrap
 identity, returns the proposal's exact application version, and fails closed while the id remains
@@ -280,6 +280,12 @@ The allocator ranks registered nodes for each logical position with rendezvous (
 desired assignments. A committed map is routing authority only after deployment topology is
 resolved and, for a populated remote cluster, the corresponding data movement has completed. Boot
 and reconcile guards fail closed instead of routing a position to an empty slot.
+
+The REST rebalance boundary enforces that distinction (ADR-166). A bodyless in-process request can
+commit the advisory map because all shards remain co-resident. A bodyless remote request drives the
+data-moving move-then-commit workflow; explicit `move:false` is rejected before planning, so the
+public route cannot create the known map-without-data state. The underlying map-only library
+primitive remains available for in-process assembly and deterministic allocator tests.
 
 Consensus holds topology only. It never stores query DSL, tags, source, translog records, or compiled
 segments.

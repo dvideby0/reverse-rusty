@@ -56,11 +56,11 @@ use crate::handlers::{
     ALIAS_FEEDBACK_READ_BODY_LIMIT, ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT,
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
     CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT,
-    CLUSTER_NODE_DEREGISTER_BODY_LIMIT, CLUSTER_NODE_REGISTER_BODY_LIMIT, CLUSTER_STATE_BODY_LIMIT,
-    EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT,
-    SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
-    VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
-    VOCAB_WRITE_BODY_LIMIT,
+    CLUSTER_NODE_DEREGISTER_BODY_LIMIT, CLUSTER_NODE_REGISTER_BODY_LIMIT,
+    CLUSTER_REBALANCE_BODY_LIMIT, CLUSTER_STATE_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT,
+    HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT,
+    SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT,
+    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -358,6 +358,9 @@ pub(crate) async fn run(
         durability_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS,
         )),
+        rebalance_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_CLUSTER_REBALANCES,
+        )),
         health_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
         )),
@@ -545,7 +548,10 @@ pub(crate) async fn run(
             any(cluster_deregister_node)
                 .layer(DefaultBodyLimit::max(CLUSTER_NODE_DEREGISTER_BODY_LIMIT)),
         )
-        .route("/_cluster/rebalance", post(cluster_rebalance))
+        .route(
+            "/_cluster/rebalance",
+            any(cluster_rebalance).layer(DefaultBodyLimit::max(CLUSTER_REBALANCE_BODY_LIMIT)),
+        )
         .route("/_cluster/reassign", post(cluster_reassign))
         .route("/_cluster/reconcile", post(cluster_reconcile))
         .route("/_cluster/gc", post(cluster_gc))

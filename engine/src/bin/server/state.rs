@@ -36,6 +36,11 @@ pub(crate) const MAX_CONCURRENT_BACKUPS: usize = 1;
 /// Checkpoint and backup share the coordinator writer boundary, so admit one
 /// durability operation at a time instead of queuing blocking workers.
 pub(crate) const MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS: usize = 1;
+/// Rebalance is a cluster-wide topology workflow. Admit one operator-triggered
+/// pass at a time so duplicate requests cannot accumulate blocking workers or
+/// launch competing whole-cluster plans. Conflict-aware parallelism within one
+/// data-moving pass remains controlled by its `max_parallel` request field.
+pub(crate) const MAX_CONCURRENT_CLUSTER_REBALANCES: usize = 1;
 /// The health route stays open even when read auth is enabled. Bound all of
 /// its requests independently before their bodies are buffered.
 pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
@@ -154,6 +159,10 @@ pub(crate) struct ClusterAppState {
     /// requests from accumulating blocking workers behind the same durability
     /// boundary.
     pub(crate) durability_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// One operator-triggered cluster rebalance at a time. The owned permit is
+    /// held by the off-runtime worker through final control-state attestation,
+    /// including after an HTTP disconnect.
+    pub(crate) rebalance_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Coordinator analogue of [`AppState::health_permits`].
     pub(crate) health_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Coordinator analogue of [`AppState::stats_permits`], including bounded

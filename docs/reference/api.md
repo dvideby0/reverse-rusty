@@ -185,6 +185,8 @@ Endpoints are grouped by concern — open the one you need:
   (`GET`/`HEAD`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias
   registry (`/_vocab/aliases*`, ADR-060).
 - **[Settings](api/settings.md)** — read + runtime-update engine settings (`GET`/`PUT /_settings`).
+- **[Cluster control](api/cluster.md)** — strict native node-descriptor registration/removal and
+  topology-safe whole-cluster rebalance, including drain and retry procedures.
 - **[Backup & restore](../operations/backup-restore.md)** — strictly snapshot a durable local
   engine or in-process cluster (`POST /_backup`); remote clusters use quiesced node-volume
   snapshots (ADR-079/139).
@@ -356,7 +358,7 @@ Cluster-only endpoints:
 | `/_cluster/state[/_all\|/version]` | GET/HEAD | Strict no-store authoritative control-plane document or exact version projection; bounded manager-timeout aliases, native membership + shard→node map + ring/model/placement identity, and no fabricated index metadata/routing schema (ADR-037/162) |
 | `/_cluster/nodes` | POST | Strict native member-descriptor upsert with bounded manager-timeout aliases, reserved bootstrap identity, validated HTTP(S) mesh origin, exact committed `version`, and explicit no-voter/no-placement/no-movement semantics ([cluster membership](api/cluster.md), ADR-164) |
 | `/_cluster/nodes/{id}` | DELETE | Strict native descriptor deregistration with bounded manager-timeout aliases, reserved bootstrap identity, fail-closed voter/assignment guards, exact committed `version`, and explicit no-voter/no-placement/no-movement semantics ([cluster membership](api/cluster.md), ADR-165) |
-| `/_cluster/rebalance` | POST | Recompute + commit the shard→node map from membership (HRW, ADR-042). Default (or empty body) is **map-only** — it must NOT be used alone to re-point a populated remote cluster. `{"move": true}` (ADR-090, `--features distributed` only, else 501) additionally MOVES each reassigned position's data via live handoff so routing follows; an optional `"max_parallel": N` runs up to N conflict-free moves concurrently (ADR-095; default 1 = sequential); returns `{acknowledged, moved_data, moved[], failed, not_attempted}` |
+| `/_cluster/rebalance` | POST | Strict native whole-cluster HRW rebalance. Empty body is topology-safe: advisory map commit in-process, data-moving move-then-commit remotely; remote `move:false` fails closed. Positive `max_parallel` enables conflict-free move waves. Returns final control `version` plus complete/resumable outcomes (ADR-042/090/095/166; [cluster control](api/cluster.md)) |
 | `/_cluster/resize` | POST | Resize the cluster (ADR-078): `{"num_shards": N}` — a blue/green rebuild re-places every live query under a fresh ring; returns `{acknowledged, num_shards, rebuilt}`. In-process only (a non-local cluster → 400); vocab + tags preserved; `O(corpus)` (holds the write lock like `PUT /_vocab`) |
 | `/_cluster/resync` | POST | Re-drive queued partial-apply repairs (ADR-047); returns `{repaired, still_pending}` |
 | `/_cluster/handoff` | POST | Live data-moving handoff (ADR-044/048/072): `{"position": N, "source": "https://…", "target": "https://…"}` — peer-recover the target, fence + drain the source, flip routing; returns the new `generation`. Fail-closed: an aborted move auto-unfences the source. Requires a `--features distributed` build (else 501). The raw-endpoint primitive; for the map-aware version see `/_cluster/reassign` |

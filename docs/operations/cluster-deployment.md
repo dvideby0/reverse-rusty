@@ -209,11 +209,12 @@ curl -fsS -XPOST http://127.0.0.1:9200/_cluster/reassign -H "authorization: Bear
 
 This peer-recovers the target, fences + drains the source, flips routing, then commits the new owner
 (**move-then-commit**) — so a coordinator restarted **resolve-only** (`--route-by-assignments` +
-`--control-endpoint`, dropping the now-stale `--shard-endpoint`) routes to the new owner. To move every
-reassigned position at once, `POST /_cluster/rebalance -d '{"move": true}'`. Fail-closed: a failed move
-commits nothing and auto-unfences the source; a `committed:false` reply means the data moved but the
-durable-map commit failed — re-run to reconcile (still zero-FN). The bare map-only `rebalance` (no
-`move`) must **not** be used alone to re-point a populated cluster.
+`--control-endpoint`, dropping the now-stale `--shard-endpoint`) routes to the new owner. To move
+every reassigned position at once, call bodyless `POST /_cluster/rebalance` (or explicitly send
+`{"move":true}`); remote mode now chooses the data-moving workflow by default and rejects
+`move:false`. Fail-closed: a failed move commits nothing and auto-unfences the source; a
+`committed:false` reply means the data moved but the durable-map commit failed — re-run to
+reconcile (still zero-FN).
 
 ## 6. Recovery
 
@@ -348,7 +349,7 @@ control-plane↔coordinator wiring with multi-endpoint failover + committed-assi
 (ADR-082/083/086 — on by default in `compose.cluster.yml`; failover semantics in [§6](#6-recovery),
 the resolve-only restart + move-then-commit in [§5](#5-scaling), the bootstrap `--advertise-url`
 rule in [§3](#3-bootstrap--startup-ordering)); **data-moving reassignment** (ADR-090):
-`POST /_cluster/reassign {position, node}` (or `rebalance` with `{move:true}`) moves the data via
-live handoff THEN commits the new owner — the bare map-only HRW `rebalance` (no `move`) must
-**not** be used alone to re-point a populated cluster; and the **Kubernetes / Helm chart**
+`POST /_cluster/reassign {position, node}` (or bodyless remote `rebalance`) moves the data via
+live handoff THEN commits the new owner; the REST rebalance boundary now rejects remote map-only
+mode. Also shipped: the **Kubernetes / Helm chart**
 (ADR-084, [`kubernetes-deployment.md`](kubernetes-deployment.md)).

@@ -122,6 +122,10 @@ fn grpc_colocated_shards_match_single_node_and_oracle() {
     // A local in-process cluster over the SAME corpus + config: identical placement/routing, so its
     // merged `MatchStats` must equal the co-located gRPC cluster's for every title.
     let local = ClusterEngine::build(vocab(), &cfg, &queries).expect("build local cluster");
+    assert!(
+        !local.requires_data_moving_rebalance(),
+        "an in-process cluster must retain the safe map-only rebalance default"
+    );
 
     // The differential contract, over the co-located gRPC cluster, for every title.
     for (i, title) in titles.iter().enumerate() {
