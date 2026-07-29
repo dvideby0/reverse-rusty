@@ -215,7 +215,7 @@ The full method/path matrix is below.
 | `/_vocab/aliases/feedback` | GET/HEAD | Strict native match-feedback evidence with positive thresholds, familiar bounded `from`/`size` paging, total `count`, timing, and no-store off-runtime execution (ADR-103/156; capture is opt-in) |
 | `/_vocab/aliases/feedback/reset` | POST | Strict native measurement-window reset that preserves tracked candidates and clears their evidence atomically (ADR-103/157) |
 | `/_vocab/aliases/validate_and_apply` | POST | Strict native evidence stamping with positive thresholds, timing, idempotent no-op results, and no matching change by default; `activate=true` explicitly promotes eligible candidates through a complete fail-loud recompile (ADR-103/158) |
-| `/_settings` | GET | Read live engine settings (`?include_defaults`) |
+| `/_settings` | GET/HEAD | Strict native no-store live settings with familiar `include_defaults` and `flat_settings`, bounded off-runtime execution, and coordinator topology/per-shard parity (ADR-022/159) |
 | `/_settings` | PUT | Update the dynamic settings subset |
 
 ---
@@ -306,9 +306,11 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   standalone ADR-026 columnar-batch optimization. Its ordered match slots remain exact, but
   `profile: true` returns `501 profile_unsupported`; the top-level broad summary is standalone-only
   (ADR-135).
-- **`GET /_settings` works in cluster mode** — it returns the live cluster + per-shard configuration
-  (`mode`, `shards`, `replication_factor`, `include_broad`, `durable`, and the assembled `per_shard`
-  `EngineConfig`). Only **`PUT /_settings`** is 501 in cluster mode (see below).
+- **`GET`/`HEAD /_settings` works in cluster mode** — it returns the live cluster + per-shard
+  configuration (`mode`, `shards`, `replication_factor`, `include_broad`, `durable`, and the
+  assembled `per_shard` `EngineConfig`), plus per-shard built-in `defaults` when requested. The read
+  is strict, no-store, and bounded off the async runtime (ADR-159). Only **`PUT /_settings`** is 501
+  in cluster mode (see below).
 - **Single-node-only surfaces answer 501 naming the alternative:** `/_compact` / `/_forcemerge`
   (per-shard policy; use `POST /_checkpoint` for the durability commit), `PUT /_settings` (cluster
   settings are fixed at assembly — restart the coordinator with the new flags), `/_cat/stats`,

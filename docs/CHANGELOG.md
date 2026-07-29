@@ -162,6 +162,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   off-runtime admission, success-only publication, fail-loud activation durability, and a
   validated coordinator alternative
   ([ADR-158](decisions/adr-158-alias-feedback-validate-apply-api-contract.md)).
+- Hardened native `GET`/`HEAD /_settings` with strict familiar controls, bounded bodyless
+  transport, no-store telemetry, shared off-runtime admission and serialization, and coordinator
+  lock/default parity while keeping its native compatibility boundary explicit
+  ([ADR-159](decisions/adr-159-get-settings-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

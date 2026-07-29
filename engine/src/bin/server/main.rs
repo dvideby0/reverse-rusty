@@ -21,7 +21,7 @@
 //!   PUT  /_vocab             Replace vocabulary (body: Vocab JSON)
 //!   POST /_vocab/learn       Learn synonyms from raw query text (returns them)
 //!   POST /_vocab/learn_and_apply  Learn synonyms from stored queries + apply (?min_count=N)
-//!   GET  /_settings          Engine settings as JSON (?include_defaults=true)
+//!   GET/HEAD /_settings      Engine settings as JSON (?include_defaults=true)
 //!   PUT  /_settings          Update dynamic settings (body: flat JSON, e.g. {"max_segments":16})
 //!
 //! Usage:
@@ -85,15 +85,16 @@ use handlers::{
     force_merge_route, get_alias_feedback, get_aliases, get_doc, get_job, get_job_stream,
     get_settings, get_vocab, health, import_aliases, learn_and_apply_aliases,
     learn_and_apply_vocab, learn_vocab, mpercolate_route, open_pit_route, prometheus_metrics,
-    put_doc, put_settings, put_vocab, reset_alias_feedback, search_route, stats,
-    v2_mpercolate_route, v2_search_route, validate_and_apply_feedback,
-    vocab_learn_apply_method_not_allowed, vocab_learn_method_not_allowed, vocab_method_not_allowed,
-    ALIAS_DISCOVER_BODY_LIMIT, ALIAS_DISCOVER_RECORD_BODY_LIMIT, ALIAS_FEEDBACK_APPLY_BODY_LIMIT,
+    put_doc, put_settings, put_vocab, reset_alias_feedback, search_route,
+    settings_method_not_allowed, stats, v2_mpercolate_route, v2_search_route,
+    validate_and_apply_feedback, vocab_learn_apply_method_not_allowed,
+    vocab_learn_method_not_allowed, vocab_method_not_allowed, ALIAS_DISCOVER_BODY_LIMIT,
+    ALIAS_DISCOVER_RECORD_BODY_LIMIT, ALIAS_FEEDBACK_APPLY_BODY_LIMIT,
     ALIAS_FEEDBACK_READ_BODY_LIMIT, ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT,
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
     CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT,
-    PIT_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT,
-    VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
+    PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT,
+    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -555,7 +556,13 @@ async fn main() {
                 .layer(DefaultBodyLimit::max(ALIAS_FEEDBACK_APPLY_BODY_LIMIT))
                 .fallback(alias_feedback_apply_method_not_allowed::<AppState>),
         )
-        .route("/_settings", get(get_settings).put(put_settings))
+        .route(
+            "/_settings",
+            get(get_settings)
+                .layer(DefaultBodyLimit::max(SETTINGS_READ_BODY_LIMIT))
+                .merge(put(put_settings))
+                .fallback(settings_method_not_allowed::<AppState>),
+        )
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
         // Auth sits OUTSIDE the concurrency limiter: an unauthenticated flood
