@@ -7,20 +7,10 @@
 //! multi-word matcher; declared multi-word groups may therefore activate, while learned
 //! multi-word guesses remain review candidates.
 
-use std::sync::Arc;
-
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    Json,
-};
-use serde::{Deserialize, Serialize};
-
-use crate::dto::ApiError;
-use crate::state::AppState;
-
 mod discover;
+mod discover_record;
+#[cfg(test)]
+mod discover_record_tests;
 #[cfg(test)]
 mod discover_tests;
 mod feedback;
@@ -36,6 +26,12 @@ mod read_tests;
 pub(crate) use discover::{
     alias_discover_method_not_allowed, discover_aliases, execute_alias_discovery,
     AliasDiscoverTransport, ALIAS_DISCOVER_BODY_LIMIT,
+};
+pub(crate) use discover_record::{
+    alias_discover_record_error_response, alias_discover_record_method_not_allowed,
+    discover_and_record_aliases, finish_alias_discover_record_response,
+    validate_alias_discover_record_body, AliasDiscoverRecordTransport,
+    ALIAS_DISCOVER_RECORD_BODY_LIMIT,
 };
 pub(crate) use feedback::{get_alias_feedback, reset_alias_feedback, validate_and_apply_feedback};
 pub(crate) use import::{
@@ -53,223 +49,3 @@ pub(crate) use read::{
     acquire_alias_read_permit, alias_read_method_not_allowed, finish_alias_read_worker,
     get_aliases, serialize_aliases, AliasReadTransport, ALIAS_READ_BODY_LIMIT,
 };
-
-#[derive(Deserialize, Default)]
-pub(crate) struct DiscoverAliasesRequest {
-    /// Explicit `(id, dsl)` corpus to analyze. Absent ⇒ the engine's own stored queries.
-    /// (The cluster-mode dry-run requires this — a coordinator has no single-engine corpus.)
-    #[serde(default)]
-    pub(crate) queries: Option<Vec<(u64, String)>>,
-    // Knob overrides; defaults = `DistributionalConfig::default()` (ADR-102).
-    #[serde(default)]
-    min_token_freq: Option<usize>,
-    #[serde(default)]
-    min_similarity: Option<f64>,
-    #[serde(default)]
-    max_pairs: Option<usize>,
-    #[serde(default)]
-    max_vocab: Option<usize>,
-    #[serde(default)]
-    max_cooccurrence_rate: Option<f64>,
-    #[serde(default)]
-    glue_phrases: Option<bool>,
-    #[serde(default)]
-    include_numeric: Option<bool>,
-}
-
-impl DiscoverAliasesRequest {
-    pub(crate) fn config(&self) -> reverse_rusty::vocab::DistributionalConfig {
-        let d = reverse_rusty::vocab::DistributionalConfig::default();
-        reverse_rusty::vocab::DistributionalConfig {
-            min_token_freq: self.min_token_freq.unwrap_or(d.min_token_freq),
-            min_similarity: self.min_similarity.unwrap_or(d.min_similarity),
-            max_pairs: self.max_pairs.unwrap_or(d.max_pairs),
-            max_vocab: self.max_vocab.unwrap_or(d.max_vocab),
-            max_cooccurrence_rate: self
-                .max_cooccurrence_rate
-                .unwrap_or(d.max_cooccurrence_rate),
-            glue_phrases: self.glue_phrases.unwrap_or(d.glue_phrases),
-            include_numeric: self.include_numeric.unwrap_or(d.include_numeric),
-            ..d
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct DiscoverRecordResponse {
-    acknowledged: bool,
-    /// Pairs the discoverer proposed (post-filter).
-    proposed: usize,
-    /// Proposals recorded as NEW review candidates.
-    new_candidates: usize,
-    /// Proposals that already existed (confidence refreshed, status untouched).
-    rediscovered: usize,
-    /// Proposals refused because the group was operator-rejected (stickiness).
-    rejected_sticky: usize,
-    /// Always 0 — candidates change no matching-relevant state, so nothing recompiles
-    /// (the ADR-102 metadata-only install; match results are byte-identical).
-    recompiled: usize,
-    summary: reverse_rusty::vocab::AliasSummary,
-}
-
-/// POST /_vocab/aliases/discover_and_record — discover over the engine's OWN stored queries and
-/// file every proposal as a review `Candidate` (ADR-102). Never activates anything (the
-/// `LearnedDistributional` provenance is review-first by contract), so the vocabulary installs
-/// through the metadata-only seam — no recompile, byte-identical matching. Activation stays an
-/// explicit operator act (`PUT /_vocab` with edited statuses). Knobs as in `/discover`; an
-/// explicit `queries` body is refused here — recording is about THIS engine's corpus.
-pub(crate) async fn discover_and_record_aliases(
-    State(state): State<Arc<AppState>>,
-    body: Option<Json<DiscoverAliasesRequest>>,
-) -> Response {
-    let req = body.map(|Json(r)| r).unwrap_or_default();
-    if req.queries.is_some() {
-        return ApiError::response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "discover_and_record analyzes this engine's own stored queries; \
-             use /_vocab/aliases/discover for an explicit corpus"
-                .to_string(),
-        )
-        .into_response();
-    }
-    let cfg = req.config();
-    let result = {
-        let mut engine = state.engine.lock();
-        match engine.discover_aliases_and_record(&cfg) {
-            Ok(report) => (
-                StatusCode::OK,
-                Json(DiscoverRecordResponse {
-                    acknowledged: true,
-                    proposed: report.proposed,
-                    new_candidates: report.new_candidates,
-                    rediscovered: report.rediscovered,
-                    rejected_sticky: report.rejected_sticky,
-                    recompiled: 0,
-                    summary: report.summary,
-                }),
-            )
-                .into_response(),
-            Err(e) => ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
-                .into_response(),
-        }
-    };
-    state.publish_snapshot();
-    result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::read::{serialize_aliases, AliasReadPage};
-    use super::{discover_and_record_aliases, DiscoverAliasesRequest};
-    use crate::metrics::PrometheusMetrics;
-    use crate::state::AppState;
-    use axum::extract::State;
-    use axum::Json;
-    use reverse_rusty::segment::Engine;
-    use reverse_rusty::Normalizer;
-    use std::sync::Arc;
-
-    fn state_with(eng: Engine) -> Arc<AppState> {
-        let snap = Arc::new(eng.snapshot());
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build()
-            .expect("pool");
-        let prom = PrometheusMetrics::new();
-        Arc::new(AppState {
-            engine: parking_lot::Mutex::new(eng),
-            flush_serial: parking_lot::Mutex::new(()),
-            backup_permits: Arc::new(tokio::sync::Semaphore::new(
-                crate::state::MAX_CONCURRENT_BACKUPS,
-            )),
-            health_permits: Arc::new(tokio::sync::Semaphore::new(
-                crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
-            )),
-            stats_permits: Arc::new(tokio::sync::Semaphore::new(
-                crate::state::MAX_CONCURRENT_STATS,
-            )),
-            snapshot: arc_swap::ArcSwap::new(snap),
-            pool,
-            search_permits: None,
-            ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
-            exhaustive_jobs: crate::jobs::ExhaustiveJobs::for_tests(prom.clone()),
-            max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
-            include_broad: false,
-            prom,
-            slow_query_threshold_ms: 0,
-            auth: None,
-            feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
-            pit_tokens: crate::pit::PitTokens::generate(),
-            pits: parking_lot::Mutex::new(reverse_rusty::PitRegistry::new()),
-            pit_config: reverse_rusty::PitConfig::default(),
-        })
-    }
-
-    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .expect("body bytes");
-        serde_json::from_slice(&bytes).expect("json body")
-    }
-
-    fn aliases_json(state: &AppState) -> serde_json::Value {
-        let snapshot = state.snapshot.load();
-        let bytes = serialize_aliases(
-            snapshot.vocab().map(reverse_rusty::vocab::Vocab::aliases),
-            AliasReadPage::default(),
-        )
-        .expect("serialize aliases");
-        serde_json::from_slice(&bytes).expect("alias JSON")
-    }
-
-    /// A corpus with an obvious substitute pair: two tokens filling the same slot across
-    /// family-private contexts, never together, plus filler so contexts carry positive PMI
-    /// (the distributional/tests.rs corpus shape).
-    fn discovery_corpus() -> Vec<(u64, String)> {
-        let mut queries = Vec::new();
-        let mut id = 1u64;
-        for i in 0..40 {
-            queries.push((id, format!("zzns ctxp{} ctxb{}", i % 7, i % 5)));
-            id += 1;
-            queries.push((id, format!("zznorthstar ctxp{} ctxb{}", i % 7, i % 5)));
-            id += 1;
-        }
-        for i in 0..200 {
-            queries.push((id, format!("filler{i} junk{i}")));
-            id += 1;
-        }
-        queries
-    }
-
-    /// discover_and_record files candidates (never active) from the ENGINE's own queries,
-    /// republishes the snapshot, and refuses an explicit corpus.
-    #[tokio::test]
-    async fn discover_and_record_files_candidates_only() {
-        let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
-        eng.build_from_queries(&discovery_corpus());
-        let state = state_with(eng);
-
-        let resp = discover_and_record_aliases(State(Arc::clone(&state)), None).await;
-        let got = body_json(resp).await;
-        assert_eq!(got["acknowledged"], true, "got: {got}");
-        assert!(got["new_candidates"].as_u64().unwrap() >= 1);
-        assert_eq!(got["recompiled"], 0, "metadata-only: nothing recompiles");
-
-        // Visible via the published snapshot — as candidates, nothing active.
-        let reg = aliases_json(&state);
-        assert!(reg["summary"]["candidate"].as_u64().unwrap() >= 1);
-        assert_eq!(reg["summary"]["active"], 0);
-
-        // An explicit corpus on the record path is refused (400).
-        let resp = discover_and_record_aliases(
-            State(Arc::clone(&state)),
-            Some(Json(DiscoverAliasesRequest {
-                queries: Some(vec![(1, "a b".to_string())]),
-                ..Default::default()
-            })),
-        )
-        .await;
-        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
-    }
-}

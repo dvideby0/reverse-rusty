@@ -110,9 +110,23 @@ impl Engine {
         cfg: &crate::vocab::DistributionalConfig,
     ) -> Result<AliasDiscoveryReport, crate::error::NormalizerError> {
         let pairs = self.discover_aliases(cfg);
+        self.record_discovered_aliases(&pairs)
+    }
+
+    /// Record precomputed distributional proposals as review-only candidates.
+    ///
+    /// This is the mutation half of [`discover_aliases_and_record`](Self::discover_aliases_and_record)
+    /// for callers that capture source text and run the O(corpus) discoverer outside an engine
+    /// writer guard. The proposals are still classified against this engine's current normalizer
+    /// and dictionary. They never auto-activate, and the metadata-only install guard verifies that
+    /// matching-relevant vocabulary projections remain unchanged.
+    pub fn record_discovered_aliases(
+        &mut self,
+        pairs: &[crate::vocab::DiscoveredPair],
+    ) -> Result<AliasDiscoveryReport, crate::error::NormalizerError> {
         let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
         let (new_candidates, rediscovered, rejected_sticky) =
-            vocab.record_distributional_candidates(&pairs, &self.norm, &self.dict);
+            vocab.record_distributional_candidates(pairs, &self.norm, &self.dict);
         self.install_vocab_metadata_only(vocab)?;
         Ok(AliasDiscoveryReport {
             proposed: pairs.len(),

@@ -187,6 +187,13 @@ explicit corpus is validated as distinct, valid DSL with bounded size and contro
 stored-corpus discovery briefly clones live sources under the engine guard and releases it before
 analysis. Coordinator discovery requires an explicit corpus until cross-shard source gathering
 exists. The deterministic proposals are never recorded or activated by that route.
+The separate standalone discover-and-record mutation accepts only bounded discovery controls. Its
+blocking worker clones stored sources briefly, runs discovery without the engine guard, then
+reacquires the guard only to install never-active candidates through the metadata-only seam and
+publish a snapshot. Matching and the vocabulary epoch remain unchanged. The response states that
+the live vocabulary document was not written back to the operator's startup vocabulary file;
+coordinator mode returns the dry-run, review, and `PUT /_vocab` alternative instead of performing a
+full blue/green rebuild for review metadata.
 Embedded callers use the deliberately split `set_vocab()` then `recompile_stale_segments()` sequence
 and must not publish a snapshot between those calls. Single-node durable deployments must persist
 the same vocabulary file used on reopen; clusters checkpoint the vocabulary in coordinator state. See

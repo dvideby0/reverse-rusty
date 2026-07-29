@@ -144,6 +144,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   shared off-runtime admission, brief stored-source capture, deterministic response limits, and an
   explicit native boundary from Elasticsearch/OpenSearch synonym management
   ([ADR-154](decisions/adr-154-alias-discover-api-contract.md)).
+- Hardened native `POST /_vocab/aliases/discover_and_record` with strict controls-only transport,
+  timed no-store output, truthful live-only persistence, shared off-runtime admission, brief
+  source capture and registry installation locks, success-only snapshot publication, and a
+  validated fail-loud coordinator alternative
+  ([ADR-155](decisions/adr-155-alias-discover-record-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
