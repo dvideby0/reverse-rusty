@@ -677,9 +677,30 @@ promote eligible validated candidates through the full recompile path; rejected 
 entries are never resurrected by automation. The response reports `validated`, `stamped`,
 `activated`, `recompiled`, and the status `summary`.
 
-`POST /_vocab/aliases/feedback/reset` clears the process-local evidence window and returns
-`{"acknowledged":true}`. All three feedback endpoints return 501 in cluster mode; the evidence read
-first validates its shared GET/HEAD, threshold, paging, and body contract and returns an observed
-no-store alternative. Run capture on a single-node replica of the title stream and install reviewed
-activations through cluster `PUT /_vocab`. The read contract is recorded in
-[ADR-156](../../decisions/adr-156-alias-feedback-read-api-contract.md).
+`POST /_vocab/aliases/feedback/reset` starts a new process-local evidence window. It accepts no
+query parameters or body; extraction is capped at 64 KiB with a 250 ms deadline. The operation
+waits asynchronously for the shared administrative slot and clears counters and sketches on a
+blocking worker. The feedback mutex is the exact window boundary: observations before the clear are
+removed and observations after it enter the new window. Candidate pairs remain tracked and
+pre-tokenized, so reset neither republishes an unchanged engine snapshot nor creates a capture gap.
+
+```json
+{
+  "took": 0,
+  "took_ms": 0.084,
+  "acknowledged": true,
+  "capture_enabled": true,
+  "tracked_pairs": 2
+}
+```
+
+Every reset outcome is no-store and uses the fixed `vocab_aliases_feedback_reset_post` telemetry
+label. Other methods return 405 with `Allow: POST`; invalid query/body is 400, a stalled body is
+408, oversized input is 413, closed admission is 503, and a blocking-worker failure is 500.
+
+All three feedback endpoints return 501 in cluster mode. The evidence read and reset first validate
+their shared transport contracts and return observed no-store alternatives. Run capture on a
+single-node replica of the title stream and install reviewed activations through cluster
+`PUT /_vocab`. The contracts are recorded in
+[ADR-156](../../decisions/adr-156-alias-feedback-read-api-contract.md) and
+[ADR-157](../../decisions/adr-157-alias-feedback-reset-api-contract.md).

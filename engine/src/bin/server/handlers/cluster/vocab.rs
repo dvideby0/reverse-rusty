@@ -23,9 +23,10 @@ use crate::handlers::alias::{
     alias_discover_record_error_response, alias_import_error_response, alias_import_success,
     alias_learn_apply_error_response, alias_learn_apply_success, execute_alias_discovery,
     finish_alias_discover_record_response, finish_alias_feedback_read_response,
-    finish_alias_import_response, finish_alias_learn_apply_response, finish_alias_read_worker,
-    serialize_aliases, validate_alias_discover_record_body, AliasDiscoverRecordTransport,
-    AliasDiscoverTransport, AliasFeedbackReadTransport, AliasImportTransport,
+    finish_alias_feedback_reset_response, finish_alias_import_response,
+    finish_alias_learn_apply_response, finish_alias_read_worker, serialize_aliases,
+    validate_alias_discover_record_body, AliasDiscoverRecordTransport, AliasDiscoverTransport,
+    AliasFeedbackReadTransport, AliasFeedbackResetTransport, AliasImportTransport,
     AliasLearnApplyTransport, AliasReadTransport,
 };
 use crate::handlers::vocab::{
@@ -377,9 +378,16 @@ pub(crate) async fn cluster_validate_and_apply_feedback() -> Response {
 }
 
 /// POST /_vocab/aliases/feedback/reset — 501 in cluster mode (ADR-103).
-pub(crate) async fn cluster_reset_alias_feedback() -> Response {
-    not_in_cluster_mode(
-        "POST /_vocab/aliases/feedback/reset",
-        "match-feedback capture is single-node v1",
+pub(crate) async fn cluster_reset_alias_feedback(
+    State(state): State<Arc<ClusterAppState>>,
+    transport: AliasFeedbackResetTransport,
+) -> Response {
+    let (_duration, _started) = transport.into_parts();
+    finish_alias_feedback_reset_response(
+        &state.prom,
+        not_in_cluster_mode(
+            "POST /_vocab/aliases/feedback/reset",
+            "run match-feedback capture on a single-node replica fed the same title stream",
+        ),
     )
 }

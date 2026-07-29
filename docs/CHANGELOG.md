@@ -153,6 +153,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   familiar bounded `from`/`size` paging, total counts, timed no-store output, shared off-runtime
   admission, page-only evidence snapshots, and an observed fail-loud coordinator alternative
   ([ADR-156](decisions/adr-156-alias-feedback-read-api-contract.md)).
+- Hardened native `POST /_vocab/aliases/feedback/reset` with strict bounded bodyless transport,
+  timed no-store output, shared off-runtime admission, a linearizable in-place evidence clear that
+  preserves tracked candidates, and an observed fail-loud coordinator alternative
+  ([ADR-157](decisions/adr-157-alias-feedback-reset-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
