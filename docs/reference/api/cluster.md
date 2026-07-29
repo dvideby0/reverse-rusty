@@ -287,14 +287,14 @@ Supported query controls:
 They are aliases; specify at most one. Values use the shared time syntax (`nanos`, `micros`, `ms`,
 `s`, `m`, `h`, or `d`), default to 30 seconds, and cannot exceed 30 seconds. Exact `0` performs a
 non-waiting rebalance-admission and topology-lock probe. A positive value covers admission,
-blocking-pool queueing, and topology/cluster-lock waiting until the workflow starts.
+dedicated-worker dispatch, and topology/cluster-lock waiting until the workflow starts.
 
 The manager timeout does **not** cancel a started data move. Once the worker atomically starts, the
 request waits for its terminal report because peer recovery/fence/drain/flip cannot be safely
 cancelled at an arbitrary HTTP deadline. A disconnect after start drops only the response: the
 independently supervised worker retains the single rebalance admission slot and completes. A
-disconnect before start cancels its queued gate, so it cannot mutate later when blocking-pool
-capacity appears. The familiar ES/OS overall `timeout` control is rejected because their reroute
+disconnect before start cancels its queued gate, so a delayed worker cannot mutate later. The
+familiar ES/OS overall `timeout` control is rejected because their reroute
 APIs return after an allocation decision, whereas this native endpoint synchronously waits for
 physical movement.
 

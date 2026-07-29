@@ -31,7 +31,7 @@ use super::super::shard_error_status;
 mod supervisor;
 mod transport;
 
-use supervisor::supervise_cluster_rebalance_worker;
+use supervisor::{supervise_cluster_rebalance_worker, ClusterRebalanceWorkerFailure};
 use transport::ClusterRebalanceTransport;
 
 pub(crate) const CLUSTER_REBALANCE_BODY_LIMIT: usize = 64 * 1024;
@@ -141,7 +141,8 @@ enum ClusterRebalanceWorkerOutcome {
     Finished(Result<ClusterRebalanceSuccess, ClusterRebalanceError>),
 }
 
-type ClusterRebalanceWorkerResult = Result<ClusterRebalanceWorkerOutcome, tokio::task::JoinError>;
+type ClusterRebalanceWorkerResult =
+    Result<ClusterRebalanceWorkerOutcome, ClusterRebalanceWorkerFailure>;
 
 #[derive(Serialize)]
 struct RebalanceFailureResponse {
@@ -226,7 +227,7 @@ pub(crate) async fn cluster_rebalance(
     let (started_sender, mut started_receiver) = tokio::sync::oneshot::channel();
     #[cfg(feature = "distributed")]
     let handle = tokio::runtime::Handle::current();
-    let worker = tokio::task::spawn_blocking(move || {
+    let completion = match supervise_cluster_rebalance_worker(move || {
         let _permit = permit;
         let topology = if no_wait {
             worker_state.topology_guard.try_read()
@@ -271,18 +272,24 @@ pub(crate) async fn cluster_rebalance(
             &handle,
         );
         ClusterRebalanceWorkerOutcome::Finished(result)
-    });
-    let mut completion = supervise_cluster_rebalance_worker(worker);
+    }) {
+        Ok(completion) => completion,
+        Err(source) => {
+            error!(error = %source, "failed to dispatch dedicated rebalance worker");
+            return cluster_rebalance_rejection(
+                &state.prom,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "rebalance_unavailable",
+                "rebalance worker could not be started",
+            );
+        }
+    };
+    let mut completion = completion;
 
     if no_wait {
-        // Give an immediately runnable blocking worker one scheduler turn to
-        // win the start gate. If it is still queued, cancel it without waiting
-        // for blocking-pool capacity; the worker will observe `Cancelled`
-        // before any topology-dependent validation or mutation.
-        tokio::task::yield_now().await;
-        if cancel_queued_cluster_rebalance(&gate) {
-            return cluster_rebalance_not_started_timeout(&state.prom);
-        }
+        // Admission and topology access are non-waiting probes inside a
+        // dedicated worker. Await its exact outcome instead of racing its
+        // dispatch against one arbitrary scheduler turn.
         return match completion.await {
             Ok(outcome) => finish_cluster_rebalance_worker(&state.prom, outcome),
             Err(source) => cluster_rebalance_supervisor_failed(&state.prom, &source),

@@ -313,22 +313,24 @@ async fn admission_and_topology_deadlines_do_not_start_a_rebalance() {
     locked_receiver
         .recv_timeout(Duration::from_secs(1))
         .expect("topology lock held");
-    let (status, _, bytes) = send_raw(
-        &state,
-        rebalance_request(
-            "/_cluster/rebalance?cluster_manager_timeout=25ms",
-            Body::empty(),
-        ),
-    )
-    .await;
+    for timeout in ["0", "25ms"] {
+        let (status, _, bytes) = send_raw(
+            &state,
+            rebalance_request(
+                &format!("/_cluster/rebalance?cluster_manager_timeout={timeout}"),
+                Body::empty(),
+            ),
+        )
+        .await;
+        assert_error(
+            status,
+            &bytes,
+            StatusCode::REQUEST_TIMEOUT,
+            "rebalance_timeout",
+        );
+    }
     release_sender.send(()).expect("release topology holder");
     topology_holder.join().expect("topology holder");
-    assert_error(
-        status,
-        &bytes,
-        StatusCode::REQUEST_TIMEOUT,
-        "rebalance_timeout",
-    );
     assert_eq!(
         state.cluster.read().control_state().expect("state"),
         before,
@@ -351,7 +353,7 @@ async fn admission_and_topology_deadlines_do_not_start_a_rebalance() {
 }
 
 #[test]
-fn blocking_pool_queue_cannot_start_a_rebalance_after_the_deadline() {
+fn zero_timeout_dispatch_is_independent_of_the_shared_blocking_pool() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .max_blocking_threads(1)
@@ -360,7 +362,6 @@ fn blocking_pool_queue_cannot_start_a_rebalance_after_the_deadline() {
         .expect("runtime");
     runtime.block_on(async {
         let state = test_state(&seed());
-        let before = state.cluster.read().control_state().expect("state");
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         let blocker = tokio::task::spawn_blocking(move || {
@@ -371,40 +372,26 @@ fn blocking_pool_queue_cannot_start_a_rebalance_after_the_deadline() {
             .recv_timeout(Duration::from_secs(1))
             .expect("blocking pool is occupied");
 
-        for timeout in ["0", "25ms"] {
-            let (status, _, bytes) = tokio::time::timeout(
-                Duration::from_secs(1),
-                send_raw(
-                    &state,
-                    rebalance_request(
-                        &format!("/_cluster/rebalance?cluster_manager_timeout={timeout}"),
-                        Body::empty(),
-                    ),
+        let (status, _, bytes) = tokio::time::timeout(
+            Duration::from_secs(1),
+            send_raw(
+                &state,
+                rebalance_request(
+                    "/_cluster/rebalance?cluster_manager_timeout=0",
+                    Body::empty(),
                 ),
-            )
-            .await
-            .expect("queued rebalance request remains bounded");
-            assert_error(
-                status,
-                &bytes,
-                StatusCode::REQUEST_TIMEOUT,
-                "rebalance_timeout",
-            );
-        }
+            ),
+        )
+        .await
+        .expect("dedicated rebalance dispatch remains bounded");
+        assert_eq!(status, StatusCode::OK, "{bytes:?}");
 
         release_tx.send(()).expect("release blocking pool");
         blocker.await.expect("blocking-pool blocker");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while state.rebalance_permits.available_permits() != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("cancelled worker released admission");
         assert_eq!(
-            state.cluster.read().control_state().expect("state"),
-            before,
-            "a cancelled queued worker must not start later"
+            state.rebalance_permits.available_permits(),
+            1,
+            "completed dedicated worker released admission"
         );
     });
 }

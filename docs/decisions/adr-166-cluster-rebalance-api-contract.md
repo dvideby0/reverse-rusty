@@ -54,16 +54,17 @@ transfer once it has fenced/drained a source.
   reason directing the operator to `/_cluster/state`. Detailed endpoint/transport failures stay in
   server logs.
 - Admit one operator-triggered whole-cluster rebalance per coordinator. The owned permit stays with
-  the blocking worker through its final state read, including after HTTP disconnect. One request's
+  the dedicated worker through its final state read, including after HTTP disconnect. One request's
   internal `max_parallel` concurrency remains available.
 - Accept exactly one manager-timeout spelling, default/max 30 seconds. Zero performs a non-waiting
-  permit/topology-lock probe. Positive values bound admission, blocking-pool queueing, and
+  permit/topology-lock probe. Positive values bound admission, dedicated-worker dispatch, and
   topology/cluster-lock waiting until the workflow atomically starts. A queued worker is cancelled
   at the deadline and cannot mutate later. Once started, the request waits for the exact terminal
   report; manager timeout never pretends to cancel a live handoff.
-- Run every control read, HRW plan/commit, and data-moving workflow off Tokio request workers under
-  the existing shared topology barrier. Descriptor mutation remains exclusive with the workflow;
-  ADR-095's internal disjoint move concurrency is unchanged.
+- Run every control read, HRW plan/commit, and data-moving workflow on a single-admitted dedicated
+  thread under the existing shared topology barrier. This keeps Tokio request workers free and
+  makes a zero-timeout probe independent of shared blocking-pool scheduling. Descriptor mutation
+  remains exclusive with the workflow; ADR-095's internal disjoint move concurrency is unchanged.
 - Return structured `Cache-Control: no-store` responses and fixed
   `cluster_rebalance` request/duration telemetry for every route-reached outcome.
 
@@ -79,8 +80,8 @@ This endpoint is synchronous with respect to the whole selected workflow, unlike
 reroute. A remote pass may therefore outlive the manager-start timeout after it begins.
 Disconnecting after that atomic start does not cancel or multiply it: the independently supervised
 worker finishes while retaining the single admission slot, and the idempotent endpoint can be
-inspected/retried afterward. Disconnecting before start cancels the queued gate, so a blocking-pool
-worker cannot mutate later unless it atomically started before cancellation.
+inspected/retried afterward. Disconnecting before start cancels the queued gate, so a delayed
+dedicated worker cannot mutate unless it atomically started before cancellation.
 
 Map-only rebalance still commits changed assignments as the established sequence of control
 proposals. That sequence is safe only in-process; if a proposal or the final state read fails, the
@@ -95,8 +96,8 @@ prevents the only unsafe dispatch (`remote + map-only`) before the start gate op
 
 Focused lean and distributed handler tests prove changed-placement/version success, topology-safe
 mode selection, strict method/query/media/object/field controls, positive parallelism, body size
-and absolute body deadlines, zero/positive/closed admission, topology-lock timeouts, blocking-pool
-queue cancellation, off-runtime execution, post-start manager-timeout semantics, disconnect-retained
+and absolute body deadlines, zero/positive/closed admission, topology-lock timeouts, deterministic
+dedicated-worker dispatch, off-runtime execution, post-start manager-timeout semantics, disconnect-retained
 admission and completion, fixed telemetry/no-store headers, and sanitized fail-loud control errors.
 Existing allocator, handoff, replicated-group rebalance, reconcile, topology-resolution, Raft, and
 multi-machine suites continue to prove the underlying placement and movement mechanisms.
