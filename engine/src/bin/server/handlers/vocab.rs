@@ -5,12 +5,12 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State},
+    extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use reverse_rusty::config::EngineConfig;
 
@@ -72,24 +72,6 @@ pub(crate) fn build_corpus_config(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Settings management (ES-style /_settings)
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize, Default)]
-pub(crate) struct SettingsQuery {
-    /// When true, `GET /_settings` also returns the default settings (ES-style).
-    #[serde(default)]
-    include_defaults: bool,
-}
-
-#[derive(Serialize)]
-struct GetSettingsResponse {
-    settings: EngineConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    defaults: Option<EngineConfig>,
-}
-
 #[derive(Serialize)]
 struct PutSettingsResponse {
     acknowledged: bool,
@@ -98,18 +80,6 @@ struct PutSettingsResponse {
     /// Surfaced explicitly so clients aren't surprised after a restart.
     persistent: bool,
     settings: EngineConfig,
-}
-
-/// GET /_settings — return the live engine settings as JSON. Reads the lock-free
-/// snapshot (ADR-016). `?include_defaults=true` also returns the defaults, like
-/// Elasticsearch's `GET /_cluster/settings?include_defaults`.
-pub(crate) async fn get_settings(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<SettingsQuery>,
-) -> impl IntoResponse {
-    let settings = state.snapshot.load().config().clone();
-    let defaults = q.include_defaults.then(EngineConfig::default);
-    Json(GetSettingsResponse { settings, defaults })
 }
 
 /// PUT /_settings — update dynamic engine settings at runtime. The body is a flat

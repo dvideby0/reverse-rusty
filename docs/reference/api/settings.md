@@ -2,11 +2,12 @@
 
 > Part of the [REST API reference](../api.md). Query language: [`dsl.md`](../dsl.md).
 
-## `GET /_settings` — Read live settings
+## `GET`/`HEAD /_settings` — Read live settings
 
-ES-style runtime configuration (ADR-022), read lock-free from the snapshot. The `settings` object is
-the complete serialized `EngineConfig`; some fields also have server CLI flags, while library-only
-construction fields are read-only here.
+Strict native runtime configuration (ADR-022/159), read from an immutable snapshot. The `settings`
+object is the complete serialized `EngineConfig`; some fields also have server CLI flags, while
+library-only construction fields are read-only here. `HEAD` performs the same read and returns its
+representation headers without a body.
 
 ```bash
 curl localhost:9200/_settings
@@ -42,8 +43,42 @@ Representative fields from the full response:
 }
 ```
 
-Add `?include_defaults=true` to also return a `defaults` object (the same shape, with the built-in
-defaults) — like Elasticsearch's `GET /_cluster/settings?include_defaults`.
+Supported query controls:
+
+- `include_defaults` (Boolean, default `false`) adds a `defaults` object with the same shape and
+  built-in values.
+- `flat_settings` (Boolean, default `false`) is accepted for ES/OpenSearch familiarity. Reverse
+  Rusty's setting keys are already flat, so either value produces the same representation.
+
+Unknown, duplicate, and malformed controls are rejected. The operation accepts no request body;
+GET/HEAD transport is capped at 64 KiB with a 250 ms body deadline. Responses, including errors, are
+`Cache-Control: no-store`, and serialization is bounded on the shared administrative worker rather
+than the async request thread.
+
+Coordinator mode returns its existing topology and assembled per-shard configuration shape:
+
+```json
+{
+  "mode": "cluster",
+  "shards": 8,
+  "replication_factor": 1,
+  "include_broad": false,
+  "durable": true,
+  "per_shard": { "max_segments": 8, "...": "complete EngineConfig" },
+  "defaults": { "max_segments": 8, "...": "built-in EngineConfig defaults" }
+}
+```
+
+`defaults` is present only with `include_defaults=true`. Coordinator lock waiting, cloning, and
+serialization run off the async runtime under the same bounded administrative admission as other
+configuration reads.
+
+This API borrows the useful `include_defaults` and `flat_settings` controls, but it has no honest
+Elasticsearch/OpenSearch path alias. Their `/_cluster/settings` response represents explicit
+persistent/transient overrides, while Elasticsearch's
+[bare `/_settings`](https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-indices-get-settings)
+represents index settings. Reverse Rusty instead returns one effective typed engine configuration
+and does not fabricate those resource or persistence tiers.
 
 ## `PUT /_settings` — Update settings
 

@@ -8,11 +8,7 @@
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    response::{IntoResponse, Response},
-    Json,
-};
+use axum::{extract::State, response::Response};
 use serde::Serialize;
 use tracing::{info, instrument};
 
@@ -36,6 +32,10 @@ use crate::handlers::vocab::{
     finish_vocab_write_response, serialize_vocab, vocab_learn_apply_error_response,
     vocab_learn_apply_success, vocab_write_error_response, vocab_write_success,
     VocabLearnApplyTransport, VocabLearnTransport, VocabReadTransport, VocabWriteTransport,
+};
+use crate::handlers::{
+    acquire_settings_read_permit, finish_settings_read_worker, serialize_settings_response,
+    SettingsReadTransport,
 };
 use crate::state::ClusterAppState;
 
@@ -284,21 +284,41 @@ struct ClusterSettingsResponse {
     durable: bool,
     /// The per-shard engine configuration the cluster was assembled with.
     per_shard: EngineConfig,
+    /// Built-in per-shard defaults, when explicitly requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    defaults: Option<EngineConfig>,
 }
 
-/// GET /_settings — the cluster + per-shard configuration (read-only in v1).
+/// GET/HEAD /_settings — clone the cluster + per-shard configuration under the
+/// cluster read guard, then release it before bounded serialization. Admission,
+/// the lock wait, and serialization all stay off the async request worker.
 pub(crate) async fn cluster_get_settings(
     State(state): State<Arc<ClusterAppState>>,
-) -> impl IntoResponse {
-    let cluster = state.cluster.read();
-    Json(ClusterSettingsResponse {
-        mode: "cluster",
-        shards: cluster.num_shards(),
-        replication_factor: cluster.replication_factor(),
-        include_broad: state.include_broad,
-        durable: cluster.is_durable(),
-        per_shard: cluster.per_shard_config().clone(),
-    })
+    transport: SettingsReadTransport,
+) -> Response {
+    let (_duration, include_defaults) = transport.into_parts();
+    let permit = match acquire_settings_read_permit(&state.stats_permits, &state.prom).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
+    let worker_state = Arc::clone(&state);
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let response = {
+            let cluster = worker_state.cluster.read();
+            ClusterSettingsResponse {
+                mode: "cluster",
+                shards: cluster.num_shards(),
+                replication_factor: cluster.replication_factor(),
+                include_broad: worker_state.include_broad,
+                durable: cluster.is_durable(),
+                per_shard: cluster.per_shard_config().clone(),
+                defaults: include_defaults.then(EngineConfig::default),
+            }
+        };
+        serialize_settings_response(&response)
+    });
+    finish_settings_read_worker(&state.prom, worker.await)
 }
 
 /// PUT /_settings — cluster settings are static in v1 (set at assembly); the

@@ -52,3 +52,9 @@
   [`API and operator ergonomics`](../roadmap.md#api-and-operator-ergonomics), ADR-025 (the follow-up
   that actually wired the three query-complexity limits into the parser — they were classified
   *dynamic* here before they were enforced anywhere).
+
+## Current outcome
+
+[ADR-159](adr-159-get-settings-api-contract.md) supersedes the GET transport details with strict
+body/query handling, cache and telemetry policy, bounded off-runtime serialization, and
+coordinator/default parity. The native response model and this ADR's PUT policy remain unchanged.

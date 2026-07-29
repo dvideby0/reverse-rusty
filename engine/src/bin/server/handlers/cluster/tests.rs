@@ -248,7 +248,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         )
         .route(
             "/_settings",
-            get(cluster_get_settings).put(cluster_put_settings),
+            get(cluster_get_settings)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::handlers::SETTINGS_READ_BODY_LIMIT,
+                ))
+                .merge(axum::routing::put(cluster_put_settings))
+                .fallback(crate::handlers::settings_method_not_allowed::<ClusterAppState>),
         )
         .route("/_cluster/state", get(cluster_state))
         .route("/_cluster/nodes", post(cluster_register_node))
@@ -327,5 +332,6 @@ mod jobs;
 mod metrics;
 mod pit;
 mod ranked;
+mod settings_read;
 mod v2;
 mod vocab;
