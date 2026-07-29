@@ -199,6 +199,14 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 .fallback(crate::handlers::alias_learn_apply_method_not_allowed::<ClusterAppState>),
         )
         .route(
+            "/_vocab/aliases/discover",
+            post(cluster_discover_aliases)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::handlers::ALIAS_DISCOVER_BODY_LIMIT,
+                ))
+                .fallback(crate::handlers::alias_discover_method_not_allowed::<ClusterAppState>),
+        )
+        .route(
             "/_settings",
             get(cluster_get_settings).put(cluster_put_settings),
         )
@@ -262,6 +270,7 @@ fn seed() -> Vec<(u64, String)> {
 }
 
 mod admin;
+mod alias_discover;
 mod alias_import;
 mod alias_learn_apply;
 mod backup;

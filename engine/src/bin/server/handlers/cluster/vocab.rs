@@ -21,9 +21,9 @@ use reverse_rusty::config::EngineConfig;
 use crate::handlers::alias::{
     acquire_alias_import_permit, acquire_alias_learn_apply_permit, acquire_alias_read_permit,
     alias_import_error_response, alias_import_success, alias_learn_apply_error_response,
-    alias_learn_apply_success, finish_alias_import_response, finish_alias_learn_apply_response,
-    finish_alias_read_worker, serialize_aliases, AliasImportTransport, AliasLearnApplyTransport,
-    AliasReadTransport,
+    alias_learn_apply_success, execute_alias_discovery, finish_alias_import_response,
+    finish_alias_learn_apply_response, finish_alias_read_worker, serialize_aliases,
+    AliasDiscoverTransport, AliasImportTransport, AliasLearnApplyTransport, AliasReadTransport,
 };
 use crate::handlers::vocab::{
     acquire_vocab_learn_apply_permit, acquire_vocab_read_permit, acquire_vocab_write_permit,
@@ -312,26 +312,17 @@ pub(crate) async fn cluster_put_settings() -> Response {
 /// request must carry `queries`. The computation is pure — no cluster lock, nothing recorded.
 #[instrument(skip_all)]
 pub(crate) async fn cluster_discover_aliases(
-    body: Option<Json<crate::handlers::alias::DiscoverAliasesRequest>>,
+    State(state): State<Arc<ClusterAppState>>,
+    transport: AliasDiscoverTransport,
 ) -> Response {
-    let req = body.map(|Json(r)| r).unwrap_or_default();
-    let Some(queries) = &req.queries else {
-        return crate::dto::ApiError::response(
-            axum::http::StatusCode::BAD_REQUEST,
-            "invalid_request",
+    execute_alias_discovery(&state.stats_permits, &state.prom, transport, || {
+        Err(
             "cluster-mode discovery is an explicit-corpus dry run: supply `queries` \
-             ([[id, dsl], ...]); engine-sourced discovery is single-node"
+                 ([[id, dsl], ...]); engine-sourced discovery is single-node"
                 .to_string(),
         )
-        .into_response();
-    };
-    let cfg = req.config();
-    let proposals = reverse_rusty::vocab::discover_pairs(queries, &cfg);
-    (
-        axum::http::StatusCode::OK,
-        Json(serde_json::json!({ "count": proposals.len(), "proposals": proposals })),
-    )
-        .into_response()
+    })
+    .await
 }
 
 /// POST /_vocab/aliases/discover_and_record — 501 in cluster mode (ADR-102): recording into a

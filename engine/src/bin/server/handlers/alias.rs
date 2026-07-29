@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use crate::dto::ApiError;
 use crate::state::AppState;
 
+mod discover;
+#[cfg(test)]
+mod discover_tests;
 mod feedback;
 mod import;
 #[cfg(test)]
@@ -30,6 +33,10 @@ mod learn_apply_tests;
 mod read;
 #[cfg(test)]
 mod read_tests;
+pub(crate) use discover::{
+    alias_discover_method_not_allowed, discover_aliases, execute_alias_discovery,
+    AliasDiscoverTransport, ALIAS_DISCOVER_BODY_LIMIT,
+};
 pub(crate) use feedback::{get_alias_feedback, reset_alias_feedback, validate_and_apply_feedback};
 pub(crate) use import::{
     acquire_alias_import_permit, alias_import_error_response, alias_import_method_not_allowed,
@@ -86,38 +93,6 @@ impl DiscoverAliasesRequest {
             ..d
         }
     }
-}
-
-#[derive(Serialize)]
-struct DiscoverAliasesResponse {
-    /// Proposed pairs, best-first (similarity desc) — review evidence, nothing recorded.
-    proposals: Vec<reverse_rusty::vocab::DiscoveredPair>,
-    count: usize,
-}
-
-/// POST /_vocab/aliases/discover — distributional alias discovery, compute-only (ADR-102).
-/// Analyzes the engine's own stored queries (or an explicit `queries` body) and returns
-/// candidate pairs with their similarity/co-occurrence evidence. Records NOTHING — pair with
-/// `/discover_and_record` to file the proposals as review candidates.
-pub(crate) async fn discover_aliases(
-    State(state): State<Arc<AppState>>,
-    body: Option<Json<DiscoverAliasesRequest>>,
-) -> Response {
-    let req = body.map(|Json(r)| r).unwrap_or_default();
-    let cfg = req.config();
-    let proposals = match &req.queries {
-        // An explicit corpus is a pure computation — no engine lock at all.
-        Some(qs) => reverse_rusty::vocab::discover_pairs(qs, &cfg),
-        None => state.engine.lock().discover_aliases(&cfg),
-    };
-    (
-        StatusCode::OK,
-        Json(DiscoverAliasesResponse {
-            count: proposals.len(),
-            proposals,
-        }),
-    )
-        .into_response()
 }
 
 #[derive(Serialize)]
@@ -186,7 +161,7 @@ pub(crate) async fn discover_and_record_aliases(
 #[cfg(test)]
 mod tests {
     use super::read::{serialize_aliases, AliasReadPage};
-    use super::{discover_aliases, discover_and_record_aliases, DiscoverAliasesRequest};
+    use super::{discover_and_record_aliases, DiscoverAliasesRequest};
     use crate::metrics::PrometheusMetrics;
     use crate::state::AppState;
     use axum::extract::State;
@@ -265,43 +240,6 @@ mod tests {
             id += 1;
         }
         queries
-    }
-
-    /// Compute-only discovery over an explicit corpus returns proposals and records nothing.
-    #[tokio::test]
-    async fn discover_returns_proposals_and_records_nothing() {
-        let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
-        eng.build_from_queries(&[(1u64, "vertex adapter".to_string())]);
-        let state = state_with(eng);
-
-        let resp = discover_aliases(
-            State(Arc::clone(&state)),
-            Some(Json(DiscoverAliasesRequest {
-                queries: Some(discovery_corpus()),
-                ..Default::default()
-            })),
-        )
-        .await;
-        let got = body_json(resp).await;
-        assert!(got["count"].as_u64().unwrap() >= 1, "got: {got}");
-        let planted_found = got["proposals"].as_array().unwrap().iter().any(|p| {
-            let forms: Vec<&str> = p["forms"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap())
-                .collect();
-            forms.contains(&"zzns") && forms.contains(&"zznorthstar")
-        });
-        assert!(
-            planted_found,
-            "the planted pair must be proposed; got: {got}"
-        );
-
-        // Nothing recorded: the registry is untouched.
-        let reg = aliases_json(&state);
-        assert_eq!(reg["summary"]["candidate"], 0);
-        assert_eq!(reg["summary"]["active"], 0);
     }
 
     /// discover_and_record files candidates (never active) from the ENGINE's own queries,
