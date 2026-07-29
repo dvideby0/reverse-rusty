@@ -124,6 +124,47 @@ async fn map_only_rebalance_reports_the_attested_version_and_changed_count() {
 }
 
 #[tokio::test]
+async fn static_remote_routing_is_rejected_before_planning() {
+    let config = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let cluster = ClusterEngine::build(
+        Normalizer::default_vocab().expect("vocab"),
+        &config,
+        &seed(),
+    )
+    .expect("cluster");
+    let state = state_from_cluster_with_rebalance_topology(
+        cluster,
+        crate::state::ClusterRebalanceTopology::StaticRemote,
+    );
+    let before = state.cluster.read().control_state().expect("state");
+
+    let (status, _, bytes) = send_raw(
+        &state,
+        rebalance_request("/_cluster/rebalance", Body::empty()),
+    )
+    .await;
+    assert_error(
+        status,
+        &bytes,
+        StatusCode::CONFLICT,
+        "rebalance_routing_not_authoritative",
+    );
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("--route-by-assignments"),
+        "{bytes:?}"
+    );
+    assert_eq!(
+        state.cluster.read().control_state().expect("state"),
+        before,
+        "static routing must fail before planning or control mutation"
+    );
+}
+
+#[tokio::test]
 async fn query_method_media_and_json_controls_are_strict() {
     let state = test_state(&seed());
 

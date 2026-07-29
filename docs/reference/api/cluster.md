@@ -146,8 +146,9 @@ For a populated data node, drain it before deletion:
 1. Upsert the same id and address through `POST /_cluster/nodes` with role `manager`. This changes
    placement eligibility while preserving the source endpoint needed by live handoff; it does
    **not** add the node to the Raft voter set.
-2. Run `POST /_cluster/reconcile` or bodyless `POST /_cluster/rebalance` (an explicit
-   `{"move":true}` is equivalent remotely). The rebalance route rejects remote map-only mode.
+2. On an assignment-routed remote coordinator, run `POST /_cluster/reconcile` or bodyless
+   `POST /_cluster/rebalance` (an explicit `{"move":true}` is equivalent). The rebalance route
+   rejects remote map-only mode and static endpoint-order routing.
 3. Verify through `GET /_cluster/state` that no assignment names the id. If it is a voter, remove
    it separately through the control-plane joint-consensus procedure.
 4. Delete the descriptor, then stop the process or remove its physical data.
@@ -215,16 +216,20 @@ The empty-body default is safe for the assembled topology:
 
 - An in-process cluster commits only the advisory shard→node map. Every physical shard is already
   co-resident, so no data copy is necessary.
-- A remote cluster peer-recovers each desired target, fences and drains the source, flips live
-  routing, then commits the new assignment. It moves data before changing durable routing
-  authority.
+- An assignment-routed remote cluster peer-recovers each desired target, fences and drains the
+  source, flips live routing, then commits the new assignment. It moves data before changing
+  durable routing authority.
+- A static endpoint-order remote coordinator returns
+  `409 rebalance_routing_not_authoritative` without planning or mutation. Restart it with
+  `--route-by-assignments` and `--control-endpoint`; otherwise the committed map cannot safely name
+  the live source for a handoff.
 
 Optional JSON body:
 
 | Field | Required | Contract |
 |---|---|---|
-| `move` | no | Omit for the topology-safe default. `true` explicitly selects remote data movement. `false` is accepted only in-process; remote mode returns `409 unsafe_rebalance_mode` before mutation. |
-| `max_parallel` | no | Positive integer conflict-free wave width for a remote data-moving pass; default 1. It is rejected when the selected operation is map-only. |
+| `move` | no | Omit for the topology-safe default. `true` explicitly selects assignment-routed remote data movement. `false` is accepted only in-process; assignment-routed remote mode returns `409 unsafe_rebalance_mode`, while static remote mode returns `409 rebalance_routing_not_authoritative`. |
+| `max_parallel` | no | Positive integer conflict-free wave width for an assignment-routed remote data-moving pass; default 1. It is rejected when the selected operation is map-only. |
 
 ```bash
 curl -X POST localhost:9200/_cluster/rebalance \
@@ -251,10 +256,11 @@ Complete in-process response:
 }
 ```
 
-Complete remote response uses `moved_data:true`; `reassigned` is the number of positions physically
-moved and `moved` lists their numeric positions. `version` is a final linearizable observation of
-the committed `ClusterState` application version after the complete or resumable workflow. It is
-not a Raft term/log index, checkpoint epoch, feature-model version, or placement generation.
+Complete assignment-routed remote response uses `moved_data:true`; `reassigned` is the number of
+positions physically moved and `moved` lists their numeric positions. `version` is a final
+linearizable observation of the committed `ClusterState` application version after the complete or
+resumable workflow. It is not a Raft term/log index, checkpoint epoch, feature-model version, or
+placement generation.
 
 A per-position remote failure remains a resumable HTTP 200:
 

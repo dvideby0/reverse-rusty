@@ -30,6 +30,16 @@ fn test_state(queries: &[(u64, String)]) -> Arc<ClusterAppState> {
 }
 
 fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
+    state_from_cluster_with_rebalance_topology(
+        cluster,
+        crate::state::ClusterRebalanceTopology::InProcess,
+    )
+}
+
+fn state_from_cluster_with_rebalance_topology(
+    cluster: ClusterEngine,
+    rebalance_topology: crate::state::ClusterRebalanceTopology,
+) -> Arc<ClusterAppState> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(2)
         .build()
@@ -46,6 +56,7 @@ fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
         rebalance_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_REBALANCES,
         )),
+        rebalance_topology,
         health_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
         )),

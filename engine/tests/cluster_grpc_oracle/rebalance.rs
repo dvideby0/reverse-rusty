@@ -43,10 +43,6 @@ fn grpc_rebalance_and_move_colocated_packing_converges_zero_fn() {
         rt.handle(),
     )
     .expect("connect packed cluster (all positions on node A)");
-    assert!(
-        cluster.requires_data_moving_rebalance(),
-        "a gRPC-assembled coordinator must select the safe data-moving REST default"
-    );
     cluster.ingest(&queries).expect("ingest corpus over gRPC");
     seed_map(&cluster, &nodes, &vec![0usize; k]); // committed: every position → node A (id 1)
 

@@ -137,6 +137,20 @@ impl AppState {
     }
 }
 
+/// Safety-relevant topology of the cluster-rebalance REST boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClusterRebalanceTopology {
+    /// All physical shard positions are co-resident; the assignment map is
+    /// advisory and may be updated without moving data.
+    InProcess,
+    /// gRPC shard backings follow static endpoint order rather than the
+    /// committed assignment map. Map-driven movement is unsafe here.
+    StaticRemote,
+    /// gRPC shard backings were resolved from the committed assignment map, so
+    /// that same map can safely select movement sources.
+    AssignmentRoutedRemote,
+}
+
 /// Coordinator-mode state (ADR-070): the cluster analogue of [`AppState`].
 pub(crate) struct ClusterAppState {
     /// Read lock for percolates AND ordinary writes (both `&self`); write lock only
@@ -163,6 +177,9 @@ pub(crate) struct ClusterAppState {
     /// held by the off-runtime worker through final control-state attestation,
     /// including after an HTTP disconnect.
     pub(crate) rebalance_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Whether rebalance may commit an advisory map, move from the committed
+    /// map, or must refuse because live routing has another authority.
+    pub(crate) rebalance_topology: ClusterRebalanceTopology,
     /// Coordinator analogue of [`AppState::health_permits`].
     pub(crate) health_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Coordinator analogue of [`AppState::stats_permits`], including bounded

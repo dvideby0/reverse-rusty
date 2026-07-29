@@ -38,10 +38,12 @@ transfer once it has fenced/drained a source.
   non-empty body, reject unknown/duplicate/null fields and non-object forms, cap transport at
   64 KiB, and give body delivery 250 ms.
 - Make topology choose the safe default. An in-process cluster uses the existing map-only HRW
-  commit because every physical shard is already local. A remote cluster uses
+  commit because every physical shard is already local. An assignment-routed remote cluster uses
   `rebalance_and_move_with` by default, recovering/fencing/draining/flipping each changed position
   before committing its assignment. `move:true` may request that remote behavior explicitly;
-  `move:false` on a remote cluster fails with `409 unsafe_rebalance_mode` before mutation.
+  `move:false` fails with `409 unsafe_rebalance_mode` before mutation. A static endpoint-order
+  remote cluster fails with `409 rebalance_routing_not_authoritative`: its live backing may not
+  match the source named by the committed map, so map-driven handoff is not safe.
 - Accept optional `max_parallel` only when the selected operation moves data. It must be a positive
   integer. The default is one; larger values retain ADR-095's conflict-free waves and move-ledger
   serialization for shared endpoints.
@@ -70,11 +72,11 @@ transfer once it has fenced/drained a source.
 
 ## Consequences
 
-A bodyless `POST /_cluster/rebalance` now means the operator intent its name implies in both
-topologies. In-process mode cheaply updates its advisory map. Remote mode moves data before routing
-authority changes; the API no longer offers the known unsafe map-only shortcut there. Existing
-remote callers that deliberately depended on the old default incur physical movement, which is the
-correctness-preserving behavior.
+A bodyless `POST /_cluster/rebalance` now means the operator intent its name implies wherever the
+coordinator has routing authority. In-process mode cheaply updates its advisory map.
+Assignment-routed remote mode moves data before routing authority changes; the API no longer
+offers the known unsafe map-only shortcut there. A static-routing remote coordinator is refused
+until it restarts with `--route-by-assignments` and `--control-endpoint`.
 
 This endpoint is synchronous with respect to the whole selected workflow, unlike ES/OpenSearch
 reroute. A remote pass may therefore outlive the manager-start timeout after it begins.
@@ -92,12 +94,14 @@ API does not claim success. Retrying recomputes the deterministic diff and conve
 The matching/routing safety proof is unchanged. Remote positions use ADR-090/094's proven
 move-then-commit path and ADR-095's conflict-aware waves; a failed move does not commit an empty
 owner, while prior completed moves remain data-bearing and resumable. The REST topology resolver
-prevents the only unsafe dispatch (`remote + map-only`) before the start gate opens.
+prevents both unsafe dispatches before the start gate opens: remote map-only mutation and
+map-driven handoff when static endpoint order—not the committed assignment map—owns live routing.
 
-Focused lean and distributed handler tests prove changed-placement/version success, topology-safe
-mode selection, strict method/query/media/object/field controls, positive parallelism, body size
-and absolute body deadlines, zero/positive/closed admission, topology-lock timeouts, deterministic
-dedicated-worker dispatch, off-runtime execution, post-start manager-timeout semantics, disconnect-retained
-admission and completion, fixed telemetry/no-store headers, and sanitized fail-loud control errors.
+Focused lean and distributed handler tests prove changed-placement/version success, all three
+topology modes (in-process, assignment-routed remote, and refused static remote), strict
+method/query/media/object/field controls, positive parallelism, body size and absolute body
+deadlines, zero/positive/closed admission, topology-lock timeouts, deterministic dedicated-worker
+dispatch, off-runtime execution, post-start manager-timeout semantics, disconnect-retained admission
+and completion, fixed telemetry/no-store headers, and sanitized fail-loud control errors.
 Existing allocator, handoff, replicated-group rebalance, reconcile, topology-resolution, Raft, and
 multi-machine suites continue to prove the underlying placement and movement mechanisms.

@@ -63,7 +63,7 @@ use crate::handlers::{
     VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
-use crate::state::{request_id_middleware, ClusterAppState};
+use crate::state::{request_id_middleware, ClusterAppState, ClusterRebalanceTopology};
 use crate::{auth, shutdown_signal};
 
 /// Remote-coordinator assembly (connect + control-plane attach + route-by-assignments), split out to
@@ -361,6 +361,15 @@ pub(crate) async fn run(
         rebalance_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_REBALANCES,
         )),
+        rebalance_topology: if in_process {
+            ClusterRebalanceTopology::InProcess
+        } else if route_by_assignments {
+            // `assemble_cluster` returned only after the control-plane
+            // seed/resolve/guard path selected these live backings.
+            ClusterRebalanceTopology::AssignmentRoutedRemote
+        } else {
+            ClusterRebalanceTopology::StaticRemote
+        },
         health_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
         )),

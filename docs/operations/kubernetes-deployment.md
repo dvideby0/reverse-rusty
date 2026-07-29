@@ -173,8 +173,9 @@ the StatefulSet ordinals on first boot, so for a fixed `shardCount` the placemen
 order while the durable document becomes the source of truth; *data-moving* live re-pointing is
 available through `POST /_cluster/reassign`, `POST /_cluster/reconcile`, and bodyless
 `POST /_cluster/rebalance` (ADR-090/092/166). The rebalance REST boundary rejects remote map-only
-mode. Set `controlPlane.enabled=false` for the stateless-coordinator topology (placement re-derived
-from the frozen dict + ring on every start).
+mode. It also rejects a static endpoint-order coordinator because the committed map would not be
+authoritative for its live sources. Set `controlPlane.enabled=false` for the stateless-coordinator
+topology (placement re-derived from the frozen dict + ring on every start).
 
 Keep `coordinator.replicas=1`. Stateless means a coordinator can be replaced without restoring a
 local data volume; it does **not** make coordinators active-active. The shard-node owner lease fences

@@ -81,7 +81,8 @@ spec:
             # Route by the committed shard->node assignments (ADR-086): the quorum is the topology
             # source of truth (position-preserving seed + fail-loud guard). Data-moving live
             # re-pointing uses /_cluster/reassign, /_cluster/reconcile, or bodyless
-            # /_cluster/rebalance; the rebalance REST boundary rejects remote map-only mode.
+            # /_cluster/rebalance; rebalance requires this assignment-routed topology and rejects
+            # remote map-only mode.
             - --route-by-assignments
             {{- end }}
             {{- end }}

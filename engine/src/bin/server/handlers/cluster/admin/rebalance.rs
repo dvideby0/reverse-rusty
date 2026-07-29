@@ -24,7 +24,7 @@ use reverse_rusty::cluster::{ShardError, StateVersion};
 
 use crate::dto::ApiError;
 use crate::metrics::PrometheusMetrics;
-use crate::state::ClusterAppState;
+use crate::state::{ClusterAppState, ClusterRebalanceTopology};
 
 use super::super::shard_error_status;
 
@@ -48,23 +48,30 @@ enum RebalanceMode {
 
 #[derive(Clone, Copy, Debug)]
 enum RebalanceRequestError {
+    AssignmentRoutingRequired,
     UnsafeRemoteMapOnly,
     DataMovementRequiresRemote,
     ParallelismRequiresMovement,
 }
 
 fn resolve_rebalance_mode(
-    remote: bool,
+    topology: ClusterRebalanceTopology,
     requested_move: Option<bool>,
     max_parallel: Option<NonZeroUsize>,
 ) -> Result<RebalanceMode, RebalanceRequestError> {
-    if remote {
-        return match requested_move {
-            Some(false) => Err(RebalanceRequestError::UnsafeRemoteMapOnly),
-            None | Some(true) => Ok(RebalanceMode::DataMoving {
-                max_parallel: max_parallel.map_or(1, NonZeroUsize::get),
-            }),
-        };
+    match topology {
+        ClusterRebalanceTopology::StaticRemote => {
+            return Err(RebalanceRequestError::AssignmentRoutingRequired);
+        }
+        ClusterRebalanceTopology::AssignmentRoutedRemote => {
+            return match requested_move {
+                Some(false) => Err(RebalanceRequestError::UnsafeRemoteMapOnly),
+                None | Some(true) => Ok(RebalanceMode::DataMoving {
+                    max_parallel: max_parallel.map_or(1, NonZeroUsize::get),
+                }),
+            };
+        }
+        ClusterRebalanceTopology::InProcess => {}
     }
     if requested_move == Some(true) {
         return Err(RebalanceRequestError::DataMovementRequiresRemote);
@@ -254,7 +261,7 @@ pub(crate) async fn cluster_rebalance(
         }
         let _ = started_sender.send(());
         let mode = match resolve_rebalance_mode(
-            cluster.requires_data_moving_rebalance(),
+            worker_state.rebalance_topology,
             body.do_move,
             body.max_parallel,
         ) {
@@ -449,6 +456,14 @@ fn cluster_rebalance_request_error(
     source: RebalanceRequestError,
 ) -> Response {
     match source {
+        RebalanceRequestError::AssignmentRoutingRequired => cluster_rebalance_rejection(
+            prom,
+            StatusCode::CONFLICT,
+            "rebalance_routing_not_authoritative",
+            "a static remote coordinator cannot rebalance safely because its live shard backings \
+             do not follow the committed assignment map; restart with --route-by-assignments and \
+             --control-endpoint before retrying",
+        ),
         RebalanceRequestError::UnsafeRemoteMapOnly => cluster_rebalance_rejection(
             prom,
             StatusCode::CONFLICT,
@@ -537,35 +552,60 @@ mod tests {
     #[test]
     fn execution_mode_is_safe_for_each_topology() {
         assert_eq!(
-            resolve_rebalance_mode(false, None, None).expect("in-process default"),
+            resolve_rebalance_mode(ClusterRebalanceTopology::InProcess, None, None)
+                .expect("in-process default"),
             RebalanceMode::MapOnly
         );
         assert_eq!(
-            resolve_rebalance_mode(false, Some(false), None).expect("explicit in-process map"),
+            resolve_rebalance_mode(ClusterRebalanceTopology::InProcess, Some(false), None)
+                .expect("explicit in-process map"),
             RebalanceMode::MapOnly
         );
         assert!(matches!(
-            resolve_rebalance_mode(false, Some(true), None),
+            resolve_rebalance_mode(ClusterRebalanceTopology::InProcess, Some(true), None),
             Err(RebalanceRequestError::DataMovementRequiresRemote)
         ));
         assert!(matches!(
-            resolve_rebalance_mode(false, None, NonZeroUsize::new(2)),
+            resolve_rebalance_mode(
+                ClusterRebalanceTopology::InProcess,
+                None,
+                NonZeroUsize::new(2)
+            ),
             Err(RebalanceRequestError::ParallelismRequiresMovement)
         ));
 
         assert_eq!(
-            resolve_rebalance_mode(true, None, None).expect("remote safe default"),
+            resolve_rebalance_mode(ClusterRebalanceTopology::AssignmentRoutedRemote, None, None)
+                .expect("assignment-routed remote safe default"),
             RebalanceMode::DataMoving { max_parallel: 1 }
         );
         assert_eq!(
-            resolve_rebalance_mode(true, Some(true), NonZeroUsize::new(4))
-                .expect("remote parallel move"),
+            resolve_rebalance_mode(
+                ClusterRebalanceTopology::AssignmentRoutedRemote,
+                Some(true),
+                NonZeroUsize::new(4)
+            )
+            .expect("remote parallel move"),
             RebalanceMode::DataMoving { max_parallel: 4 }
         );
         assert!(matches!(
-            resolve_rebalance_mode(true, Some(false), None),
+            resolve_rebalance_mode(
+                ClusterRebalanceTopology::AssignmentRoutedRemote,
+                Some(false),
+                None
+            ),
             Err(RebalanceRequestError::UnsafeRemoteMapOnly)
         ));
+        for requested_move in [None, Some(false), Some(true)] {
+            assert!(matches!(
+                resolve_rebalance_mode(
+                    ClusterRebalanceTopology::StaticRemote,
+                    requested_move,
+                    NonZeroUsize::new(2)
+                ),
+                Err(RebalanceRequestError::AssignmentRoutingRequired)
+            ));
+        }
     }
 
     #[test]

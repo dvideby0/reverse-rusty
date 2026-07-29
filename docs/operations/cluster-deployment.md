@@ -211,8 +211,10 @@ This peer-recovers the target, fences + drains the source, flips routing, then c
 (**move-then-commit**) — so a coordinator restarted **resolve-only** (`--route-by-assignments` +
 `--control-endpoint`, dropping the now-stale `--shard-endpoint`) routes to the new owner. To move
 every reassigned position at once, call bodyless `POST /_cluster/rebalance` (or explicitly send
-`{"move":true}`); remote mode now chooses the data-moving workflow by default and rejects
-`move:false`. Fail-closed: a failed move commits nothing and auto-unfences the source; a
+`{"move":true}`); this assignment-routed remote deployment chooses the data-moving workflow by
+default and rejects `move:false`. A static endpoint-order coordinator rejects rebalance entirely
+because its committed map cannot safely identify the live source. Fail-closed: a failed move
+commits nothing and auto-unfences the source; a
 `committed:false` reply means the data moved but the durable-map commit failed — re-run to
 reconcile (still zero-FN).
 
@@ -349,7 +351,7 @@ control-plane↔coordinator wiring with multi-endpoint failover + committed-assi
 (ADR-082/083/086 — on by default in `compose.cluster.yml`; failover semantics in [§6](#6-recovery),
 the resolve-only restart + move-then-commit in [§5](#5-scaling), the bootstrap `--advertise-url`
 rule in [§3](#3-bootstrap--startup-ordering)); **data-moving reassignment** (ADR-090):
-`POST /_cluster/reassign {position, node}` (or bodyless remote `rebalance`) moves the data via
-live handoff THEN commits the new owner; the REST rebalance boundary now rejects remote map-only
-mode. Also shipped: the **Kubernetes / Helm chart**
+`POST /_cluster/reassign {position, node}` (or bodyless assignment-routed remote `rebalance`) moves
+the data via live handoff THEN commits the new owner; the REST rebalance boundary rejects both
+remote map-only mode and static remote routing. Also shipped: the **Kubernetes / Helm chart**
 (ADR-084, [`kubernetes-deployment.md`](kubernetes-deployment.md)).

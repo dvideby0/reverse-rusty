@@ -16,24 +16,6 @@ use crate::events::EngineEvent;
 use super::{shard_dir, ClusterEngine, ClusterObserver};
 
 impl ClusterEngine {
-    /// Whether this coordinator routes shard positions to remote gRPC nodes and
-    /// therefore must move physical data before committing a changed placement.
-    ///
-    /// In-process clusters keep every shard in this process, so their control
-    /// assignment map is advisory and a map-only rebalance is safe. A remote
-    /// cluster has live handoff handles and must use `rebalance_and_move` instead.
-    #[must_use]
-    pub fn requires_data_moving_rebalance(&self) -> bool {
-        #[cfg(feature = "distributed")]
-        {
-            self.handle.is_some()
-        }
-        #[cfg(not(feature = "distributed"))]
-        {
-            false
-        }
-    }
-
     /// Replace the control-plane backend (ADR-083), returning `self` for assembly-time chaining.
     /// The default backend is the dependency-free [`InMemoryControlPlane`](crate::cluster::control::InMemoryControlPlane);
     /// the coordinator-mode server swaps in a [`RemoteControlPlane`](crate::cluster::RemoteControlPlane)

@@ -31,7 +31,7 @@
 # node binds 0.0.0.0 but advertises a ROUTABLE self-URL into Raft membership via --advertise-url
 # (ADR-082). NOTE: to re-point routing on a populated cluster use the data-moving path
 # (`POST /_cluster/reassign` or bodyless `POST /_cluster/rebalance`, ADR-090/166); remote rebalance
-# rejects explicit map-only mode. To run WITHOUT
+# requires this assignment-routed topology and rejects explicit map-only mode. To run WITHOUT
 # the quorum, drop the coordinator's --control-endpoint/--route-by-assignments lines AND control0..2
 # (the in-memory backend is used, routing byte-identical).
 
