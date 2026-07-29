@@ -133,12 +133,12 @@ come from three sources:
 
 1. **Learned from queries** — the engine scans any-of groups in your query corpus to discover synonym
    relationships. If many queries contain `(package,pkg)`, the engine can learn the relationship
-   (ADR-015). Use [`POST /_vocab/learn`](api/vocab.md#post-_vocablearn--learn-vocabulary-from-queries)
+   (ADR-015). Use [`POST /_vocab/learn`](api/vocab/learn-vocab.md)
    to preview learned vocabulary.
 
 2. **Manual configuration** — add phrases, synonyms, equivalences, aliases, punctuation, and numeric
    context through `Vocab` or
-   [`PUT /_vocab`](api/vocab.md#put-_vocab--replace-vocabulary).
+   [`PUT /_vocab`](api/vocab/replace-vocab.md).
 
 3. **File-based** — load a vocabulary JSON file at startup with `--vocab-file`, or save/load at
    runtime. Vocabularies are composable via `merge()`.
