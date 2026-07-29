@@ -15,6 +15,7 @@ Replication, peer recovery, translogs, cluster state, consensus, and control-pla
 | [041](../adr-041-durable-raft-log-recovery.md) | Durable Raft restart recovery | Persists Raft log, vote, committed state, and snapshots so control nodes can restart into quorum. | Accepted |
 | [162](../adr-162-cluster-state-api-contract.md) | Cluster-state REST API contract | Makes authoritative topology reads strict, bounded, off-runtime, and explicit about their exact ES/OpenSearch subset. | Accepted |
 | [164](../adr-164-node-registration-api-contract.md) | Node-registration REST API contract | Makes native membership upserts strict, versioned, bounded, off-runtime, and explicit about voter and placement separation. | Accepted |
+| [165](../adr-165-node-deregistration-api-contract.md) | Node-deregistration REST API contract | Makes native descriptor removal strict, guarded, versioned, bounded, and explicit about safe drain-before-delete staging. | Accepted |
 
 ---
 

@@ -7,7 +7,8 @@
 //! writes (cluster reads are `&self` lock-free; writes are `&self`, internally
 //! ordered by the cluster log, and serialized across requests by `write_serial` —
 //! the `Mutex<Engine>` analogue), while the WRITE side is taken only by the
-//! vocabulary paths (`set_vocab` & co., the `&mut self` blue/green rebuilds).
+//! `&mut self` blue/green vocabulary/resize paths. Descriptor mutations and
+//! topology movement coordinate separately through `topology_guard`.
 //! [`RequestCtx`] is the seam that lets one auth / request-id middleware serve both
 //! backends. [`request_id_middleware`] stamps an `x-request-id` header and tracks
 //! the in-flight-request gauge via the RAII [`InFlightGuard`].
@@ -137,6 +138,11 @@ pub(crate) struct ClusterAppState {
     /// for the `&mut self` vocabulary rebuilds — so reads are never blocked by
     /// writes, only (briefly) by a vocab change.
     pub(crate) cluster: RwLock<ClusterEngine>,
+    /// Excludes descriptor mutation from in-flight topology movement. Movement
+    /// operations take a shared guard (so their own conflict-aware concurrency
+    /// remains available); registration, deregistration, and resize take the
+    /// exclusive side. Separate from `write_serial`, so ingestion keeps flowing.
+    pub(crate) topology_guard: RwLock<()>,
     /// Serializes mutating requests (the `Mutex<Engine>` analogue), so concurrent
     /// bulk batches don't interleave their per-item apply order. Reads never take it.
     pub(crate) write_serial: Mutex<()>,

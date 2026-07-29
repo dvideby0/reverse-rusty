@@ -27,7 +27,8 @@ async fn stats_health_shards_and_cluster_ops() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.as_array().expect("rows").len(), 3);
 
-    // Register a node, rebalance, deregister — the control-plane round trip.
+    // Register and deregister an as-yet-unassigned node, then rebalance — the
+    // safe in-process control-plane round trip.
     let (status, _) = send(
         &state,
         req(
@@ -38,10 +39,10 @@ async fn stats_health_shards_and_cluster_ops() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, body) = send(&state, req_empty("POST", "/_cluster/rebalance")).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
     let (status, _) = send(&state, req_empty("DELETE", "/_cluster/nodes/7")).await;
     assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(&state, req_empty("POST", "/_cluster/rebalance")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 
     let (status, body) = send(&state, req_empty("POST", "/_cluster/resync")).await;
     assert_eq!(status, StatusCode::OK);

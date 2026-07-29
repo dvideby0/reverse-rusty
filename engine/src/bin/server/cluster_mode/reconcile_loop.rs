@@ -80,6 +80,7 @@ pub(crate) fn spawn_reconcile_loop(
             let handle = tokio::runtime::Handle::current();
             let st = Arc::clone(&state);
             let result = tokio::task::spawn_blocking(move || {
+                let _topology = st.topology_guard.read();
                 let cluster = st.cluster.read();
                 cluster.reconcile_with(rf, max_parallel_moves, &handle)
             })

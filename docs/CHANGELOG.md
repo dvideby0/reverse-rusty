@@ -99,6 +99,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   validation, exact committed versions, bounded off-runtime consensus writes, outcome-aware
   timeouts, sanitized failures, and explicit separation from voter membership, placement, and data
   movement ([ADR-164](decisions/adr-164-node-registration-api-contract.md)).
+- Hardened native coordinator `DELETE /_cluster/nodes/{id}` with strict bodyless identity, exact
+  committed versions, reserved bootstrap and in-use voter/assignment protection, bounded
+  off-runtime consensus writes, outcome-aware timeouts, sanitized failures, and explicit
+  separation from voter membership, placement, data movement, and safe node shutdown
+  ([ADR-165](decisions/adr-165-node-deregistration-api-contract.md)).
 - Hardened native `GET /_stats` with a strict no-store transport, truthful physical/live/tombstone
   and resident-memory/WAL projections, familiar timing and shard metadata, single-slot blocking
   collection, fail-loud cluster aggregation, and one shard-count fan-out instead of two

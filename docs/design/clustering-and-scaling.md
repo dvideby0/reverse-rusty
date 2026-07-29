@@ -267,11 +267,19 @@ requires an HTTP(S) mesh origin, and reports the exact committed application ver
 must name the same recovered logical node unless data was moved safely first. The full operator
 contract is in the [cluster-membership API reference](../reference/api/cluster.md).
 
+Deregistration is the symmetric descriptor-only transition. It reserves the same bootstrap
+identity, returns the proposal's exact application version, and fails closed while the id remains
+a voter or appears in any assignment. Drain a data node first by changing its descriptor role to
+manager—preserving the endpoint while excluding it from desired data placement—and running a
+data-moving reconcile/rebalance. The successful removal deliberately leaves voter membership,
+assignments, live routing, and physical data unchanged; manager voters must leave separately
+through joint consensus.
+
 The allocator ranks registered nodes for each logical position with rendezvous (HRW) hashing.
-`register_node`, `deregister_node`, and `rebalance` compute/commit desired assignments. A committed
-map is routing authority only after deployment topology is resolved and, for a populated remote
-cluster, the corresponding data movement has completed. Boot and reconcile guards fail closed
-instead of routing a position to an empty slot.
+`register_node` and `deregister_node` mutate its membership inputs; `rebalance` computes and commits
+desired assignments. A committed map is routing authority only after deployment topology is
+resolved and, for a populated remote cluster, the corresponding data movement has completed. Boot
+and reconcile guards fail closed instead of routing a position to an empty slot.
 
 Consensus holds topology only. It never stores query DSL, tags, source, translog records, or compiled
 segments.
