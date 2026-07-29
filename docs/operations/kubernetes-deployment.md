@@ -169,13 +169,31 @@ With `controlPlane.enabled` + `controlPlane.wireToCoordinator` (both default tru
 attaches to the durable quorum via `--control-endpoint` (ADR-083), so the cluster-state document is
 durable + HA (all members listed for failover, ADR-086). With `coordinator.routeByAssignments` (default
 true) it **routes by the committed shard→node assignments** (ADR-086) — seeded position-preservingly from
-the StatefulSet ordinals on first boot, so for a fixed `shardCount` the placement equals the ordinal
-order while the durable document becomes the source of truth; *data-moving* live re-pointing is
-available through `POST /_cluster/reassign`, `POST /_cluster/reconcile`, and bodyless
-`POST /_cluster/rebalance` (ADR-090/092/166). The rebalance REST boundary rejects remote map-only
-mode. It also rejects a static endpoint-order coordinator because the committed map would not be
-authoritative for its live sources. Set `controlPlane.enabled=false` for the stateless-coordinator
-topology (placement re-derived from the frozen dict + ring on every start).
+the StatefulSet ordinals on first boot.
+
+That first-boot posture intentionally retains the CLI endpoint-list restart guard. Before any
+operation changes assignments, switch the release to resolve-only and wait for the coordinator
+rollout:
+
+```sh
+helm upgrade rr deploy/helm/reverse-rusty --reuse-values \
+  --set coordinator.resolveOnly=true
+kubectl rollout status deployment/rr-reverse-rusty-coordinator
+```
+
+The chart then omits `--shard-endpoint`, passes `--shards` from `shardCount`, and resolves only from
+the committed quorum. Leave `resolveOnly=true` after the map changes. Before that transition,
+bodyless `POST /_cluster/rebalance` returns `409 rebalance_resolve_only_required`; afterward it
+drives the data-moving workflow and rejects remote `move:false` (ADR-090/166). Static endpoint-order
+routing remains rejected because the committed map cannot identify authoritative live sources.
+
+`coordinator.terminationGracePeriodSeconds` defaults to 3630: the 30-second HTTP drain plus a
+one-hour rebalance allowance. Size it above the largest measured `O(corpus)` handoff. Kubernetes
+SIGKILLs the pod when this total budget expires, so a smaller value defeats safe rebalance
+quiescence.
+
+Set `controlPlane.enabled=false` for the stateless-coordinator topology (placement re-derived from
+the frozen dict + ring on every start).
 
 Keep `coordinator.replicas=1`. Stateless means a coordinator can be replaced without restoring a
 local data volume; it does **not** make coordinators active-active. The shard-node owner lease fences

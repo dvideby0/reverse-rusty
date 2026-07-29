@@ -62,6 +62,7 @@ impl RebalanceMode {
 #[derive(Clone, Copy, Debug)]
 enum RebalanceRequestError {
     AssignmentRoutingRequired,
+    ResolveOnlyRoutingRequired,
     #[cfg(feature = "distributed")]
     UnsafeRemoteMapOnly,
     DataMovementRequiresRemote,
@@ -77,7 +78,10 @@ fn resolve_rebalance_mode(
         ClusterRebalanceTopology::StaticRemote => {
             return Err(RebalanceRequestError::AssignmentRoutingRequired);
         }
-        ClusterRebalanceTopology::AssignmentRoutedRemote => {
+        ClusterRebalanceTopology::CliSeededAssignmentRemote => {
+            return Err(RebalanceRequestError::ResolveOnlyRoutingRequired);
+        }
+        ClusterRebalanceTopology::ResolveOnlyRemote => {
             #[cfg(not(feature = "distributed"))]
             {
                 let _ = (requested_move, max_parallel);
@@ -183,8 +187,9 @@ struct ClusterRebalanceResponse {
 }
 
 /// Recompute the desired HRW shard placement. In-process clusters commit the
-/// advisory map. Remote clusters default to the data-moving move-then-commit
-/// workflow; an explicit remote `move:false` is rejected before mutation.
+/// advisory map. Resolve-only remote clusters use the data-moving
+/// move-then-commit workflow; restart-unsafe or non-authoritative remote
+/// topologies are rejected before admission.
 #[instrument(skip_all)]
 pub(crate) async fn cluster_rebalance(
     State(state): State<Arc<ClusterAppState>>,
@@ -452,6 +457,15 @@ fn cluster_rebalance_request_error(
              do not follow the committed assignment map; restart with --route-by-assignments and \
              --control-endpoint before retrying",
         ),
+        RebalanceRequestError::ResolveOnlyRoutingRequired => cluster_rebalance_rejection(
+            prom,
+            StatusCode::CONFLICT,
+            "rebalance_resolve_only_required",
+            "this assignment-routed coordinator was started with --shard-endpoint, so a changed \
+             map would make its next guarded restart fail; restart resolve-only with \
+             --route-by-assignments, --control-endpoint, the committed --shards count, and no \
+             --shard-endpoint before retrying",
+        ),
         #[cfg(feature = "distributed")]
         RebalanceRequestError::UnsafeRemoteMapOnly => cluster_rebalance_rejection(
             prom,
@@ -566,17 +580,13 @@ mod tests {
         #[cfg(feature = "distributed")]
         {
             assert_eq!(
-                resolve_rebalance_mode(
-                    ClusterRebalanceTopology::AssignmentRoutedRemote,
-                    None,
-                    None
-                )
-                .expect("assignment-routed remote safe default"),
+                resolve_rebalance_mode(ClusterRebalanceTopology::ResolveOnlyRemote, None, None)
+                    .expect("assignment-routed remote safe default"),
                 RebalanceMode::DataMoving { max_parallel: 1 }
             );
             assert_eq!(
                 resolve_rebalance_mode(
-                    ClusterRebalanceTopology::AssignmentRoutedRemote,
+                    ClusterRebalanceTopology::ResolveOnlyRemote,
                     Some(true),
                     NonZeroUsize::new(4)
                 )
@@ -585,7 +595,7 @@ mod tests {
             );
             assert!(matches!(
                 resolve_rebalance_mode(
-                    ClusterRebalanceTopology::AssignmentRoutedRemote,
+                    ClusterRebalanceTopology::ResolveOnlyRemote,
                     Some(false),
                     None
                 ),
@@ -594,8 +604,16 @@ mod tests {
         }
         #[cfg(not(feature = "distributed"))]
         assert!(matches!(
-            resolve_rebalance_mode(ClusterRebalanceTopology::AssignmentRoutedRemote, None, None),
+            resolve_rebalance_mode(ClusterRebalanceTopology::ResolveOnlyRemote, None, None),
             Err(RebalanceRequestError::DataMovementRequiresRemote)
+        ));
+        assert!(matches!(
+            resolve_rebalance_mode(
+                ClusterRebalanceTopology::CliSeededAssignmentRemote,
+                None,
+                None
+            ),
+            Err(RebalanceRequestError::ResolveOnlyRoutingRequired)
         ));
         for requested_move in [None, Some(false), Some(true)] {
             assert!(matches!(

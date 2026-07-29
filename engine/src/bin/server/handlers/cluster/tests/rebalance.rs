@@ -200,6 +200,40 @@ async fn invalid_modes_are_rejected_before_rebalance_admission() {
         "rebalance_routing_not_authoritative",
     );
 
+    let config = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let cluster = ClusterEngine::build(
+        Normalizer::default_vocab().expect("vocab"),
+        &config,
+        &seed(),
+    )
+    .expect("cluster");
+    let cli_seeded = state_from_cluster_with_rebalance_topology(
+        cluster,
+        crate::state::ClusterRebalanceTopology::CliSeededAssignmentRemote,
+    );
+    let _cli_seeded_admission = Arc::clone(&cli_seeded.rebalance_permits)
+        .acquire_owned()
+        .await
+        .expect("hold CLI-seeded admission");
+    let (status, _, bytes) = send_raw(
+        &cli_seeded,
+        rebalance_request(
+            "/_cluster/rebalance?cluster_manager_timeout=0",
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_error(
+        status,
+        &bytes,
+        StatusCode::CONFLICT,
+        "rebalance_resolve_only_required",
+    );
+
     let in_process = test_state(&seed());
     let _in_process_admission = Arc::clone(&in_process.rebalance_permits)
         .acquire_owned()

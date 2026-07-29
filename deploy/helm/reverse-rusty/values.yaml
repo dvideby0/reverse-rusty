@@ -82,10 +82,18 @@ coordinator:
   # Route by the committed shard->node assignments instead of the static --shard-endpoint
   # order (ADR-086): the coordinator seeds the quorum position-preservingly, then the durable
   # document is the topology source of truth. Only takes effect with controlPlane.wireToCoordinator.
-  # To re-point routing on a populated cluster, use the data-moving path (POST /_cluster/reassign
-  # or bodyless POST /_cluster/rebalance, ADR-090/166); rebalance requires this assignment-routed
-  # topology and rejects remote map-only mode.
+  # This alone remains CLI-seeded and restart-guarded. Set resolveOnly=true before
+  # a data-moving assignment change; rebalance rejects the seeded posture.
   routeByAssignments: true
+  # First install MUST stay false so the explicit StatefulSet endpoints seed the
+  # genesis control map. Before /_cluster/reassign or /_cluster/rebalance changes
+  # assignments, helm-upgrade this to true: the coordinator then omits the stale
+  # endpoint list, passes --shards, and resolves only from the committed map.
+  resolveOnly: false
+  # Must exceed the server's 30-second HTTP drain plus the worst-case O(corpus)
+  # rebalance handoff. Kubernetes SIGKILLs the pod when this total budget expires.
+  # Default: 30s drain + 1h move allowance; tune upward for the largest corpus.
+  terminationGracePeriodSeconds: 3630
   service:
     type: ClusterIP
     annotations: {}

@@ -38,12 +38,14 @@ transfer once it has fenced/drained a source.
   non-empty body, reject unknown/duplicate/null fields and non-object forms, cap transport at
   64 KiB, and give body delivery 250 ms.
 - Make topology choose the safe default. An in-process cluster uses the existing map-only HRW
-  commit because every physical shard is already local. An assignment-routed remote cluster uses
+  commit because every physical shard is already local. A resolve-only remote cluster uses
   `rebalance_and_move_with` by default, recovering/fencing/draining/flipping each changed position
   before committing its assignment. `move:true` may request that remote behavior explicitly;
-  `move:false` fails with `409 unsafe_rebalance_mode` before mutation. A static endpoint-order
-  remote cluster fails with `409 rebalance_routing_not_authoritative`: its live backing may not
-  match the source named by the committed map, so map-driven handoff is not safe.
+  `move:false` fails with `409 unsafe_rebalance_mode` before mutation. A CLI-seeded
+  assignment-routed cluster fails with `409 rebalance_resolve_only_required`: after a changed map,
+  its endpoint-list guard would reject the next restart. A static endpoint-order remote cluster
+  fails with `409 rebalance_routing_not_authoritative`: its live backing may not match the source
+  named by the committed map, so map-driven handoff is not safe.
 - Accept optional `max_parallel` only when the selected operation moves data. It must be a positive
   integer. The default is one; larger values retain ADR-095's conflict-free waves and move-ledger
   serialization for shared endpoints.
@@ -69,17 +71,20 @@ transfer once it has fenced/drained a source.
   remains exclusive with the workflow; ADR-095's internal disjoint move concurrency is unchanged.
 - After HTTP drain begins, acquire and retain the same single rebalance admission slot before
   durability cleanup and process exit. This joins the safety-sensitive work of any detached worker,
-  so graceful shutdown cannot terminate a handoff after fencing or a live-routing flip.
+  so process-level graceful shutdown cannot terminate a handoff after fencing or a live-routing
+  flip. Shipped Compose and Helm controls give the coordinator a configurable termination budget;
+  its value must cover the HTTP drain plus the deployment's worst-case `O(corpus)` handoff.
 - Return structured `Cache-Control: no-store` responses and fixed
   `cluster_rebalance` request/duration telemetry for every route-reached outcome.
 
 ## Consequences
 
 A bodyless `POST /_cluster/rebalance` now means the operator intent its name implies wherever the
-coordinator has routing authority. In-process mode cheaply updates its advisory map.
-Assignment-routed remote mode moves data before routing authority changes; the API no longer
-offers the known unsafe map-only shortcut there. A static-routing remote coordinator is refused
-until it restarts with `--route-by-assignments` and `--control-endpoint`.
+coordinator has durable routing and restart authority. In-process mode cheaply updates its advisory
+map. Resolve-only remote mode moves data before routing authority changes; the API no longer offers
+the known unsafe map-only shortcut there. A CLI-seeded coordinator is refused until the deployment
+switches to resolve-only, and a static-routing coordinator is refused until it restarts with
+`--route-by-assignments` and `--control-endpoint`.
 
 This endpoint is synchronous with respect to the whole selected workflow, unlike ES/OpenSearch
 reroute. A remote pass may therefore outlive the manager-start timeout after it begins.
@@ -88,7 +93,8 @@ worker finishes while retaining the single admission slot, and the idempotent en
 inspected/retried afterward. Disconnecting before start cancels the queued gate, so a delayed
 dedicated worker cannot mutate unless it atomically started before cancellation.
 Coordinator shutdown stops serving and then waits for that admission slot before flushing or
-exiting, so the independently supervised worker also survives the HTTP drain boundary.
+exiting, so the independently supervised worker also survives the HTTP drain boundary when the
+container termination grace is sized as documented.
 
 Map-only rebalance still commits changed assignments as the established sequence of control
 proposals. That sequence is safe only in-process; if a proposal or the final state read fails, the
@@ -103,7 +109,7 @@ prevents both unsafe dispatches before the start gate opens: remote map-only mut
 map-driven handoff when static endpoint order—not the committed assignment map—owns live routing.
 
 Focused lean and distributed handler tests prove changed-placement/version success, all three
-topology modes (in-process, assignment-routed remote, and refused static remote), strict
+topology modes (in-process, resolve-only remote, and refused CLI-seeded/static remote), strict
 method/query/media/object/field controls, positive parallelism, body size and absolute body
 deadlines, zero/positive/closed admission, topology-lock timeouts, deterministic dedicated-worker
 dispatch, off-runtime execution, post-start manager-timeout semantics, disconnect-retained admission

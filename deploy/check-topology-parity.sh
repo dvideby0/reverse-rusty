@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Topology-parity tripwire (Tier 5 M2, ADR-098): the production Compose file
 # (deploy/compose.cluster.yml) and the rendered Helm chart (default values) must describe
-# the SAME topology — shard/control counts, the coordinator's routing flags, and the mesh
-# ports. This is a grep-level drift check, not a semantic differ: it catches the "someone
-# scaled one side and not the other" class of drift the deployability review flagged.
+# the SAME topology — shard/control counts, the coordinator's routing flags, the bootstrap
+# → resolve-only transition, shutdown budget, and the mesh ports. This is a grep-level drift
+# check, not a semantic differ: it catches the "someone scaled one side and not the other"
+# class of drift the deployability review flagged.
 #
 # Runs per-PR in the `helm chart` CI job and again in the release gate.
 # Requires: docker (compose v2), helm.
@@ -18,6 +19,12 @@ compose=$(RR_CLUSTER_TOKEN=parity RR_AUTH_TOKEN=parity RR_CERT_DIR=./deploy/cert
   docker compose --project-directory . -f deploy/compose.cluster.yml config 2>/dev/null) ||
   fail "compose config failed"
 chart=$(helm template rr deploy/helm/reverse-rusty 2>/dev/null) || fail "helm template failed"
+compose_resolve=$(RR_CLUSTER_TOKEN=parity RR_AUTH_TOKEN=parity RR_CERT_DIR=./deploy/certs \
+  RR_PORT=127.0.0.1:9200 RR_COORDINATOR_TOPOLOGY_ARGS='--shards 3' \
+  docker compose --project-directory . -f deploy/compose.cluster.yml config 2>/dev/null) ||
+  fail "resolve-only compose config failed"
+chart_resolve=$(helm template rr deploy/helm/reverse-rusty \
+  --set coordinator.resolveOnly=true 2>/dev/null) || fail "resolve-only helm template failed"
 
 expect_eq() { # label lhs rhs
   [[ "$2" == "$3" ]] || fail "$1 diverged: compose=$2 vs helm=$3"
@@ -56,7 +63,24 @@ expect_eq "control endpoints" "$c_ctrl_eps" "$h_ctrl_eps"
 # 3. The coordinator's routing posture (ADR-083/086) is on in BOTH shipped topologies.
 expect_both "route-by-assignments" "--route-by-assignments"
 
-# 4. The mesh ports agree (shard gRPC / control gRPC / coordinator REST).
+# 4. Both shipped topologies expose the restart-safe resolve-only transition:
+#    explicit endpoint arguments disappear, --shards remains, and the outer
+#    termination budget covers the 30s drain plus a one-hour move allowance.
+c_resolve_eps=$(count_arg "$compose_resolve" "shard-endpoint")
+h_resolve_eps=$(count_arg "$chart_resolve" "shard-endpoint")
+expect_eq "resolve-only shard endpoints" "$c_resolve_eps" "$h_resolve_eps"
+[[ "$c_resolve_eps" == 0 ]] || fail "resolve-only renders must omit --shard-endpoint"
+grep -qE '^[[:space:]]*- +--shards$' <<<"$compose_resolve" ||
+  fail "resolve-only compose render is missing --shards"
+grep -qE '^[[:space:]]*- +--shards$' <<<"$chart_resolve" ||
+  fail "resolve-only helm render is missing --shards"
+grep -qF 'stop_grace_period: 1h0m30s' <<<"$compose_resolve" ||
+  fail "compose coordinator shutdown budget is not 3630s"
+grep -qF 'terminationGracePeriodSeconds: 3630' <<<"$chart_resolve" ||
+  fail "helm coordinator shutdown budget is not 3630s"
+echo "  ok: resolve-only transition and shutdown budget present on both sides"
+
+# 5. The mesh ports agree (shard gRPC / control gRPC / coordinator REST).
 for port in 50051 50061 9200; do
   expect_both "port $port" "$port"
 done

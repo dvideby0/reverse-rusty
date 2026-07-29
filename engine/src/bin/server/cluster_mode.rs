@@ -376,10 +376,16 @@ pub(crate) async fn run(
         )),
         rebalance_topology: if in_process {
             ClusterRebalanceTopology::InProcess
-        } else if route_by_assignments {
+        } else if resolve_only {
             // `assemble_cluster` returned only after the control-plane
-            // seed/resolve/guard path selected these live backings.
-            ClusterRebalanceTopology::AssignmentRoutedRemote
+            // resolve path selected these live backings without a stale CLI
+            // topology that would reject the next restart.
+            ClusterRebalanceTopology::ResolveOnlyRemote
+        } else if route_by_assignments {
+            // The live backings follow the committed map, but startup is still
+            // guarded against the supplied position-preserving endpoint list.
+            // Rebalance must wait until the deployment is resolve-only.
+            ClusterRebalanceTopology::CliSeededAssignmentRemote
         } else {
             ClusterRebalanceTopology::StaticRemote
         },

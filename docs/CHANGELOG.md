@@ -105,10 +105,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   separation from voter membership, placement, data movement, and safe node shutdown
   ([ADR-165](decisions/adr-165-node-deregistration-api-contract.md)).
 - Hardened native coordinator `POST /_cluster/rebalance` with strict bounded transport,
-  topology-safe defaults that move data before committing assignment-routed remote routing and
-  reject non-authoritative static remote routing, positive conflict-free parallelism, one
+  topology-safe defaults that move data before committing resolve-only remote routing and reject
+  restart-unsafe CLI-seeded or non-authoritative static routing, positive conflict-free parallelism, one
   supervised off-runtime workflow, manager-start timeouts, final control-state attestation,
-  resumable partial reports, sanitized failures, and an explicit non-reroute ES/OpenSearch boundary
+  resumable partial reports, shutdown-budget deployment controls, sanitized failures, and an
+  explicit non-reroute ES/OpenSearch boundary
   ([ADR-166](decisions/adr-166-cluster-rebalance-api-contract.md)).
 - Hardened native `GET /_stats` with a strict no-store transport, truthful physical/live/tombstone
   and resident-memory/WAL projections, familiar timing and shard metadata, single-slot blocking

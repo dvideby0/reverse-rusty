@@ -7,6 +7,12 @@
 {{- if and .Values.rankingProfiles.configMapName $rankingProfilesVolume -}}
 {{- fail "rankingProfiles.configMapName and rankingProfiles.volumeSource are mutually exclusive" -}}
 {{- end -}}
+{{- if and .Values.coordinator.resolveOnly (not .Values.coordinator.routeByAssignments) -}}
+{{- fail "coordinator.resolveOnly requires coordinator.routeByAssignments=true" -}}
+{{- end -}}
+{{- if and .Values.coordinator.resolveOnly (not (and .Values.controlPlane.enabled .Values.controlPlane.wireToCoordinator)) -}}
+{{- fail "coordinator.resolveOnly requires the wired control plane" -}}
+{{- end -}}
 {{- $rankingProfilesEnabled := or (ne .Values.rankingProfiles.configMapName "") $rankingProfilesVolume -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -27,6 +33,8 @@ spec:
         {{- include "reverse-rusty.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: coordinator
     spec:
+      # Must cover the 30s HTTP drain plus the worst-case O(corpus) rebalance.
+      terminationGracePeriodSeconds: {{ .Values.coordinator.terminationGracePeriodSeconds }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -61,9 +69,16 @@ spec:
             - 0.0.0.0
             - --port
             - {{ .Values.ports.coordinatorHttp | quote }}
+            {{- if .Values.coordinator.resolveOnly }}
+            # After bootstrap, resolve topology only from the committed map so a
+            # data-moving assignment change remains restartable.
+            - --shards
+            - {{ .Values.shardCount | quote }}
+            {{- else }}
             {{- range $i := until (int .Values.shardCount) }}
             - --shard-endpoint
             - {{ printf "%s://%s-%d.%s.%s.svc.%s:%v" $scheme $shard $i $shard $ns $domain $.Values.ports.shardGrpc | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.tls.enabled }}
             - --grpc-tls-ca
@@ -79,10 +94,8 @@ spec:
             {{- end }}
             {{- if .Values.coordinator.routeByAssignments }}
             # Route by the committed shard->node assignments (ADR-086): the quorum is the topology
-            # source of truth (position-preserving seed + fail-loud guard). Data-moving live
-            # re-pointing uses /_cluster/reassign, /_cluster/reconcile, or bodyless
-            # /_cluster/rebalance; rebalance requires this assignment-routed topology and rejects
-            # remote map-only mode.
+            # source of truth. CLI-seeded mode retains the position-preserving restart guard;
+            # set coordinator.resolveOnly=true before a data-moving map change.
             - --route-by-assignments
             {{- end }}
             {{- end }}

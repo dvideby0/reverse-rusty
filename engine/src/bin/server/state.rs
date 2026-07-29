@@ -146,9 +146,15 @@ pub(crate) enum ClusterRebalanceTopology {
     /// gRPC shard backings follow static endpoint order rather than the
     /// committed assignment map. Map-driven movement is unsafe here.
     StaticRemote,
-    /// gRPC shard backings were resolved from the committed assignment map, so
-    /// that same map can safely select movement sources.
-    AssignmentRoutedRemote,
+    /// gRPC shard backings were resolved from the committed assignment map,
+    /// but startup also received a position-preserving CLI endpoint list. A
+    /// changed map would make the next guarded restart fail, so rebalance must
+    /// wait until the deployment switches to resolve-only routing.
+    CliSeededAssignmentRemote,
+    /// gRPC shard backings were resolved only from the committed assignment
+    /// map. That map can safely select movement sources and remains the
+    /// restart topology after assignments change.
+    ResolveOnlyRemote,
 }
 
 /// Coordinator-mode state (ADR-070): the cluster analogue of [`AppState`].

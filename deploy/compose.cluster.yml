@@ -29,9 +29,9 @@
 # then routes by the committed assignments (a fail-loud guard refuses a non-position-preserving map).
 # So the cluster-state document is durable + HA across coordinator restarts. The bootstrap control
 # node binds 0.0.0.0 but advertises a ROUTABLE self-URL into Raft membership via --advertise-url
-# (ADR-082). NOTE: to re-point routing on a populated cluster use the data-moving path
-# (`POST /_cluster/reassign` or bodyless `POST /_cluster/rebalance`, ADR-090/166); remote rebalance
-# requires this assignment-routed topology and rejects explicit map-only mode. To run WITHOUT
+# (ADR-082). The default `RR_COORDINATOR_TOPOLOGY_ARGS` seeds from explicit shard endpoints and is
+# restart-guarded; before reassign/rebalance changes the map, switch it to `--shards 3` and recreate
+# the coordinator so it resolves only from the quorum (cluster.env.example / runbook). To run WITHOUT
 # the quorum, drop the coordinator's --control-endpoint/--route-by-assignments lines AND control0..2
 # (the in-memory backend is used, routing byte-identical).
 
@@ -132,9 +132,7 @@ services:
     networks: [rrmesh]
     command: >
       server --cluster --host 0.0.0.0 --port 9200
-      --shard-endpoint https://shard0:50051
-      --shard-endpoint https://shard1:50051
-      --shard-endpoint https://shard2:50051
+      ${RR_COORDINATOR_TOPOLOGY_ARGS:---shard-endpoint https://shard0:50051 --shard-endpoint https://shard1:50051 --shard-endpoint https://shard2:50051}
       --control-endpoint https://control0:50061
       --control-endpoint https://control1:50061
       --control-endpoint https://control2:50061
@@ -174,7 +172,9 @@ services:
     # depends_on healthcheck makes this rare). It is not restarted after a clean
     # `compose stop`/`down`.
     restart: unless-stopped
-    stop_grace_period: 35s  # allow the graceful drain (server --drain-timeout, default 30s)
+    # Must exceed the 30s HTTP drain plus the worst-case O(corpus) rebalance handoff.
+    # Tune upward for the largest corpus; a forced stop can interrupt a fenced move.
+    stop_grace_period: ${RR_COORDINATOR_STOP_GRACE_PERIOD:-3630s}
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://127.0.0.1:9200/_health"]
       interval: 10s
