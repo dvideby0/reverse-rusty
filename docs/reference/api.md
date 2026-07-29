@@ -332,7 +332,7 @@ Cluster-only endpoints:
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/_checkpoint` | POST | For a durable in-process cluster, seal shards + commit the coordinator manifest + truncate the log (ADR-031/032); on a stateless remote coordinator it is only a local maintenance boundary and does not flush remote nodes |
+| `/_checkpoint` | POST | Strict native durability commit: a durable in-process cluster seals shards, commits the coordinator manifest, and truncates the log; `durable` and `shards_checkpointed` make a no-`data_dir` maintenance boundary explicit. A stateless remote coordinator does not flush remote nodes (ADR-031/032/161) |
 | `/_backup` | POST | Strictly snapshot a durable in-process cluster to a fresh server-side dir: checkpoint, then copy and verify the coordinator manifest + per-shard segments + sources + log; the response includes that checkpoint `epoch`. A stateless remote coordinator returns 400; use node-volume snapshots ([backup/restore](../operations/backup-restore.md), ADR-079/139) |
 | `/_cat/shards` | GET | Strict no-store CAT table of logical-position physical query counts + committed node assignments; supports `v`, `h`, `help`, `s`, and `format=json` (ADR-143) |
 | `/_cluster/state` | GET | The committed control-plane document (membership + shard→node map + ring params, ADR-037) |

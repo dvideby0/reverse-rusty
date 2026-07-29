@@ -25,6 +25,7 @@ Write paths, segments, WAL and source persistence, compaction, recovery, and dur
 | [137](../adr-137-flush-api-contract.md) | Flush REST API contract | Adds strict familiar controls and shard results while surfacing local shard durability failures. | Accepted |
 | [138](../adr-138-compaction-api-contract.md) | Compaction REST API contract | Makes native force-all truthful and adds a strict force-merge compatibility subset. | Accepted |
 | [139](../adr-139-backup-api-contract.md) | Backup REST API contract | Makes native backup strict, async-runtime-safe, and no-clobber through verified promotion. | Accepted |
+| [161](../adr-161-checkpoint-api-contract.md) | Checkpoint REST API contract | Makes cluster durability commits strict, supervised, and explicit about nondurable coordinator modes. | Accepted |
 
 ---
 

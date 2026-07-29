@@ -39,8 +39,8 @@ fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
         cluster: RwLock::new(cluster),
         write_serial: Mutex::new(()),
         flush_serial: Mutex::new(()),
-        backup_permits: Arc::new(tokio::sync::Semaphore::new(
-            crate::state::MAX_CONCURRENT_BACKUPS,
+        durability_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS,
         )),
         health_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
@@ -108,7 +108,11 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         .route("/_mpercolate", post(cluster_mpercolate_route))
         .route("/_bulk", post(cluster_bulk_route))
         .route("/_flush", any(cluster_flush_route))
-        .route("/_checkpoint", post(cluster_checkpoint))
+        .route(
+            "/_checkpoint",
+            any(cluster_checkpoint)
+                .layer(axum::extract::DefaultBodyLimit::max(CHECKPOINT_BODY_LIMIT)),
+        )
         .route(
             "/_backup",
             any(cluster_backup).layer(axum::extract::DefaultBodyLimit::max(
@@ -329,6 +333,7 @@ mod alias_learn_apply;
 mod backup;
 mod bulk;
 mod cat_shards;
+mod checkpoint;
 mod crud;
 mod flush;
 mod health;
