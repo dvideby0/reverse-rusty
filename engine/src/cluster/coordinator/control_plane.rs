@@ -81,11 +81,11 @@ impl ClusterEngine {
         Ok(self.control.propose(ClusterStateChange::AddNode(node))?)
     }
 
-    /// Deregister a member by id (idempotent). Pruning it from the shard→node map is the separate
+    /// Deregister a member by id (state-idempotent) and return the exact committed
+    /// application-state version. Pruning it from the shard→node map is the separate
     /// [`Self::rebalance`] (exactly as removing a node is distinct from re-placing its shards).
-    pub fn deregister_node(&self, id: NodeId) -> Result<(), ShardError> {
-        self.control.propose(ClusterStateChange::RemoveNode(id))?;
-        Ok(())
+    pub fn deregister_node(&self, id: NodeId) -> Result<StateVersion, ShardError> {
+        Ok(self.control.propose(ClusterStateChange::RemoveNode(id))?)
     }
 
     /// Recompute the desired **shard→node placement** from the current membership at replication

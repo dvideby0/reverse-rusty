@@ -8,12 +8,15 @@
 //! Concurrency (see [`crate::state::ClusterAppState`]): percolates and ordinary
 //! writes take the cluster READ lock (`ClusterEngine` reads are `&self` lock-free;
 //! writes are `&self`, log-ordered); writes additionally hold `write_serial` so
-//! batches don't interleave; only the vocabulary rebuilds take the WRITE lock.
+//! batches don't interleave. Descriptor mutation takes the exclusive side of
+//! `topology_guard`, movement takes its shared side, and `&mut self` blue/green
+//! vocabulary/resize operations take the cluster WRITE lock.
 //!
 //! Submodule map:
 //! - [`doc`]    — `_doc` CRUD (PUT = the single-frame cluster upsert) + `_bulk`.
 //! - [`search`] — `_search` + `_mpercolate` over `percolate_filtered_with_stats`.
 //! - [`admin`]  — root/stats/health/metrics/shards + flush/checkpoint + `_cluster/*` ops.
+//! - [`node_register`] / [`node_deregister`] — strict descriptor mutation boundaries.
 //! - [`vocab`]  — `_vocab*` (set/learn/apply + aliases) + `_settings`.
 
 use axum::http::StatusCode;
@@ -26,6 +29,7 @@ use crate::dto::ApiError;
 mod admin;
 mod checkpoint;
 mod doc;
+mod node_deregister;
 mod node_register;
 mod search;
 mod state_read;
@@ -36,12 +40,13 @@ mod tests;
 
 pub(crate) use admin::{
     cluster_backup, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats, cluster_compact,
-    cluster_deregister_node, cluster_flush_route, cluster_gc, cluster_handoff, cluster_health,
-    cluster_metrics, cluster_reassign, cluster_rebalance, cluster_reconcile, cluster_resize,
-    cluster_resync, cluster_root, cluster_stats, CAT_SHARDS_BODY_LIMIT,
+    cluster_flush_route, cluster_gc, cluster_handoff, cluster_health, cluster_metrics,
+    cluster_reassign, cluster_rebalance, cluster_reconcile, cluster_resize, cluster_resync,
+    cluster_root, cluster_stats, CAT_SHARDS_BODY_LIMIT,
 };
 pub(crate) use checkpoint::{cluster_checkpoint, CHECKPOINT_BODY_LIMIT};
 pub(crate) use doc::{cluster_bulk_route, cluster_delete_doc, cluster_get_doc, cluster_put_doc};
+pub(crate) use node_deregister::{cluster_deregister_node, CLUSTER_NODE_DEREGISTER_BODY_LIMIT};
 pub(crate) use node_register::{cluster_register_node, CLUSTER_NODE_REGISTER_BODY_LIMIT};
 pub(crate) use search::{cluster_mpercolate_route, cluster_search_route};
 pub(crate) use state_read::{cluster_state, CLUSTER_STATE_BODY_LIMIT};

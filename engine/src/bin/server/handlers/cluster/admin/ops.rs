@@ -1,24 +1,21 @@
-//! Cluster-mode `_cluster/*` control-plane operations (ADR-070): the committed-state document, node
-//! register/deregister, rebalance (+ the ADR-090 data-moving variant), live handoff, data-moving
-//! reassignment, resize, and resync. Split out of `admin.rs` to keep each file under the size budget;
-//! `admin.rs` retains the read-only introspection (root/stats/health/metrics/`_cat`) + the durability
-//! commit points (flush/checkpoint/backup).
+//! Cluster-mode `_cluster/*` topology operations (ADR-070): rebalance (+ the ADR-090 data-moving
+//! variant), live handoff, data-moving reassignment, reconcile, resize, and resync. Strict
+//! committed-state reads and node descriptor mutations live in sibling modules. Split out of
+//! `admin.rs` to keep each file under the size budget.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
-use tracing::{info, instrument};
-// `error!` is used only by the `distributed` handlers (handoff/reassign/data-moving rebalance).
-#[cfg(feature = "distributed")]
-use tracing::error;
+use tracing::{error, info, instrument};
 
+#[cfg(feature = "distributed")]
 use reverse_rusty::cluster::NodeId;
 
 use crate::dto::ApiError;
@@ -28,25 +25,6 @@ use super::super::shard_error_response;
 // `not_in_cluster_mode` is used only by the non-`distributed` 501 stubs.
 #[cfg(not(feature = "distributed"))]
 use super::super::not_in_cluster_mode;
-
-/// DELETE /_cluster/nodes/{id} — deregister a member (idempotent).
-#[instrument(skip(state))]
-pub(crate) async fn cluster_deregister_node(
-    State(state): State<Arc<ClusterAppState>>,
-    Path(id): Path<u64>,
-) -> Response {
-    let result = {
-        let cluster = state.cluster.read();
-        cluster.deregister_node(NodeId(id))
-    };
-    match result {
-        Ok(()) => {
-            info!(node_id = id, "node deregistered");
-            Json(serde_json::json!({"acknowledged": true})).into_response()
-        }
-        Err(e) => shard_error_response("node deregistration failed", &e),
-    }
-}
 
 #[derive(Deserialize, Default)]
 #[cfg_attr(not(feature = "distributed"), allow(dead_code))]
@@ -95,20 +73,32 @@ pub(crate) async fn cluster_rebalance(
 
     if !do_move {
         // Map-only HRW rebalance (ADR-042) — unchanged; works in-process and remote.
-        let result = {
-            let cluster = state.cluster.read();
+        let state_inner = Arc::clone(&state);
+        let result = tokio::task::spawn_blocking(move || {
+            let _topology = state_inner.topology_guard.read();
+            let cluster = state_inner.cluster.read();
             let rf = cluster.replication_factor();
             cluster.rebalance(rf)
-        };
+        })
+        .await;
         return match result {
-            Ok(reassigned) => {
+            Ok(Ok(reassigned)) => {
                 info!(reassigned, "rebalance committed (map-only)");
                 Json(serde_json::json!({
                     "acknowledged": true, "reassigned": reassigned, "moved_data": false
                 }))
                 .into_response()
             }
-            Err(e) => shard_error_response("rebalance failed", &e),
+            Ok(Err(e)) => shard_error_response("rebalance failed", &e),
+            Err(e) => {
+                error!(error = %e, "map-only rebalance task panicked");
+                ApiError::response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "rebalance_error",
+                    "internal rebalance task failed",
+                )
+                .into_response()
+            }
         };
     }
 
@@ -125,6 +115,7 @@ async fn rebalance_move(state: Arc<ClusterAppState>, max_parallel: usize) -> Res
     let handle = tokio::runtime::Handle::current();
     let state_inner = Arc::clone(&state);
     let result = tokio::task::spawn_blocking(move || {
+        let _topology = state_inner.topology_guard.read();
         let cluster = state_inner.cluster.read();
         let rf = cluster.replication_factor();
         cluster.rebalance_and_move_with(rf, max_parallel.max(1), &handle)
@@ -222,6 +213,7 @@ pub(crate) async fn cluster_handoff(
     let handle = tokio::runtime::Handle::current();
     let state_inner = Arc::clone(&state);
     let result = tokio::task::spawn_blocking(move || {
+        let _topology = state_inner.topology_guard.read();
         let cluster = state_inner.cluster.read();
         cluster.execute_handoff(body.position, &body.source, &body.target, &handle)
     })
@@ -289,6 +281,7 @@ pub(crate) async fn cluster_reassign(
     let handle = tokio::runtime::Handle::current();
     let state_inner = Arc::clone(&state);
     let result = tokio::task::spawn_blocking(move || {
+        let _topology = state_inner.topology_guard.read();
         let cluster = state_inner.cluster.read();
         cluster.reassign_and_move(body.position, NodeId(body.node), &handle)
     })
@@ -415,6 +408,7 @@ pub(crate) async fn cluster_reconcile(
     let handle = tokio::runtime::Handle::current();
     let state_inner = Arc::clone(&state);
     let result = tokio::task::spawn_blocking(move || {
+        let _topology = state_inner.topology_guard.read();
         let cluster = state_inner.cluster.read();
         let rf = cluster.replication_factor();
         cluster.reconcile_with(rf, max_parallel, &handle)
@@ -498,6 +492,7 @@ pub(crate) async fn cluster_resize(
 ) -> Response {
     let start = Instant::now();
     let result = {
+        let _topology = state.topology_guard.write();
         let _w = state.write_serial.lock();
         let mut cluster = state.cluster.write();
         cluster.resize(body.num_shards)

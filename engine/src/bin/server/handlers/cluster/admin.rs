@@ -3,10 +3,9 @@
 //! single-node-only `_cat`/compact stubs. The strict `POST /_checkpoint`
 //! boundary lives in the sibling `checkpoint` module.
 //!
-//! The `_cluster/*` control-plane operations (state, node register/deregister,
-//! rebalance, handoff, reassign, resize, resync) live in the [`ops`] submodule — plus
-//! the orphan-slot GC sweep in [`gc`] (ADR-096) — and are re-exported below, so
-//! callers keep resolving them as `admin::cluster_*`.
+//! The remaining `_cluster/*` topology operations (rebalance, handoff, reassign, resize,
+//! and resync) live in the [`ops`] submodule. Strict cluster-state reads and node-descriptor
+//! mutations live in sibling modules; orphan-slot GC lives in [`gc`] (ADR-096).
 
 mod cat_shards;
 mod gc;
@@ -19,8 +18,8 @@ pub(crate) use gc::cluster_gc;
 pub(crate) use health::cluster_health;
 pub(crate) use metrics::cluster_metrics;
 pub(crate) use ops::{
-    cluster_deregister_node, cluster_handoff, cluster_reassign, cluster_rebalance,
-    cluster_reconcile, cluster_resize, cluster_resync,
+    cluster_handoff, cluster_reassign, cluster_rebalance, cluster_reconcile, cluster_resize,
+    cluster_resync,
 };
 
 use std::sync::Arc;

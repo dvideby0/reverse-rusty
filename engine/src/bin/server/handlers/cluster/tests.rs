@@ -37,6 +37,7 @@ fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
     let prom = PrometheusMetrics::new();
     Arc::new(ClusterAppState {
         cluster: RwLock::new(cluster),
+        topology_guard: RwLock::new(()),
         write_serial: Mutex::new(()),
         flush_serial: Mutex::new(()),
         durability_permits: Arc::new(tokio::sync::Semaphore::new(
@@ -290,7 +291,9 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         )
         .route(
             "/_cluster/nodes/{id}",
-            axum::routing::delete(cluster_deregister_node),
+            any(cluster_deregister_node).layer(axum::extract::DefaultBodyLimit::max(
+                CLUSTER_NODE_DEREGISTER_BODY_LIMIT,
+            )),
         )
         .route("/_cluster/rebalance", post(cluster_rebalance))
         .route("/_cluster/resync", post(cluster_resync))
@@ -362,6 +365,7 @@ mod flush;
 mod health;
 mod jobs;
 mod metrics;
+mod node_deregister;
 mod node_register;
 mod pit;
 mod ranked;

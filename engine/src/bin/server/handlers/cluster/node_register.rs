@@ -416,6 +416,20 @@ pub(crate) async fn cluster_register_node(
     let worker_gate = Arc::clone(&proposal_gate);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        // Descriptor replacement is exclusive with topology movement so a
+        // move cannot resolve one endpoint/role and commit against another.
+        // Serving uses the separate cluster READ lock and remains concurrent.
+        let _topology = if no_wait {
+            worker_state.topology_guard.write()
+        } else {
+            let Some(lock_budget) = deadline.checked_duration_since(Instant::now()) else {
+                return ClusterNodeRegisterWorkerOutcome::NotStarted;
+            };
+            let Some(topology) = worker_state.topology_guard.try_write_for(lock_budget) else {
+                return ClusterNodeRegisterWorkerOutcome::NotStarted;
+            };
+            topology
+        };
         let cluster = if no_wait {
             worker_state.cluster.read()
         } else {
