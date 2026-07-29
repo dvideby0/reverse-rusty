@@ -30,6 +30,16 @@ fn test_state(queries: &[(u64, String)]) -> Arc<ClusterAppState> {
 }
 
 fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
+    state_from_cluster_with_rebalance_topology(
+        cluster,
+        crate::state::ClusterRebalanceTopology::InProcess,
+    )
+}
+
+fn state_from_cluster_with_rebalance_topology(
+    cluster: ClusterEngine,
+    rebalance_topology: crate::state::ClusterRebalanceTopology,
+) -> Arc<ClusterAppState> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(2)
         .build()
@@ -43,6 +53,10 @@ fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
         durability_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS,
         )),
+        rebalance_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_CLUSTER_REBALANCES,
+        )),
+        rebalance_topology,
         health_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
         )),
@@ -295,7 +309,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 CLUSTER_NODE_DEREGISTER_BODY_LIMIT,
             )),
         )
-        .route("/_cluster/rebalance", post(cluster_rebalance))
+        .route(
+            "/_cluster/rebalance",
+            any(cluster_rebalance).layer(axum::extract::DefaultBodyLimit::max(
+                CLUSTER_REBALANCE_BODY_LIMIT,
+            )),
+        )
         .route("/_cluster/resync", post(cluster_resync))
         .with_state(Arc::clone(state))
 }
@@ -369,6 +388,7 @@ mod node_deregister;
 mod node_register;
 mod pit;
 mod ranked;
+mod rebalance;
 mod settings_read;
 mod settings_write;
 mod state_read;

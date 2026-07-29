@@ -265,7 +265,7 @@ assignments, or physical data. A manager role is eligibility metadata, while the
 changed separately through joint consensus. The REST boundary reserves bootstrap `NodeId(0)`,
 requires an HTTP(S) mesh origin, and reports the exact committed application version; replacement
 must name the same recovered logical node unless data was moved safely first. The full operator
-contract is in the [cluster-membership API reference](../reference/api/cluster.md).
+contract is in the [cluster-control API reference](../reference/api/cluster.md).
 
 Deregistration is the symmetric descriptor-only transition. It reserves the same bootstrap
 identity, returns the proposal's exact application version, and fails closed while the id remains
@@ -280,6 +280,17 @@ The allocator ranks registered nodes for each logical position with rendezvous (
 desired assignments. A committed map is routing authority only after deployment topology is
 resolved and, for a populated remote cluster, the corresponding data movement has completed. Boot
 and reconcile guards fail closed instead of routing a position to an empty slot.
+
+The REST rebalance boundary enforces that distinction (ADR-166). A bodyless in-process request can
+commit the advisory map because all shards remain co-resident. A bodyless resolve-only remote
+request drives the data-moving move-then-commit workflow; explicit `move:false` is rejected before
+planning. A CLI-seeded assignment-routed coordinator is rejected until its deployment removes the
+restart guard's endpoint list: otherwise a successful changed map would make its next start fail.
+A static endpoint-order remote coordinator is also rejected because its live source may not match
+the committed map. The public route therefore cannot create the known map-without-data state, hand
+off from a non-authoritative source, or acknowledge a topology the deployment cannot restart. The
+underlying map-only library primitive remains available for in-process assembly and deterministic
+allocator tests.
 
 Consensus holds topology only. It never stores query DSL, tags, source, translog records, or compiled
 segments.
@@ -331,7 +342,7 @@ The cluster exposes powerful primitives, but “self-tuning” is not the curren
 | Suggested shard count | `recommended_shard_count` computes an operator-invoked recommendation from configured capacity assumptions |
 | In-process shard-count change | `resize` / `resize_to_recommended` rebuild live source under a fresh ring and atomically swap; durable mode commits the new layout |
 | Remote shard-count change | not built; requires fresh/coordinated deployment or rebuild |
-| Node membership rebalance | HRW planner is built; remote mode uses data-moving rebalance before committing new routing |
+| Node membership rebalance | HRW planner is built; resolve-only remote mode moves data before committing new routing, while CLI-seeded and static remote modes are refused |
 | Skew handoff | autoscaler can drive a fenced data-moving handoff when no conflicting rebalance ran |
 | Corpus split pressure | `RecommendSplit` is advisory; targeted online splitting is not built |
 | Scale-out recommendation | advisory; provisioning nodes is external |
@@ -341,7 +352,8 @@ The cluster exposes powerful primitives, but “self-tuning” is not the curren
 
 `AutoscaleConfig` is disabled by default. When enabled, `tick` gathers a fail-closed load snapshot,
 repairs queued partial applies opportunistically, evaluates the pure policy, and executes the safe
-subset. On a remote cluster, membership rebalance moves data rather than changing the map alone.
+subset. On a resolve-only remote cluster, membership rebalance moves data rather than changing the
+map alone; CLI-seeded and static endpoint-order remote routing fail closed.
 Split/scale-out recommendations remain decisions for an external operator or controller.
 
 Adding positions does not reduce the replicated C/D corpus per node unless physical placement changes,

@@ -199,8 +199,27 @@ Do **not** add a shard to the live cluster and re-ingest in place. Cross-process
 tracked in the [roadmap](../roadmap.md#automatic-and-remote-cluster-resize) under ADR-078's
 compatibility constraints.
 
+**Before any assignment-changing move**, switch the coordinator from its first-boot CLI-seeded
+posture to resolve-only routing. The checked-in Compose file exposes this without editing YAML:
+
+```sh
+# In deploy/cluster.env, uncomment:
+# RR_COORDINATOR_TOPOLOGY_ARGS=--shards 3
+docker compose --project-directory . -f deploy/compose.cluster.yml \
+  --env-file deploy/cluster.env up -d --no-deps coordinator
+docker compose --project-directory . -f deploy/compose.cluster.yml \
+  --env-file deploy/cluster.env exec coordinator \
+  curl -fsS http://127.0.0.1:9200/_health
+```
+
+Do this only after the first healthy boot has seeded the quorum. `--shards` is the committed logical
+position count. Leave the coordinator resolve-only afterward: restoring the old endpoint arguments
+after a changed map correctly trips the ADR-086 restart guard. Until this transition,
+`POST /_cluster/rebalance` returns `409 rebalance_resolve_only_required` rather than acknowledging a
+map that the deployed command cannot restart.
+
 **Move a single shard to another node** (without changing K) — data-moving reassignment (ADR-090, a
-`--features distributed` coordinator):
+`--features distributed` resolve-only coordinator):
 
 ```sh
 curl -fsS -XPOST http://127.0.0.1:9200/_cluster/reassign -H "authorization: Bearer $RR_AUTH_TOKEN" \
@@ -209,11 +228,18 @@ curl -fsS -XPOST http://127.0.0.1:9200/_cluster/reassign -H "authorization: Bear
 
 This peer-recovers the target, fences + drains the source, flips routing, then commits the new owner
 (**move-then-commit**) — so a coordinator restarted **resolve-only** (`--route-by-assignments` +
-`--control-endpoint`, dropping the now-stale `--shard-endpoint`) routes to the new owner. To move every
-reassigned position at once, `POST /_cluster/rebalance -d '{"move": true}'`. Fail-closed: a failed move
-commits nothing and auto-unfences the source; a `committed:false` reply means the data moved but the
-durable-map commit failed — re-run to reconcile (still zero-FN). The bare map-only `rebalance` (no
-`move`) must **not** be used alone to re-point a populated cluster.
+`--control-endpoint`, `--shards 3`, and no `--shard-endpoint`) routes to the new owner. To move every
+reassigned position at once, call bodyless `POST /_cluster/rebalance` (or explicitly send
+`{"move":true}`); resolve-only remote mode chooses the data-moving workflow by default and rejects
+`move:false`. CLI-seeded and static endpoint-order coordinators reject rebalance before admission.
+Fail-closed: a failed move commits nothing and auto-unfences the source; a
+`committed:false` reply means the data moved but the durable-map commit failed — re-run to
+reconcile (still zero-FN).
+
+A started rebalance cannot be safely cancelled. Compose's
+`RR_COORDINATOR_STOP_GRACE_PERIOD` defaults to 3630 seconds: the 30-second HTTP drain plus a
+one-hour move allowance. Size it above the largest measured `O(corpus)` handoff; Docker sends
+`SIGKILL` when that outer budget expires.
 
 ## 6. Recovery
 
@@ -348,7 +374,8 @@ control-plane↔coordinator wiring with multi-endpoint failover + committed-assi
 (ADR-082/083/086 — on by default in `compose.cluster.yml`; failover semantics in [§6](#6-recovery),
 the resolve-only restart + move-then-commit in [§5](#5-scaling), the bootstrap `--advertise-url`
 rule in [§3](#3-bootstrap--startup-ordering)); **data-moving reassignment** (ADR-090):
-`POST /_cluster/reassign {position, node}` (or `rebalance` with `{move:true}`) moves the data via
-live handoff THEN commits the new owner — the bare map-only HRW `rebalance` (no `move`) must
-**not** be used alone to re-point a populated cluster; and the **Kubernetes / Helm chart**
+`POST /_cluster/reassign {position, node}` (or bodyless resolve-only remote `rebalance`) moves the
+data via live handoff THEN commits the new owner; the REST rebalance boundary rejects remote
+map-only mode, CLI-seeded restart-unsafe routing, and static routing. Also shipped: the
+**Kubernetes / Helm chart**
 (ADR-084, [`kubernetes-deployment.md`](kubernetes-deployment.md)).

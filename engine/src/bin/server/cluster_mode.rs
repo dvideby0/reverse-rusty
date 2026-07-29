@@ -56,14 +56,14 @@ use crate::handlers::{
     ALIAS_FEEDBACK_READ_BODY_LIMIT, ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT,
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
     CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT,
-    CLUSTER_NODE_DEREGISTER_BODY_LIMIT, CLUSTER_NODE_REGISTER_BODY_LIMIT, CLUSTER_STATE_BODY_LIMIT,
-    EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT,
-    SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
-    VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
-    VOCAB_WRITE_BODY_LIMIT,
+    CLUSTER_NODE_DEREGISTER_BODY_LIMIT, CLUSTER_NODE_REGISTER_BODY_LIMIT,
+    CLUSTER_REBALANCE_BODY_LIMIT, CLUSTER_STATE_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT,
+    HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT,
+    SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT,
+    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
-use crate::state::{request_id_middleware, ClusterAppState};
+use crate::state::{request_id_middleware, ClusterAppState, ClusterRebalanceTopology};
 use crate::{auth, shutdown_signal};
 
 /// Remote-coordinator assembly (connect + control-plane attach + route-by-assignments), split out to
@@ -75,6 +75,19 @@ mod remote_connect;
 /// module-size budget. `distributed`-gated: it drives the data-moving reconcile.
 #[cfg(feature = "distributed")]
 mod reconcile_loop;
+
+/// Hold the sole operator-rebalance admission slot through durability cleanup.
+///
+/// A rebalance worker owns this permit for its complete synchronous workflow,
+/// including after its HTTP request disconnects. Waiting here therefore joins
+/// the safety-sensitive portion of any detached worker before process exit,
+/// while retaining the returned guard prevents a late draining request from
+/// starting another rebalance during shutdown.
+async fn quiesce_rebalance_for_shutdown(
+    permits: &Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
+    Arc::clone(permits).acquire_owned().await
+}
 
 /// Run the server in coordinator mode. Mirrors `main`'s single-node flow: build
 /// the cluster, wire observability, serve, shut down cleanly.
@@ -358,6 +371,24 @@ pub(crate) async fn run(
         durability_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS,
         )),
+        rebalance_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_CLUSTER_REBALANCES,
+        )),
+        rebalance_topology: if in_process {
+            ClusterRebalanceTopology::InProcess
+        } else if resolve_only {
+            // `assemble_cluster` returned only after the control-plane
+            // resolve path selected these live backings without a stale CLI
+            // topology that would reject the next restart.
+            ClusterRebalanceTopology::ResolveOnlyRemote
+        } else if route_by_assignments {
+            // The live backings follow the committed map, but startup is still
+            // guarded against the supplied position-preserving endpoint list.
+            // Rebalance must wait until the deployment is resolve-only.
+            ClusterRebalanceTopology::CliSeededAssignmentRemote
+        } else {
+            ClusterRebalanceTopology::StaticRemote
+        },
         health_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
         )),
@@ -545,7 +576,10 @@ pub(crate) async fn run(
             any(cluster_deregister_node)
                 .layer(DefaultBodyLimit::max(CLUSTER_NODE_DEREGISTER_BODY_LIMIT)),
         )
-        .route("/_cluster/rebalance", post(cluster_rebalance))
+        .route(
+            "/_cluster/rebalance",
+            any(cluster_rebalance).layer(DefaultBodyLimit::max(CLUSTER_REBALANCE_BODY_LIMIT)),
+        )
         .route("/_cluster/reassign", post(cluster_reassign))
         .route("/_cluster/reconcile", post(cluster_reconcile))
         .route("/_cluster/gc", post(cluster_gc))
@@ -629,7 +663,21 @@ pub(crate) async fn run(
         task.abort();
     }
 
-    info!("connection drain complete, running cluster shutdown sequence");
+    // A rebalance may outlive its HTTP request by design. Its worker owns the
+    // sole permit until all fencing, movement, control-state attestation, and
+    // response construction have finished. Acquire and retain that permit
+    // before durability cleanup so process exit cannot interrupt a detached
+    // handoff after fencing or a routing flip.
+    info!("connection drain complete, waiting for any active cluster rebalance");
+    let _rebalance_shutdown_guard =
+        match quiesce_rebalance_for_shutdown(&state.rebalance_permits).await {
+            Ok(guard) => Some(guard),
+            Err(source) => {
+                error!(error = %source, "rebalance admission closed during cluster shutdown");
+                None
+            }
+        };
+    info!("cluster rebalance quiesced, running cluster shutdown sequence");
 
     // Durability shutdown: flush + checkpoint (the manifest commit), so reopen
     // attaches segments instead of replaying a long log tail. In-memory clusters
@@ -653,3 +701,39 @@ pub(crate) async fn run(
 mod assemble;
 
 use assemble::{assemble_cluster, MeshClientParts};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_quiescence_waits_for_and_then_retains_rebalance_admission() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let active = Arc::clone(&permits)
+            .acquire_owned()
+            .await
+            .expect("active rebalance permit");
+        let wait_permits = Arc::clone(&permits);
+        let mut shutdown = Box::pin(quiesce_rebalance_for_shutdown(&wait_permits));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown must wait while the detached rebalance owns admission"
+        );
+
+        drop(active);
+        let guard = tokio::time::timeout(std::time::Duration::from_secs(1), &mut shutdown)
+            .await
+            .expect("shutdown quiescence completed")
+            .expect("rebalance admission remained open");
+        assert_eq!(
+            permits.available_permits(),
+            0,
+            "shutdown must retain admission through durability cleanup"
+        );
+        drop(guard);
+        assert_eq!(permits.available_permits(), 1);
+    }
+}

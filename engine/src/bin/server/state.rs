@@ -36,6 +36,11 @@ pub(crate) const MAX_CONCURRENT_BACKUPS: usize = 1;
 /// Checkpoint and backup share the coordinator writer boundary, so admit one
 /// durability operation at a time instead of queuing blocking workers.
 pub(crate) const MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS: usize = 1;
+/// Rebalance is a cluster-wide topology workflow. Admit one operator-triggered
+/// pass at a time so duplicate requests cannot accumulate blocking workers or
+/// launch competing whole-cluster plans. Conflict-aware parallelism within one
+/// data-moving pass remains controlled by its `max_parallel` request field.
+pub(crate) const MAX_CONCURRENT_CLUSTER_REBALANCES: usize = 1;
 /// The health route stays open even when read auth is enabled. Bound all of
 /// its requests independently before their bodies are buffered.
 pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
@@ -132,6 +137,26 @@ impl AppState {
     }
 }
 
+/// Safety-relevant topology of the cluster-rebalance REST boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClusterRebalanceTopology {
+    /// All physical shard positions are co-resident; the assignment map is
+    /// advisory and may be updated without moving data.
+    InProcess,
+    /// gRPC shard backings follow static endpoint order rather than the
+    /// committed assignment map. Map-driven movement is unsafe here.
+    StaticRemote,
+    /// gRPC shard backings were resolved from the committed assignment map,
+    /// but startup also received a position-preserving CLI endpoint list. A
+    /// changed map would make the next guarded restart fail, so rebalance must
+    /// wait until the deployment switches to resolve-only routing.
+    CliSeededAssignmentRemote,
+    /// gRPC shard backings were resolved only from the committed assignment
+    /// map. That map can safely select movement sources and remains the
+    /// restart topology after assignments change.
+    ResolveOnlyRemote,
+}
+
 /// Coordinator-mode state (ADR-070): the cluster analogue of [`AppState`].
 pub(crate) struct ClusterAppState {
     /// Read lock for percolates AND ordinary writes (both `&self`); write lock only
@@ -154,6 +179,13 @@ pub(crate) struct ClusterAppState {
     /// requests from accumulating blocking workers behind the same durability
     /// boundary.
     pub(crate) durability_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// One operator-triggered cluster rebalance at a time. The owned permit is
+    /// held by the off-runtime worker through final control-state attestation,
+    /// including after an HTTP disconnect.
+    pub(crate) rebalance_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Whether rebalance may commit an advisory map, move from the committed
+    /// map, or must refuse because live routing has another authority.
+    pub(crate) rebalance_topology: ClusterRebalanceTopology,
     /// Coordinator analogue of [`AppState::health_permits`].
     pub(crate) health_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Coordinator analogue of [`AppState::stats_permits`], including bounded

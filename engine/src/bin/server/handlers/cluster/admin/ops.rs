@@ -1,23 +1,28 @@
-//! Cluster-mode `_cluster/*` topology operations (ADR-070): rebalance (+ the ADR-090 data-moving
-//! variant), live handoff, data-moving reassignment, reconcile, resize, and resync. Strict
-//! committed-state reads and node descriptor mutations live in sibling modules. Split out of
-//! `admin.rs` to keep each file under the size budget.
+//! Cluster-mode `_cluster/*` topology operations (ADR-070): live handoff, data-moving
+//! reassignment, reconcile, resize, and resync. The strict rebalance boundary lives in
+//! the sibling `rebalance` module. Strict committed-state reads and node descriptor
+//! mutations live in sibling modules.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
     extract::State,
-    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
+
+#[cfg(feature = "distributed")]
+use axum::http::StatusCode;
+#[cfg(feature = "distributed")]
+use tracing::error;
 
 #[cfg(feature = "distributed")]
 use reverse_rusty::cluster::NodeId;
 
+#[cfg(feature = "distributed")]
 use crate::dto::ApiError;
 use crate::state::ClusterAppState;
 
@@ -25,155 +30,6 @@ use super::super::shard_error_response;
 // `not_in_cluster_mode` is used only by the non-`distributed` 501 stubs.
 #[cfg(not(feature = "distributed"))]
 use super::super::not_in_cluster_mode;
-
-#[derive(Deserialize, Default)]
-#[cfg_attr(not(feature = "distributed"), allow(dead_code))]
-pub(crate) struct RebalanceBody {
-    /// When true, MOVE each reassigned position's data via live handoff and commit the new owner —
-    /// the data-moving rebalance (ADR-090, `distributed` only). Default false = the map-only HRW
-    /// rebalance (ADR-042), byte-identical to the prior behavior (an empty body decodes to false, so
-    /// existing no-body callers are unaffected).
-    #[serde(default, rename = "move")]
-    do_move: bool,
-    /// Wave parallelism for the data-moving sweep (ADR-095): up to N conflict-free moves run
-    /// concurrently. Absent/`1` (the default) = the sequential sweep, byte-identical. Ignored
-    /// without `"move": true`.
-    #[serde(default)]
-    max_parallel: Option<usize>,
-}
-
-/// POST /_cluster/rebalance — recompute the desired shard→node map from membership
-/// (rendezvous/HRW, ADR-042) and commit only the changed positions. With `{"move": true}` (ADR-090,
-/// `distributed` only) it additionally MOVES each reassigned position's data via live handoff so
-/// routing follows the new map live and across a restart; without it (the default, and any empty
-/// body) it stays map-only — which must NOT be used alone to re-point a populated remote cluster.
-#[instrument(skip_all)]
-pub(crate) async fn cluster_rebalance(
-    State(state): State<Arc<ClusterAppState>>,
-    body: axum::body::Bytes,
-) -> Response {
-    // Parse leniently: an empty body (the common no-arg call) is map-only, preserving the prior
-    // signature; a present-but-invalid body is a clean 400.
-    let parsed = if body.is_empty() {
-        RebalanceBody::default()
-    } else {
-        match serde_json::from_slice::<RebalanceBody>(&body) {
-            Ok(b) => b,
-            Err(e) => {
-                return ApiError::response(
-                    StatusCode::BAD_REQUEST,
-                    "bad_request",
-                    format!("invalid rebalance body: {e}"),
-                )
-                .into_response()
-            }
-        }
-    };
-    let do_move = parsed.do_move;
-
-    if !do_move {
-        // Map-only HRW rebalance (ADR-042) — unchanged; works in-process and remote.
-        let state_inner = Arc::clone(&state);
-        let result = tokio::task::spawn_blocking(move || {
-            let _topology = state_inner.topology_guard.read();
-            let cluster = state_inner.cluster.read();
-            let rf = cluster.replication_factor();
-            cluster.rebalance(rf)
-        })
-        .await;
-        return match result {
-            Ok(Ok(reassigned)) => {
-                info!(reassigned, "rebalance committed (map-only)");
-                Json(serde_json::json!({
-                    "acknowledged": true, "reassigned": reassigned, "moved_data": false
-                }))
-                .into_response()
-            }
-            Ok(Err(e)) => shard_error_response("rebalance failed", &e),
-            Err(e) => {
-                error!(error = %e, "map-only rebalance task panicked");
-                ApiError::response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "rebalance_error",
-                    "internal rebalance task failed",
-                )
-                .into_response()
-            }
-        };
-    }
-
-    // Data-moving rebalance (ADR-090) — distributed only.
-    rebalance_move(state, parsed.max_parallel.unwrap_or(1)).await
-}
-
-/// The `{"move": true}` arm of [`cluster_rebalance`]: drive a data-moving rebalance on the blocking
-/// pool (the move uses the sync→async bridge). A per-position failure stops the sweep fail-forward;
-/// the report names what moved, what failed, and what was not attempted, so an operator can resume.
-/// `max_parallel` > 1 runs conflict-free moves in waves (ADR-095); 1 is the sequential default.
-#[cfg(feature = "distributed")]
-async fn rebalance_move(state: Arc<ClusterAppState>, max_parallel: usize) -> Response {
-    let handle = tokio::runtime::Handle::current();
-    let state_inner = Arc::clone(&state);
-    let result = tokio::task::spawn_blocking(move || {
-        let _topology = state_inner.topology_guard.read();
-        let cluster = state_inner.cluster.read();
-        let rf = cluster.replication_factor();
-        cluster.rebalance_and_move_with(rf, max_parallel.max(1), &handle)
-    })
-    .await;
-    match result {
-        Ok(Ok(report)) => {
-            let moved_count = report.moved.len();
-            if let Some((pos, why)) = &report.failed {
-                error!(
-                    position = *pos,
-                    reason = %why,
-                    moved = moved_count,
-                    "data-moving rebalance stopped at a position (resumable)"
-                );
-            } else {
-                info!(moved = moved_count, "data-moving rebalance complete");
-            }
-            let acknowledged = report.failed.is_none();
-            let failed_json = report
-                .failed
-                .map(|(p, why)| serde_json::json!({"position": p, "reason": why}));
-            Json(serde_json::json!({
-                "acknowledged": acknowledged,
-                "moved_data": true,
-                "moved": report.moved,
-                "failed": failed_json,
-                "not_attempted": report.not_attempted,
-            }))
-            .into_response()
-        }
-        Ok(Err(e)) => shard_error_response("data-moving rebalance failed", &e),
-        Err(e) => {
-            error!(error = %e, "rebalance task panicked");
-            ApiError::response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "rebalance_error",
-                "internal rebalance task failed",
-            )
-            .into_response()
-        }
-    }
-}
-
-/// The non-`distributed` build cannot drive a data move (the gRPC transport is compiled out) — the
-/// map-only rebalance still runs; `{"move":true}` answers a 501-with-reason instead of silently
-/// ignoring the flag.
-// `async` (with no await) to match the distributed signature so `cluster_rebalance` can `.await` it
-// uniformly across both builds.
-#[cfg(not(feature = "distributed"))]
-#[allow(clippy::unused_async)]
-async fn rebalance_move(_state: Arc<ClusterAppState>, _max_parallel: usize) -> Response {
-    not_in_cluster_mode(
-        "POST /_cluster/rebalance {\"move\":true}",
-        "a data-moving rebalance needs the gRPC transport — rebuild the server with --features \
-         distributed, or omit \"move\" for the map-only rebalance",
-    )
-}
 
 #[derive(Deserialize)]
 // The non-`distributed` build's handoff handler ignores the body (it 501s), so the

@@ -200,6 +200,11 @@ What the chart guarantees while that runs:
   `podManagementPolicy: Parallel`, which affects scale-up/creation only, never updates. Readiness
   is the real gate: a shard is Ready only once it serves with a dict re-adopted; a control node
   only once it sees a leader (ADR-084).
+- The single coordinator Deployment uses `strategy.type: Recreate`: Kubernetes fully terminates
+  the old coordinator before starting its replacement. This deliberate API interruption prevents
+  a rolling replacement from deadlocking behind the old process's exclusive shard-node lease.
+  Resolve-only replacements wait for any control member but do not wait for the original shard
+  ordinals; assembly reads and probes the authoritative committed assignments instead.
 - The **PodDisruptionBudgets** (`maxUnavailable: 1` for shards and control) protect the same
   invariant against *node drains* racing the rollout — an eviction can never take a second shard
   or break the control quorum while one member is already down.
