@@ -74,11 +74,11 @@ impl ClusterEngine {
     }
 
     /// Register (or replace, by id) a cluster member in the control-plane document — the membership
-    /// half of the allocator's inputs (ADR-042). Idempotent; errors fail-closed. A subsequent
-    /// [`Self::rebalance`] folds the node into the shard→node map.
-    pub fn register_node(&self, node: NodeDescriptor) -> Result<(), ShardError> {
-        self.control.propose(ClusterStateChange::AddNode(node))?;
-        Ok(())
+    /// half of the allocator's inputs (ADR-042). State-idempotent; errors fail-closed. Returns the
+    /// exact committed application-state version. A subsequent [`Self::rebalance`] folds the node
+    /// into the shard→node map.
+    pub fn register_node(&self, node: NodeDescriptor) -> Result<StateVersion, ShardError> {
+        Ok(self.control.propose(ClusterStateChange::AddNode(node))?)
     }
 
     /// Deregister a member by id (idempotent). Pruning it from the shard→node map is the separate

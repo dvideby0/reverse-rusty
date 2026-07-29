@@ -282,7 +282,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 CLUSTER_STATE_BODY_LIMIT,
             )),
         )
-        .route("/_cluster/nodes", post(cluster_register_node))
+        .route(
+            "/_cluster/nodes",
+            any(cluster_register_node).layer(axum::extract::DefaultBodyLimit::max(
+                CLUSTER_NODE_REGISTER_BODY_LIMIT,
+            )),
+        )
         .route(
             "/_cluster/nodes/{id}",
             axum::routing::delete(cluster_deregister_node),
@@ -357,6 +362,7 @@ mod flush;
 mod health;
 mod jobs;
 mod metrics;
+mod node_register;
 mod pit;
 mod ranked;
 mod settings_read;

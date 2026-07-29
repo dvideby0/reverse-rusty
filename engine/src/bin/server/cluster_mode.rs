@@ -56,10 +56,10 @@ use crate::handlers::{
     ALIAS_FEEDBACK_READ_BODY_LIMIT, ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT,
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
     CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT,
-    CLUSTER_STATE_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT,
-    PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
-    VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
-    VOCAB_WRITE_BODY_LIMIT,
+    CLUSTER_NODE_REGISTER_BODY_LIMIT, CLUSTER_STATE_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT,
+    HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT,
+    SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT,
+    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -533,7 +533,11 @@ pub(crate) async fn run(
             "/_cluster/state/{metric}/{target}",
             any(cluster_state).layer(DefaultBodyLimit::max(CLUSTER_STATE_BODY_LIMIT)),
         )
-        .route("/_cluster/nodes", post(cluster_register_node))
+        .route(
+            "/_cluster/nodes",
+            any(cluster_register_node)
+                .layer(DefaultBodyLimit::max(CLUSTER_NODE_REGISTER_BODY_LIMIT)),
+        )
         .route(
             "/_cluster/nodes/{id}",
             axum::routing::delete(cluster_deregister_node),
