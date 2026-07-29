@@ -125,6 +125,19 @@ auth:
   create: false
   value: ""
 
+# Optional immutable CPU ranking-profile registry (ADR-162/163;
+# docs/reference/ranking.md). For registries
+# below Kubernetes's ConfigMap object limit, create the ConfigMap out of band and
+# set `configMapName`. For larger registries, set `volumeSource` to one complete
+# Kubernetes VolumeSource (for example a ReadOnlyMany PVC or CSI volume) whose
+# root contains `key`. The two sources are mutually exclusive. The chart mounts
+# the selected source read-only into the coordinator and every shard node.
+# Leaving both sources empty keeps the built-in static_v1-only registry.
+rankingProfiles:
+  configMapName: ""
+  key: ranking-profiles.json
+  volumeSource: {}
+
 # Per-pod durable volumes (--data-dir). Shards persist segments; control nodes persist
 # their Raft log/vote/committed/snapshot.
 persistence:

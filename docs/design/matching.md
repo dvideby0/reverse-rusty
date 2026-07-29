@@ -373,7 +373,10 @@ that would couple a caller-supplied filter to the cover proof.
 ### 5.4 Ranking — an optional layer *over* the boolean-correct set
 
 Matching stays boolean and complete; ranking is an **optional sort applied after exact verification**,
-never a change to which queries match. The compatibility APIs use the historical static score
+never a change to which queries match. The public score, profile-file, feature, loading, and topology
+contract is canonical in the [ranking reference](../reference/ranking.md); this section owns the
+internal placement of ranking in the matching and delivery pipeline. The compatibility APIs use the
+historical static score
 `Σ boosts + priority` (**additive**, not strict `(boost, priority)` lexicographic — the simpler
 ES-`function_score`-"sum" model). Native bounded and exhaustive APIs may select an ADR-162 named CPU
 profile and score `profile relevance + Σ boosts + typed priority`; omission selects `static_v1`, whose
@@ -421,21 +424,14 @@ work out of unranked and compatibility collectors. Local `POST /v2/_search` expo
 document with deterministic `(score desc, logical_id asc)` winners and honest `eq`/`gte` totals.
 Source/explain enrichment is winner-only and fail-closed.
 
-The profile registry is loaded once from strict JSON. `static_v1` is built in; `linear` and
-`tree_ensemble` profiles use the fixed v1 feature schema: query required/forbidden counts, any-of
-groups, tag count, title token/byte/digit counts, positive coverage per thousand, and unmatched title
-tokens. Linear terms and flat tree traversal allocate nothing on the scoring path. File size, profile
-count, term count, trees, total nodes, depth, and aggregate evaluation steps are startup-bounded.
-Every model has a semantic fingerprint, and an optional configured fingerprint mismatch fails
-startup. The query counts include flat columns and predicate programs: phrases contribute analyzer
-positions, forbidden conjunctions contribute their features, and compound any-of groups use their
-shortest satisfiable member. Semantic any-of groups are counted before retrieval-proxy deduplication,
-so repeated or different compound constraints remain separate ranking groups and retain each
-group's shortest-member term contribution even when their proxies or exact predicates deduplicate.
-These features are reconstructed from existing exact columns plus the versioned predicate program;
-no segment column is added. Compiler semantics 6 source-rebuilds older durable materializations
-before rich profiles can observe them, or refuses a shard-local attach that cannot rebuild
-placement atomically.
+The startup registry compiles bounded linear terms and flat trees into allocation-free integer
+programs and fingerprints their semantics. Query evidence is reconstructed from existing exact
+columns plus the versioned predicate program; no model-specific segment column is added. Phrase and
+compound-group counts retain their semantic meaning even when retrieval proxies or exact predicates
+deduplicate. Compiler semantics 6 source-rebuilds older durable materializations before rich
+profiles can observe those counts, or refuses a shard-local attach that cannot rebuild placement
+atomically. The fixed feature definitions and every admission limit live only in the
+[ranking reference](../reference/ranking.md#3-profile-file).
 
 ADR-110 generalizes the same snapshot path over the post-verify `EmissionPolicy`: standalone uses
 `EmitAll`, while a cluster shard applies ADR-109 `UniqueOwner` **before** its `TopKCollector`. Each
@@ -445,10 +441,13 @@ if a global winner were below its owner's local K, that owner alone would contai
 rows. Exact shard totals are summed; global `eq` is returned only when every shard is exact and the sum
 does not cross the threshold, otherwise the result is the request threshold with relation `gte`.
 
-Rich CPU profiles work in a single engine and an in-process cluster. The current gRPC rank wire
-carries only the static program; a remote shard refuses any other profile with a typed 501 before
-flight. It never falls back to static scoring. Shipping model identity and fingerprint attestation
-across that compatibility boundary requires a separate decision.
+Rich CPU profiles work in every topology (ADR-163). Each ranked gRPC request carries the selected
+profile name and semantic fingerprint; the shard resolves that exact identity from its own
+startup-loaded registry before scoring. Top-K replies and terminal batch/exhaustive summaries echo
+the identity, and the coordinator rejects missing or divergent attestations before accepting
+results. Model bytes never cross the hot wire. Operators distribute the same strict profile file to
+the coordinator and every shard; a rollout mistake fails the request instead of falling back to
+static scoring.
 
 Cluster `/v2/_search` then performs query-then-fetch: final winner IDs are grouped by owning logical
 position and only their source is fetched. Missing source, placement-generation drift, a

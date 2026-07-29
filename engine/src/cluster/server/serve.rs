@@ -5,6 +5,15 @@ use super::{
 };
 
 impl ShardServer {
+    /// Install the immutable ranking-profile registry used by native ranked
+    /// RPCs. All shard slots on a node share this registry. The default contains
+    /// only `static_v1`.
+    #[must_use]
+    pub fn with_rank_profiles(mut self, profiles: Arc<crate::rank::RankProfiles>) -> Self {
+        self.rank_profiles = profiles;
+        self
+    }
+
     /// Install mesh security (ADR-071): a TLS identity to present and/or the
     /// expected cluster token, applied by every `serve*` method. Unset ⇒ the
     /// historical plaintext/open behavior, byte-identical.

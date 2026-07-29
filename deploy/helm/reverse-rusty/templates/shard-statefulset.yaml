@@ -1,3 +1,8 @@
+{{- $rankingProfilesVolume := not (empty .Values.rankingProfiles.volumeSource) -}}
+{{- if and .Values.rankingProfiles.configMapName $rankingProfilesVolume -}}
+{{- fail "rankingProfiles.configMapName and rankingProfiles.volumeSource are mutually exclusive" -}}
+{{- end -}}
+{{- $rankingProfilesEnabled := or (ne .Values.rankingProfiles.configMapName "") $rankingProfilesVolume -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -62,6 +67,10 @@ spec:
             - --metrics-addr
             - 0.0.0.0:{{ .Values.ports.shardMetrics }}
             {{- end }}
+            {{- if $rankingProfilesEnabled }}
+            - --ranking-profiles-file
+            - /ranking-profiles/{{ .Values.rankingProfiles.key }}
+            {{- end }}
             {{- if .Values.tls.enabled }}
             - --tls-cert
             - /certs/{{ .Values.tls.certFile }}
@@ -110,6 +119,11 @@ spec:
               mountPath: /certs
               readOnly: true
             {{- end }}
+            {{- if $rankingProfilesEnabled }}
+            - name: ranking-profiles
+              mountPath: /ranking-profiles
+              readOnly: true
+            {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -119,6 +133,18 @@ spec:
         - name: certs
           secret:
             secretName: {{ .Values.tls.secretName }}
+        {{- end }}
+        {{- if $rankingProfilesEnabled }}
+        - name: ranking-profiles
+          {{- if .Values.rankingProfiles.configMapName }}
+          configMap:
+            name: {{ .Values.rankingProfiles.configMapName }}
+            items:
+              - key: {{ .Values.rankingProfiles.key }}
+                path: {{ .Values.rankingProfiles.key }}
+          {{- else }}
+          {{- toYaml .Values.rankingProfiles.volumeSource | nindent 10 }}
+          {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

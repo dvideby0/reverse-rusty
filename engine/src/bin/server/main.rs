@@ -54,6 +54,7 @@ mod pit;
 mod state;
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -166,7 +167,12 @@ async fn main() {
         }
     }
 
-    let rank_profiles = match &cli.ranking_profiles_file {
+    let ranking_profiles_file = cli.ranking_profiles_file.clone().or_else(|| {
+        std::env::var_os("RR_RANKING_PROFILES_FILE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    let rank_profiles = match &ranking_profiles_file {
         Some(path) => match reverse_rusty::RankProfiles::load_json(path) {
             Ok(profiles) => profiles,
             Err(error) => {
@@ -185,7 +191,7 @@ async fn main() {
         .collect();
     profile_descriptions.sort_unstable();
     info!(
-        path = ?cli.ranking_profiles_file,
+        path = ?ranking_profiles_file,
         profiles = ?profile_descriptions,
         "ranking profiles active"
     );

@@ -385,11 +385,8 @@ fn cluster_create_job_inner(
                     )
                     .map(|result| result.summary)
                     .map_err(|error| match error {
-                        error @ reverse_rusty::cluster::ShardError::RankProfileUnsupported(_) => {
-                            JobExecutionError::new(
-                                "rank_profile_transport_unsupported",
-                                error.to_string(),
-                            )
+                        error @ reverse_rusty::cluster::ShardError::Protocol(_) => {
+                            JobExecutionError::new("shard_protocol_error", error.to_string())
                         }
                         error => JobExecutionError::generic(error.to_string()),
                     })

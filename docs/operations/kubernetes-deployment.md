@@ -53,12 +53,53 @@ kubectl -n rr create secret generic reverse-rusty-cluster-token --from-literal=R
 kubectl -n rr create secret generic reverse-rusty-auth-token    --from-literal=RR_AUTH_TOKEN="$(openssl rand -hex 32)"
 ```
 
+### 2.1 Optional named ranking profiles
+
+For a registry below Kubernetes's 1 MiB ConfigMap object limit, create one ConfigMap from the
+strict JSON profile file. The chart mounts that same key read-only into the coordinator and every
+shard, which independently validates and logs the compiled fingerprints. The profile format,
+features, scoring, and attestation rules are canonical in the
+[ranking reference](../reference/ranking.md):
+
+```sh
+kubectl -n rr create configmap reverse-rusty-ranking-profiles \
+  --from-file=ranking-profiles.json=/absolute/path/to/ranking-profiles.json
+```
+
+Set `rankingProfiles.configMapName=reverse-rusty-ranking-profiles` at install or upgrade. Leave it
+empty (the default) to use only built-in `static_v1`. The ConfigMap must already exist; the chart
+does not copy model contents into Helm release metadata.
+
+For a larger engine-valid registry, set `rankingProfiles.volumeSource` instead to one complete
+Kubernetes
+[`VolumeSource`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#volume-v1-core)
+whose root contains `ranking-profiles.json`. A ReadOnlyMany PVC or a CSI volume that can mount on
+every shard node is appropriate, for example:
+
+```yaml
+rankingProfiles:
+  key: ranking-profiles.json
+  volumeSource:
+    persistentVolumeClaim:
+      claimName: reverse-rusty-ranking-profiles
+      readOnly: true
+```
+
+`configMapName` and `volumeSource` are mutually exclusive. Keep either source immutable and
+versioned, and roll shards before the coordinator when uninterrupted ranked reads matter. The
+chart's default concurrent workload roll remains correctness-safe, but profile requests can fail
+closed until every pod runs the same identity.
+
 ## 3. Install
 
 ```sh
 helm install rr deploy/helm/reverse-rusty -n rr --create-namespace \
-  --set image.repository=YOUR_REGISTRY/reverse-rusty --set image.tag=0.1.0
+  --set image.repository=YOUR_REGISTRY/reverse-rusty --set image.tag=0.1.0 \
+  --set rankingProfiles.configMapName=reverse-rusty-ranking-profiles
 ```
+
+Omit the final `--set` when named profiles are not configured. For a generic volume source, put
+the values above in a file and pass it with `-f`.
 
 Bring-up is automatic and order-independent: control pods elect a leader; shards start **pending**
 (dict-less, live-but-not-ready); the coordinator's `wait-for-mesh` initContainer blocks until every

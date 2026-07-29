@@ -143,7 +143,8 @@ percentage delta looks larger because the complete static workloads take only ab
 milliseconds for hundreds of titles. This is evidence that feature extraction plus tiny CPU models
 is practical, not a production LambdaMART forecast: tree cost grows with the number and depth of
 paths actually evaluated, and broad match counts multiply that work. Exact numbers, fingerprints,
-commands, and caveats are in [`benchmark-results.txt`](benchmark-results.txt).
+commands, and caveats are in [`benchmark-results.txt`](benchmark-results.txt); profile semantics and
+configuration live in the [ranking reference](../reference/ranking.md).
 
 ---
 

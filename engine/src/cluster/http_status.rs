@@ -10,7 +10,6 @@
 //! | `DuplicateLogicalId` | 409 `logical_id_conflict` | 503 `cluster_unavailable` |
 //! | `PitNotFound` / `StalePit` | 409 `stale_cursor` | **409** `stale_cursor` |
 //! | `PitUnsupported` | 400 `validation_error` | 501 `pit_unsupported` |
-//! | `RankProfileUnsupported` | 400 `validation_error` | 501 `rank_profile_transport_unsupported` |
 //!
 //! The write/admin surface speaks REST conflict semantics: 409 tells the writer
 //! its mutation raced a placement change (or hit an existing id) — re-resolve
@@ -46,10 +45,9 @@ impl ShardError {
             // `PitUnsupported` joins the 400 row (ADR-113 totality — PIT ops
             // never reach the write surface; an unsupported pin is a
             // caller-shape error there).
-            ShardError::Config(_)
-            | ShardError::Admission(_)
-            | ShardError::PitUnsupported(_)
-            | ShardError::RankProfileUnsupported(_) => (400, "validation_error"),
+            ShardError::Config(_) | ShardError::Admission(_) | ShardError::PitUnsupported(_) => {
+                (400, "validation_error")
+            }
             ShardError::Log(_) => (503, "durability_unavailable"),
             ShardError::Remote(_) => (502, "shard_unreachable"),
             ShardError::DictMismatch { .. } => (500, "feature_space_mismatch"),
@@ -111,9 +109,6 @@ impl ClusterRankedError {
             // not stale, not retryable — the feature is absent here.
             ClusterRankedError::Shard(ShardError::PitUnsupported(_)) => {
                 (501, "pit_unsupported", "validation")
-            }
-            ClusterRankedError::Shard(ShardError::RankProfileUnsupported(_)) => {
-                (501, "rank_profile_transport_unsupported", "validation")
             }
             ClusterRankedError::Shard(
                 ShardError::Config(_)
@@ -214,17 +209,6 @@ mod tests {
         assert_eq!(error.write_http_class(), (400, "validation_error"));
         let (status, kind, _) = ClusterRankedError::Shard(error).v2_http_class();
         assert_eq!((status, kind), (501, "pit_unsupported"));
-    }
-
-    #[test]
-    fn rank_profile_transport_unsupported_is_read_501_write_400() {
-        let error = ShardError::RankProfileUnsupported("ltr_v1".into());
-        assert_eq!(error.write_http_class(), (400, "validation_error"));
-        let (status, kind, outcome) = ClusterRankedError::Shard(error).v2_http_class();
-        assert_eq!(
-            (status, kind, outcome),
-            (501, "rank_profile_transport_unsupported", "validation")
-        );
     }
 
     #[test]

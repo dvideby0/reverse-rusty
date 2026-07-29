@@ -85,6 +85,32 @@ cp deploy/cluster.env.example deploy/cluster.env
 $EDITOR deploy/cluster.env          # fill in RR_CLUSTER_TOKEN and RR_AUTH_TOKEN
 ```
 
+### 2.5 Optional named ranking profiles
+
+To use a linear or tree profile, point the Compose overlay at one absolute host file. The same
+read-only file is mounted into the coordinator and every shard; its selected semantic fingerprint
+must agree everywhere. Profile JSON, features, score semantics, and attestation behavior are
+canonical in the [ranking reference](../reference/ranking.md).
+
+```sh
+export RR_RANKING_PROFILES_FILE=/absolute/path/to/ranking-profiles.json
+```
+
+Keep the overlay on every later Compose command:
+
+```sh
+rrc() { docker compose --project-directory . -f deploy/compose.cluster.yml \
+          -f deploy/compose.ranking-profiles.yml --env-file deploy/cluster.env "$@"; }
+```
+
+Omit the overlay entirely when only built-in `static_v1` is needed. The checked-in
+[`ranking-profiles.example.json`](../../deploy/ranking-profiles.example.json) documents the format;
+it is not a trained model. Profiles are startup-loaded: after changing the host file, restart shards
+first and the coordinator last per [the rolling-upgrade procedure](rolling-upgrade.md).
+If §5 adds another shard or replica service, add that service to the overlay with the same
+`x-ranking-profiles` merge. Co-located logical positions need no extra entry because they share one
+profile registry in their hosting `shardserver`.
+
 ## 3. Bootstrap & startup ordering
 
 Every `docker compose` command below needs the same `--project-directory`, `-f`, and `--env-file`
@@ -97,6 +123,8 @@ rrc() { docker compose --project-directory . -f deploy/compose.cluster.yml \
 
 rrc up -d --wait          # start the cluster; --wait blocks until every service is healthy
 ```
+
+If §2.5 enabled named profiles, use its overlay form of `rrc` instead.
 
 `--wait` blocks until every service is healthy. The dependency order the compose encodes:
 

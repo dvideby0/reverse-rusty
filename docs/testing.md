@@ -224,7 +224,9 @@ four historical arguments and optionally accepts `<profile_file> <profile_name>`
 `static_v1`. Profile tests cover strict config admission, pinned fingerprints, title-dependent
 scalar/batch equivalence, unchanged Boolean membership, semantic compound-group counts across
 retrieval-proxy and exact-predicate deduplication, source-driven legacy migration, REST selection,
-and fail-loud unknown profiles.
+fail-loud unknown profiles, real gRPC scalar/batch/exhaustive execution, divergent shard
+fingerprints, and pre-attestation version skew. The behavior under test is canonical in the
+[ranking reference](reference/ranking.md).
 **Commands, arguments, the broader machine-independent invariants, and the dated capture log live
 in one place —
 [`performance/benchmark-results.txt`](performance/benchmark-results.txt); narrative analysis in

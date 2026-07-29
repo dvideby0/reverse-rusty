@@ -79,11 +79,11 @@ normalizes the title, probes the candidate index, and runs exact verification.
   │  Leather …"  │     │  as query)│     │            │     │ sig → [IDs]  │
   └──────────────┘     └───────────┘     └────────────┘     └──────┬───────┘
                                                                    ▼
-  ┌──────────────┐     ┌───────────────────────────────────────────────────┐
-  │   Matched    │◀────│  Exact Verification (integer-only, per candidate): │
-  │  Query IDs   │     │  1. common-mask gate (2 cheap mask checks)        │
-  │  [42, 17]    │     │  2. required  3. forbidden  4. any-of groups      │
-  └──────────────┘     └───────────────────────────────────────────────────┘
+  ┌──────────────┐     ┌──────────────────┐     ┌────────────────────────────┐
+  │   Returned   │◀────│ Optional Rank +  │◀────│ Exact Integer Verification │
+  │  Query IDs   │     │ Bounded Delivery │     │ mask → required → forbidden │
+  │  [42, 17]    │     │ score ↓, ID ↑    │     │ → any-of / phrase checks    │
+  └──────────────┘     └──────────────────┘     └────────────────────────────┘
 ```
 
 *The authoritative engineering rendering of this pipeline lives in
@@ -110,6 +110,9 @@ Each links to the design doc that details it:
 - **LSM write path** — the WAL, memtable, immutable mmap'd segments, and compaction provide the write,
   recovery, and snapshot-read model.
   ([design/ingestion-and-updates.md](docs/design/ingestion-and-updates.md) §3)
+- **Versioned CPU ranking profiles** — optional static, linear, or bounded tree scoring runs only
+  after Boolean truth, with deterministic integer scores and exact top-K delivery in every topology.
+  ([ranking reference](docs/reference/ranking.md))
 
 The lossless-signature contract is stated in [`AGENTS.md`](AGENTS.md) and developed in
 [`docs/design/README.md`](docs/design/README.md) §2.
@@ -146,6 +149,9 @@ Full endpoint and flag reference: [`docs/reference/api.md`](docs/reference/api.m
 [`docs/reference/dsl.md`](docs/reference/dsl.md). The four documented deployment modes
 (single-node, in-process cluster, Compose, and Helm), their bring-up commands, and their constraints:
 [`docs/operations/deployment-modes.md`](docs/operations/deployment-modes.md).
+For title-dependent ordering of confirmed matches, see the
+[`ranking-profile reference`](docs/reference/ranking.md); the built-in `static_v1` profile requires
+no additional configuration.
 
 Use it as a library:
 

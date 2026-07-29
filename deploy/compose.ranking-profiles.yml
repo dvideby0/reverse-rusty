@@ -1,0 +1,28 @@
+# Optional ranking-profile overlay for deploy/compose.cluster.yml (ADR-163).
+# Canonical profile format and topology contract: docs/reference/ranking.md.
+#
+# RR_RANKING_PROFILES_FILE is a HOST path to one strict profile JSON file. The
+# overlay mounts that exact file read-only at the same container path and points
+# the coordinator plus every shard node at it. Request/reply fingerprints still
+# fail closed if a custom topology omits a node or mounts different contents.
+#
+# docker compose --project-directory . \
+#   -f deploy/compose.cluster.yml \
+#   -f deploy/compose.ranking-profiles.yml \
+#   --env-file deploy/cluster.env up -d --wait
+
+x-ranking-profiles: &ranking-profiles
+  environment:
+    RR_RANKING_PROFILES_FILE: /config/ranking-profiles.json
+  volumes:
+    - ${RR_RANKING_PROFILES_FILE:?set RR_RANKING_PROFILES_FILE to the host profile JSON}:/config/ranking-profiles.json:ro
+
+services:
+  shard0:
+    <<: *ranking-profiles
+  shard1:
+    <<: *ranking-profiles
+  shard2:
+    <<: *ranking-profiles
+  coordinator:
+    <<: *ranking-profiles

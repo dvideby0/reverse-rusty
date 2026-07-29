@@ -117,7 +117,7 @@ pub(crate) fn rank_spec_from_proto(p: RankSpec) -> crate::rank::CompiledRankSpec
     crate::rank::CompiledRankSpec::new(priority_key, boosts)
 }
 
-/// Typed bounded rank program to/from the additive ADR-110 wire.
+/// Typed bounded rank program to the fingerprint-attested ranked wire.
 pub(crate) fn rank_program_to_proto(spec: &crate::rank::CompiledRankProgram) -> RankProgram {
     RankProgram {
         use_priority: spec.uses_priority(),
@@ -125,14 +125,67 @@ pub(crate) fn rank_program_to_proto(spec: &crate::rank::CompiledRankProgram) -> 
             .boosts()
             .map(|(tag_id, weight)| RankBoost { tag_id, weight })
             .collect(),
+        profile: Some(rank_profile_identity_to_proto(spec)),
     }
 }
 
-pub(crate) fn rank_program_from_proto(p: RankProgram) -> crate::rank::CompiledRankProgram {
-    crate::rank::CompiledRankProgram::new_static(
+/// Decode a ranked wire program against this node's immutable profile registry.
+///
+/// An absent identity is the legacy static-only request and remains safe to
+/// accept during a shards-first rolling upgrade. A present identity must name
+/// an installed profile with the exact semantic fingerprint; model drift fails
+/// before any score is produced.
+pub(crate) fn rank_program_from_proto(
+    p: RankProgram,
+    profiles: &crate::rank::RankProfiles,
+) -> Result<crate::rank::CompiledRankProgram, String> {
+    let (name, fingerprint) = if let Some(identity) = p.profile {
+        if identity.name.is_empty() {
+            return Err("rank profile identity has an empty name".into());
+        }
+        (identity.name, identity.fingerprint)
+    } else {
+        let name = crate::rank::STATIC_RANK_PROFILE.to_string();
+        let fingerprint = profiles.fingerprint(&name).ok_or_else(|| {
+            "built-in static_v1 ranking profile is missing from the shard registry".to_string()
+        })?;
+        (name, fingerprint)
+    };
+    let registered = profiles
+        .get(&name)
+        .ok_or_else(|| format!("ranking profile `{name}` is not installed on this shard"))?;
+    if registered.fingerprint != fingerprint {
+        return Err(format!(
+            "ranking profile `{name}` fingerprint mismatch: coordinator \
+             fnv1a64:{fingerprint:016x} != shard fnv1a64:{:016x}",
+            registered.fingerprint
+        ));
+    }
+    Ok(crate::rank::CompiledRankProgram::new(
+        name,
+        registered.program.clone(),
+        registered.fingerprint,
         p.use_priority,
         p.boosts.into_iter().map(|b| (b.tag_id, b.weight)).collect(),
-    )
+    ))
+}
+
+pub(crate) fn rank_profile_identity_to_proto(
+    spec: &crate::rank::CompiledRankProgram,
+) -> RankProfileIdentity {
+    RankProfileIdentity {
+        name: spec.profile_name().to_string(),
+        fingerprint: spec.profile_fingerprint(),
+    }
+}
+
+pub(crate) fn rank_profile_identity_matches(
+    identity: Option<&RankProfileIdentity>,
+    spec: &crate::rank::CompiledRankProgram,
+) -> bool {
+    identity.is_some_and(|identity| {
+        identity.name == spec.profile_name() && identity.fingerprint == spec.profile_fingerprint()
+    })
 }
 
 pub(crate) fn total_hits_to_proto(total: crate::result::TotalHits) -> BoundedTotalHits {
@@ -272,7 +325,10 @@ pub(crate) fn translog_entry_from_mutation(
 
 #[cfg(test)]
 mod tests {
-    use super::{stats_from_engine, stats_to_engine, EngineStats, MatchStats};
+    use super::{
+        rank_profile_identity_matches, rank_program_from_proto, rank_program_to_proto,
+        stats_from_engine, stats_to_engine, EngineStats, MatchStats, RankBoost, RankProgram,
+    };
 
     // Distinct values, so any field swap in either mapper changes the result — a pure
     // round-trip alone would miss a *symmetric* transposition present in both directions,
@@ -382,6 +438,95 @@ mod tests {
     fn round_trip_is_identity() {
         let e = engine_sample();
         assert_eq!(stats_to_engine(stats_from_engine(e)), e);
+    }
+
+    fn profiles(intercept: i64) -> crate::rank::RankProfiles {
+        crate::rank::RankProfiles::from_json_slice(
+            format!(
+                r#"{{
+                  "version":1,
+                  "profiles":{{
+                    "linear_v1":{{
+                      "kind":"linear",
+                      "intercept":{intercept},
+                      "weights":[{{"feature":"query_positive_terms","weight":7}}]
+                    }}
+                  }}
+                }}"#
+            )
+            .as_bytes(),
+        )
+        .expect("valid profile registry")
+    }
+
+    fn compiled_profile(profiles: &crate::rank::RankProfiles) -> crate::rank::CompiledRankProgram {
+        let mut tags = crate::tagdict::TagDict::new();
+        tags.mark_finalized();
+        crate::rank::compile_rank_program_with_profiles(
+            &tags,
+            &crate::rank::RankProgramSpec {
+                profile: Some("linear_v1".into()),
+                priority_field: None,
+                boosts: Vec::new(),
+            },
+            profiles,
+        )
+        .expect("compiled profile")
+    }
+
+    #[test]
+    fn rank_program_round_trips_through_matching_profile_registry() {
+        let profiles = profiles(3);
+        let expected = compiled_profile(&profiles);
+        let decoded =
+            rank_program_from_proto(rank_program_to_proto(&expected), &profiles).expect("attested");
+        assert_eq!(decoded.profile_name(), "linear_v1");
+        assert_eq!(
+            decoded.profile_fingerprint(),
+            expected.profile_fingerprint()
+        );
+        assert!(rank_profile_identity_matches(
+            rank_program_to_proto(&decoded).profile.as_ref(),
+            &expected
+        ));
+    }
+
+    #[test]
+    fn rank_program_rejects_unknown_or_divergent_profile_identity() {
+        let coordinator = profiles(3);
+        let shard = profiles(4);
+        let expected = compiled_profile(&coordinator);
+        let wire = rank_program_to_proto(&expected);
+        let error =
+            rank_program_from_proto(wire.clone(), &shard).expect_err("fingerprint must differ");
+        assert!(error.contains("fingerprint mismatch"), "{error}");
+
+        let mut unknown = wire;
+        unknown.profile.as_mut().expect("identity").name = "missing_v1".into();
+        let error =
+            rank_program_from_proto(unknown, &coordinator).expect_err("profile must be installed");
+        assert!(error.contains("not installed"), "{error}");
+    }
+
+    #[test]
+    fn legacy_rank_program_decodes_only_as_static_v1() {
+        let profiles = crate::rank::RankProfiles::default();
+        let decoded = rank_program_from_proto(
+            RankProgram {
+                use_priority: true,
+                boosts: vec![RankBoost {
+                    tag_id: 7,
+                    weight: 11,
+                }],
+                profile: None,
+            },
+            &profiles,
+        )
+        .expect("legacy static request");
+        assert!(decoded.is_static_profile());
+        assert_eq!(decoded.profile_name(), crate::rank::STATIC_RANK_PROFILE);
+        assert!(decoded.uses_priority());
+        assert_eq!(decoded.boosts().collect::<Vec<_>>(), vec![(7, 11)]);
     }
 
     // Codex review (Finding 2): a translog `Add` replay must reproduce the LOGGED version

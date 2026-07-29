@@ -31,6 +31,7 @@ impl ShardServer {
         ShardServer {
             norm,
             config,
+            rank_profiles: Arc::new(crate::rank::RankProfiles::default()),
             data_dir: None,
             shards,
             node_dict,
@@ -54,6 +55,7 @@ impl ShardServer {
         ShardServer {
             norm,
             config,
+            rank_profiles: Arc::new(crate::rank::RankProfiles::default()),
             data_dir: None,
             shards: Arc::new(RwLock::new(HashMap::new())),
             node_dict: Arc::new(ArcSwapOption::from(None)),
@@ -131,6 +133,7 @@ impl ShardServer {
         Ok(ShardServer {
             norm,
             config,
+            rank_profiles: Arc::new(crate::rank::RankProfiles::default()),
             data_dir: Some(data_dir),
             shards: Arc::new(RwLock::new(slots)),
             node_dict,
@@ -154,6 +157,7 @@ impl ShardServer {
         ShardServer {
             norm,
             config,
+            rank_profiles: Arc::new(crate::rank::RankProfiles::default()),
             data_dir: Some(data_dir),
             shards: Arc::new(RwLock::new(HashMap::new())),
             node_dict: Arc::new(ArcSwapOption::from(None)),
@@ -198,6 +202,7 @@ impl ShardServer {
         Ok(ShardServer {
             norm,
             config,
+            rank_profiles: Arc::new(crate::rank::RankProfiles::default()),
             data_dir: Some(data_dir),
             shards,
             node_dict,

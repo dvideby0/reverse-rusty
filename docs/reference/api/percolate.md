@@ -1,6 +1,8 @@
 # Percolate — REST API
 
-> Part of the [REST API reference](../api.md). Query language: [`dsl.md`](../dsl.md).
+> Part of the [REST API reference](../api.md). Query language: [`dsl.md`](../dsl.md). Ranking
+> profile semantics, JSON configuration, features, and topology behavior:
+> [`ranking.md`](../ranking.md).
 
 ## `POST /v2/_search` — Exact bounded ranked percolation (ADR-107/108/110/127)
 
@@ -102,15 +104,11 @@ cluster configuration returns 503. `allow_partial_results=true` remains a 400. M
 the same structured 400 envelope; missing/wrong content type remains 415 and an oversized body
 remains 413 rather than being flattened into a generic validation status.
 
-The optional rank program accepts `profile`, `priority_field="priority"`, and additive integer tag
-boosts. `profile` defaults to the built-in `static_v1`; operator-loaded `linear` and
-`tree_ensemble` profiles add title-dependent relevance, producing
-`profile relevance + priority + matching boosts`. Profile arithmetic is saturating integer math and
-ties remain `_id` ascending. Unknown profiles return `unknown_rank_profile`; unknown priority fields
-return `unsupported_rank_field`. K bounds retained and returned hits, but every confirmed match is
-still scored. Non-static profiles are supported in single-node and in-process cluster modes; a
-remote/gRPC coordinator fails with `501 rank_profile_transport_unsupported` rather than changing
-scores. See [ADR-162](../../decisions/adr-162-versioned-cpu-ranking-profiles.md).
+The optional native rank program accepts `profile`, `priority_field="priority"`, and additive
+integer tag boosts. `profile` defaults to `static_v1`; unknown profiles return
+`unknown_rank_profile`, and unknown priority fields return `unsupported_rank_field`. The canonical
+score formula, profile types, feature meanings, evaluation-cost boundary, and fail-closed
+distributed contract are in the [ranking reference](../ranking.md).
 `result_mode="all"` or `"terminated"`,
 `allow_partial_results=true`, `from`, `documents`, and `query` return explicit 400s.
 
@@ -233,6 +231,7 @@ The full native shape remains available:
   "result_mode": "all",
   "filter": {"tenant": ["acme"]},
   "rank": {
+    "profile": "linear_v1",
     "priority_field": "priority",
     "boosts": [{"key": "tier", "value": "gold", "boost": 25000}]
   },
@@ -250,9 +249,10 @@ duplicate schema controls, explicit nulls, malformed JSON, and wrong types are s
 errors. Missing/wrong JSON content type is 415, and the endpoint rejects a body larger than 1 MiB
 with 413 before JSON deserialization.
 
-Named non-static profiles execute in single-node and in-process cluster jobs. A remote/gRPC job
-cannot carry the model program: it may be admitted asynchronously, then records a terminal
-`rank_profile_transport_unsupported` failure before any rank RPC. Use `static_v1` in that topology.
+The full-shape example assumes `linear_v1` has been loaded from the checked-in example registry.
+Named-profile selection and fail-closed terminal attestation follow the canonical
+[ranking contract](../ranking.md); profile or transport failures never produce a successful partial
+completion.
 
 The execution deadline can be supplied in the body or query string as native `timeout_ms` or as
 ES/OpenSearch-style `timeout`, but aliases and locations are mutually exclusive. `timeout` is a
@@ -683,7 +683,10 @@ envelope (applied to every document in the batch).
 By default hits come back in the engine's order (a boolean candidate set — the engine is a recall-first
 matcher, not a ranker). Attach an optional `rank` block to **order** the hits before pagination. Ranking
 is a pure post-match step: it only reorders + paginates the already-final set — it never adds or drops a
-match. A `rank` block has two optional parts:
+match. This compatibility block is the static business-policy API; named title-dependent profiles
+belong to the native v2 and exhaustive surfaces documented in the
+[ranking reference](../ranking.md#2-selecting-a-profile). A compatibility `rank` block has two
+optional parts:
 
 - **`priority_key`** — the name of a [tag](documents.md#per-query-metadata-tags-adr-049) whose **numeric
   value** is the query's base priority (a query tagged `priority=50` scores 50; a non-numeric or absent

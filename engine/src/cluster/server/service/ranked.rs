@@ -26,7 +26,7 @@ pub(super) fn percolate_top_k(
     let rank = req
         .rank
         .ok_or_else(|| Status::invalid_argument("bounded top-k requires a rank program"))?;
-    let program = proto::rank_program_from_proto(rank);
+    let program = decode_rank_program(server, rank)?;
     let pred = proto::tag_predicate_from_proto(req.filter);
     let (slot, state) = server.loaded_slot(req.shard_id)?;
     let options = TopKOptions {
@@ -76,6 +76,7 @@ pub(super) fn percolate_top_k(
         requested_size: req.size,
         placement_generation: ownership.generation().get(),
         num_shards: ownership.num_shards(),
+        rank_profile: Some(proto::rank_profile_identity_to_proto(&program)),
     };
     let encoded = reverse_rusty_shard_proto::encoded_len(&reply);
     if let Err(status) = server.check_result_bytes(encoded) {
@@ -91,6 +92,19 @@ pub(super) fn percolate_top_k(
         .observe(ShardRpc::PercolateTopK, started.elapsed());
     slot.broad.record(&ranked.stats);
     Ok(Response::new(reply))
+}
+
+pub(super) fn decode_rank_program(
+    server: &ShardServer,
+    rank: proto::RankProgram,
+) -> Result<crate::rank::CompiledRankProgram, Status> {
+    proto::rank_program_from_proto(rank, &server.rank_profiles).map_err(|detail| {
+        crate::cluster::ranked_wire::attach(
+            Status::failed_precondition(detail),
+            crate::cluster::ranked_wire::RankedWireCode::Protocol,
+            None,
+        )
+    })
 }
 
 pub(super) fn fetch_matches(

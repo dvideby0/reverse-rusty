@@ -199,11 +199,22 @@ message PercolateReply {
   bool ownership_applied = 5;
 }
 
+// Semantic identity of one startup-validated ranking profile. The coordinator
+// sends it with every native ranked request and the shard echoes it only after
+// resolving the exact same local model. Presence, rather than a sentinel
+// fingerprint value, distinguishes the additive protocol from the legacy
+// static-only wire.
+message RankProfileIdentity {
+  string name = 1;
+  uint64 fingerprint = 2;
+}
+
 // Integer-only bounded rank program. The coordinator resolves boost tags once
 // against the shared frozen tag space; the shard never sees request strings.
 message RankProgram {
   bool use_priority = 1;
   repeated RankBoost boosts = 2;
+  RankProfileIdentity profile = 3;
 }
 
 message PercolateTopKRequest {
@@ -248,6 +259,7 @@ message PercolateTopKReply {
   uint32 requested_size = 7;
   uint64 placement_generation = 8;
   uint32 num_shards = 9;
+  RankProfileIdentity rank_profile = 10;
 }
 
 message PercolateAllRequest {
@@ -284,6 +296,7 @@ message ExhaustiveSummary {
   bool ownership_applied = 6;
   uint64 placement_generation = 7;
   uint32 num_shards = 8;
+  RankProfileIdentity rank_profile = 9;
 }
 
 message PercolateAllFrame {
@@ -338,6 +351,7 @@ message PercolateTopKBatchSummary {
   MatchStats stats = 2;
   uint64 placement_generation = 3;
   uint32 num_shards = 4;
+  RankProfileIdentity rank_profile = 5;
 }
 
 message PercolateTopKBatchFrame {

@@ -21,7 +21,7 @@ use crate::result::{
 };
 
 use super::super::ShardServer;
-use super::ranked::{deadline_from_remaining, read_status};
+use super::ranked::{deadline_from_remaining, decode_rank_program, read_status};
 
 pub(super) fn percolate_top_k_batch(
     server: &ShardServer,
@@ -55,7 +55,7 @@ pub(super) fn percolate_top_k_batch(
     let rank = req
         .rank
         .ok_or_else(|| Status::invalid_argument("bounded batch top-k requires a rank program"))?;
-    let program = proto::rank_program_from_proto(rank);
+    let program = decode_rank_program(server, rank)?;
     let pred = proto::tag_predicate_from_proto(req.filter);
     // Decode + node-validate EVERY context fail-closed: a mixed-generation
     // batch must refuse loudly here, never fall through to silent
@@ -158,6 +158,7 @@ pub(super) fn percolate_top_k_batch(
                 stats: Some(proto::stats_from_engine(stats)),
                 placement_generation: generation,
                 num_shards,
+                rank_profile: Some(proto::rank_profile_identity_to_proto(&program)),
             },
         )),
     };

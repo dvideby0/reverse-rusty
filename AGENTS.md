@@ -120,6 +120,7 @@ MATCH
         → main/hot/broad/universal candidate lanes
         → integer exact verification
         → metadata + unique ownership
+        → optional integer ranking
         → all/top-K/exhaustive delivery
 ```
 
@@ -135,7 +136,7 @@ This is a responsibility map, not a duplicated API reference.
 |---|---|---|
 | DSL, normalization, feature/tag dictionaries, vocabulary | `engine/src/{dsl,normalize,dict,tagdict,vocab,corpus}.rs` and matching submodules | [`docs/design/normalization.md`](docs/design/normalization.md) |
 | Compilation, anchors, candidate index, exact verification, explain | `engine/src/{compile,index,filter,exact,explain}.rs` and submodules | [`docs/design/matching.md`](docs/design/matching.md) |
-| Ranking, collectors, ownership, PIT, exhaustive delivery | `engine/src/{rank,collect,result,ownership,pit,delivery,broker}.rs` and submodules | [`docs/design/matching.md`](docs/design/matching.md), [`docs/reference/api/percolate.md`](docs/reference/api/percolate.md) |
+| Ranking, collectors, ownership, PIT, exhaustive delivery | `engine/src/{rank,collect,result,ownership,pit,delivery,broker}.rs` and submodules | [`docs/design/matching.md`](docs/design/matching.md), [`docs/reference/ranking.md`](docs/reference/ranking.md), [`docs/reference/api/percolate.md`](docs/reference/api/percolate.md) |
 | Mutable engine, snapshots, broad/hot batches, compaction | `engine/src/segment.rs`, `engine/src/segment/` | [`docs/design/ingestion-and-updates.md`](docs/design/ingestion-and-updates.md) |
 | Durable formats, sources, backup, WAL | `engine/src/storage.rs`, `engine/src/storage/`, `engine/src/wal.rs`, `engine/src/wal/` | [`docs/design/ingestion-and-updates.md`](docs/design/ingestion-and-updates.md), [`docs/operations/rolling-upgrade.md`](docs/operations/rolling-upgrade.md) |
 | Cluster placement, routing, durability, control, transport, recovery | `engine/src/cluster.rs`, `engine/src/cluster/` | [`docs/design/clustering-and-scaling.md`](docs/design/clustering-and-scaling.md) |
@@ -153,7 +154,8 @@ implementations or test families. Do not add indirection solely to satisfy the n
 |---|---|
 | Understand the system or assess false-negative risk | [`docs/design/README.md`](docs/design/README.md) |
 | Change parsing, normalization, aliases, or feature IDs | [`docs/design/normalization.md`](docs/design/normalization.md) |
-| Change anchors, classes, candidate retrieval, exact matching, tags, or ranking | [`docs/design/matching.md`](docs/design/matching.md) |
+| Change anchors, classes, candidate retrieval, exact matching, or tags | [`docs/design/matching.md`](docs/design/matching.md) |
+| Change ranking profiles, features, scoring, or loading | [`docs/design/matching.md`](docs/design/matching.md), [`docs/reference/ranking.md`](docs/reference/ranking.md) |
 | Change ingest, flush, compaction, persistence, backup, or formats | [`docs/design/ingestion-and-updates.md`](docs/design/ingestion-and-updates.md) |
 | Change sharding, routing, replication, control, recovery, or resize | [`docs/design/clustering-and-scaling.md`](docs/design/clustering-and-scaling.md) |
 | Change the REST API or DSL contract | [`docs/reference/api.md`](docs/reference/api.md), [`docs/reference/dsl.md`](docs/reference/dsl.md) |

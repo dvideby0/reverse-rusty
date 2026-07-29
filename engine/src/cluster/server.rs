@@ -22,6 +22,7 @@ use crate::compile::{extract_readonly, Extracted};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
+use crate::rank::RankProfiles;
 use crate::segment::PlacedQuery;
 use crate::tagdict::TagDict;
 
@@ -168,6 +169,11 @@ fn single_slot(slot: Arc<ShardSlot>) -> ShardMap {
 pub struct ShardServer {
     norm: Arc<Normalizer>,
     config: EngineConfig,
+    /// Immutable node-local profile registry. Ranked requests carry a semantic
+    /// identity and resolve through this registry before scoring; replies echo
+    /// the resolved identity so the coordinator can reject old or divergent
+    /// peers instead of accepting different scores.
+    rank_profiles: Arc<RankProfiles>,
     /// `Some` ⇒ a **durable** node: its shard persists segments under this dir (ADR-035), so
     /// the node can serve `FetchSegments` (stream its segments to a recovering peer) and accept
     /// `RecoverFrom` (pull a peer's segments + attach). `None` ⇒ in-memory (today's default).

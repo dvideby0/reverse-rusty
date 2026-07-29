@@ -34,6 +34,11 @@ The two local modes need only the Rust toolchain, `curl`, and `jq`. The two remo
 same topology expressed twice (Compose for a single host, Helm for Kubernetes) — one image, three
 binaries, role chosen by command.
 
+Named linear and tree ranking profiles are supported in all four modes. Their canonical scoring,
+configuration, and cross-topology contract is in the
+[ranking reference](../reference/ranking.md); the Compose and Kubernetes runbooks own the exact
+remote mount commands.
+
 ## 2. The supported REST surface (the M1 contract)
 
 Every mode serves, and `local-smoke.sh` asserts end-to-end on every PR:
@@ -90,7 +95,6 @@ is where the trade-off and the follow-on path live.
 | **RF>1 in the Helm chart** | the chart models RF=1; `replicationFactor` is documentation-only (the *engine's* replication is built — Compose can run RF=2 by hand, [runbook §5](cluster-deployment.md)) | [ADR-084](../decisions/adr-084-kubernetes-helm-health.md); [roadmap](../roadmap.md#kubernetes-operator-and-rf1-topology) |
 | **Online / cross-process resize** | `/_cluster/resize` is in-process blue/green only; the remote topology changes shard count by redeploy | [ADR-078](../decisions/adr-078-cluster-resize.md); [roadmap](../roadmap.md#automatic-and-remote-cluster-resize) |
 | **Custom vocabulary on the remote topology** | unsupported: shard servers run the stock normalizer and the wire ships only dictionaries, so `--vocab-file` and live vocabulary changes are refused; use an in-process cluster for custom vocabulary | [ADR-076](../decisions/adr-076-cluster-multiword-aliases-vocab-shipping.md) |
-| **Non-static ranking on the remote topology** | the gRPC rank wire carries only `static_v1`; linear/tree profiles fail with 501 instead of silently changing scores. Use single-node or an in-process cluster until model distribution and fingerprint attestation ship | [ADR-162](../decisions/adr-162-versioned-cpu-ranking-profiles.md) |
 | **Cross-shard backup barrier** | a remote (stateless-coordinator) cluster has per-shard-consistent backups, no global barrier; consistent whole-cluster backup requires quiescence | [ADR-079](../decisions/adr-079-backup-restore.md); [roadmap](../roadmap.md#backup-and-restore-as-a-cluster-service) |
 | **Representative-corpus and real-cluster proof** | the durable 20M-query K=8 soak shipped in ADR-104; a production corpus and real Kubernetes failure matrix remain open | [ADR-065](../decisions/adr-065-distributed-v1-graduation.md); [roadmap](../roadmap.md#priority-1--real-world-acceptance-evidence) |
 | **mTLS / per-RPC authz** | the mesh uses one shared token + server TLS; mutual TLS and per-RPC authorization are post-v1 | [ADR-071](../decisions/adr-071-grpc-tls-auth.md); [roadmap](../roadmap.md#security-hardening-beyond-the-v1-trust-model) |

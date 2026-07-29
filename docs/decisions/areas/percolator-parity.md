@@ -29,6 +29,7 @@ Metadata filtering, ranking, API compatibility, aliases, and other production pe
 | [134](../adr-134-exhaustive-job-stream-api-contract.md) | Exhaustive-job stream API contract | Makes the single-consumer NDJSON route strict, cache-safe, and explicitly native. | Accepted |
 | [135](../adr-135-mpercolate-api-contract.md) | Compatibility batch-percolate API contract | Makes full-result batches strict, ES/OS-familiar where truthful, and generation-consistent during enrichment. | Accepted |
 | [162](../adr-162-versioned-cpu-ranking-profiles.md) | Versioned CPU ranking profiles | Adds fingerprinted static, linear, and quantized-tree profiles after exact matching. | Accepted |
+| [163](../adr-163-distributed-ranking-profile-attestation.md) | Distributed ranking-profile attestation | Resolves and echoes the selected semantic fingerprint across every ranked gRPC path. | Accepted |
 
 ---
 

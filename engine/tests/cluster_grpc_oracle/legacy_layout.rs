@@ -109,6 +109,7 @@ impl ShardService for LegacyOwnershipServer {
             requested_size: request.size,
             placement_generation: self.placement_generation,
             num_shards: self.num_shards,
+            rank_profile: None,
         }))
     }
     type PercolateAllStream =
@@ -382,6 +383,65 @@ fn distributed_top_k_refuses_pre_adr_110_peer() {
     assert!(matches!(
         error,
         ClusterRankedError::Shard(ShardError::Remote(_))
+    ));
+}
+
+/// A pre-ADR-163 shard can understand the bounded top-K RPC but cannot attest
+/// which ranking profile produced its scores. Even the default static profile
+/// must fail closed so a mixed-version mesh cannot present unverified ranking.
+#[test]
+fn distributed_top_k_refuses_pre_adr_163_profile_echo() {
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_with(&[], &norm);
+    let tag_dict = empty_tag_dict();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let endpoint = {
+        let _enter = rt.enter();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let address = incoming.local_addr().expect("address");
+        let service = ShardServiceServer::new(LegacyOwnershipServer {
+            dict_fp: dict.fingerprint(),
+            tag_fp: tag_dict.fingerprint(),
+            placement_generation: 1,
+            num_shards: 1,
+            top_k_delay: Some(Duration::ZERO),
+        });
+        rt.spawn(
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming),
+        );
+        wait_until_listening(address);
+        format!("http://{address}")
+    };
+    let cluster = ClusterEngine::connect_remote(
+        norm,
+        dict,
+        tag_dict,
+        &ClusterConfig {
+            num_shards: 1,
+            ..ClusterConfig::default()
+        },
+        &[endpoint],
+        rt.handle(),
+    )
+    .expect("legacy bounded peer still passes the ownership handshake");
+    let program = cluster
+        .compile_rank_program(&reverse_rusty::RankProgramSpec::default())
+        .expect("rank program");
+    let error = cluster
+        .try_percolate_filtered_top_k(
+            "acme chrome",
+            &[],
+            reverse_rusty::TopKOptions::default(),
+            &program,
+            None,
+        )
+        .expect_err("missing profile echo must be refused");
+    assert!(matches!(
+        error,
+        ClusterRankedError::Shard(ShardError::Protocol(ref detail))
+            if detail.contains("profile attestation")
     ));
 }
 
