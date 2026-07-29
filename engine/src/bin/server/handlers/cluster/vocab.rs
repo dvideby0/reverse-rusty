@@ -9,24 +9,25 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State},
+    extract::State,
     response::{IntoResponse, Response},
     Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tracing::{info, instrument};
 
 use reverse_rusty::config::EngineConfig;
-use reverse_rusty::vocab::AliasSummary;
 
 use crate::handlers::alias::{
-    acquire_alias_import_permit, acquire_alias_read_permit, alias_import_error_response,
-    alias_import_success, finish_alias_import_response, finish_alias_read_worker,
-    serialize_aliases, AliasImportTransport, AliasReadTransport,
+    acquire_alias_import_permit, acquire_alias_learn_apply_permit, acquire_alias_read_permit,
+    alias_import_error_response, alias_import_success, alias_learn_apply_error_response,
+    alias_learn_apply_success, finish_alias_import_response, finish_alias_learn_apply_response,
+    finish_alias_read_worker, serialize_aliases, AliasImportTransport, AliasLearnApplyTransport,
+    AliasReadTransport,
 };
 use crate::handlers::vocab::{
     acquire_vocab_learn_apply_permit, acquire_vocab_read_permit, acquire_vocab_write_permit,
-    default_min_count, execute_vocab_learn, finish_vocab_learn_apply_response, finish_vocab_worker,
+    execute_vocab_learn, finish_vocab_learn_apply_response, finish_vocab_worker,
     finish_vocab_write_response, serialize_vocab, vocab_learn_apply_error_response,
     vocab_learn_apply_success, vocab_write_error_response, vocab_write_success,
     VocabLearnApplyTransport, VocabLearnTransport, VocabReadTransport, VocabWriteTransport,
@@ -180,15 +181,6 @@ pub(crate) async fn cluster_get_aliases(
     finish_alias_read_worker(&state.prom, worker.await)
 }
 
-#[derive(Serialize)]
-struct ClusterAliasApplyResponse {
-    acknowledged: bool,
-    activated: usize,
-    /// Live queries rebuilt by the apply (the cluster's `recompiled` analogue).
-    rebuilt: usize,
-    summary: AliasSummary,
-}
-
 /// POST /_vocab/aliases/import — import a Solr/Lucene synonym file into the
 /// registry and apply via the cluster rebuild (ADR-060 at the cluster).
 #[instrument(skip_all)]
@@ -237,41 +229,45 @@ pub(crate) async fn cluster_import_aliases(
     finish_alias_import_response(&state.prom, response)
 }
 
-#[derive(Deserialize, Default)]
-pub(crate) struct ClusterAliasLearnQuery {
-    #[serde(default = "default_min_count")]
-    min_count: usize,
-}
-
 /// POST /_vocab/aliases/learn_and_apply — learn alias candidates from the
 /// cluster's own stored queries and apply (conservative auto-activation, ADR-060).
 #[instrument(skip_all)]
 pub(crate) async fn cluster_learn_aliases(
     State(state): State<Arc<ClusterAppState>>,
-    Query(q): Query<ClusterAliasLearnQuery>,
+    transport: AliasLearnApplyTransport,
 ) -> Response {
-    let result = {
-        let _w = state.write_serial.lock();
-        let mut cluster = state.cluster.write();
-        cluster.learn_aliases_and_apply(q.min_count)
+    let (_duration, started, min_count) = transport.into_parts();
+    let permit = match acquire_alias_learn_apply_permit(&state.stats_permits, &state.prom).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
     };
-    match result {
-        Ok(report) => {
+    let work_state = Arc::clone(&state);
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _w = work_state.write_serial.lock();
+        let mut cluster = work_state.cluster.write();
+        cluster.learn_aliases_and_apply(min_count)
+    });
+    let response = match worker.await {
+        Ok(Ok(report)) => {
             info!(
                 activated = report.activated,
-                rebuilt = report.recompiled,
+                recompiled = report.recompiled,
                 "cluster alias learn-and-apply complete"
             );
-            Json(ClusterAliasApplyResponse {
-                acknowledged: true,
-                activated: report.activated,
-                rebuilt: report.recompiled,
-                summary: report.summary,
-            })
-            .into_response()
+            alias_learn_apply_success(started, report)
         }
-        Err(e) => shard_error_response("alias learn refused", &e),
-    }
+        Ok(Err(error)) => shard_error_response("alias learn-and-apply not acknowledged", &error),
+        Err(join_error) => {
+            tracing::error!(error = %join_error, "cluster alias learn-and-apply worker failed");
+            alias_learn_apply_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "aliases_unavailable",
+                "cluster alias learn-and-apply worker failed",
+            )
+        }
+    };
+    finish_alias_learn_apply_response(&state.prom, response)
 }
 
 #[derive(Serialize)]

@@ -29,6 +29,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [150](../adr-150-alias-registry-read-api-contract.md) | Alias-registry read REST API contract | Makes governed-alias review strict, pageable, observable, and bounded off async workers. | Accepted |
 | [151](../adr-151-parallel-ci-code-gate-lanes.md) | Parallel CI code-gate lanes | Runs exact core and distributed gates concurrently behind one required result. | Accepted |
 | [152](../adr-152-alias-import-api-contract.md) | Alias-import REST API contract | Makes governed Solr imports strict, familiar, idempotent, durable, and mode-consistent. | Accepted |
+| [153](../adr-153-alias-learn-apply-api-contract.md) | Alias learn-and-apply REST API contract | Makes stored-corpus alias learning strict, bounded, off-runtime, durable, and mode-consistent. | Accepted |
 
 ---
 

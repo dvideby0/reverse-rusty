@@ -134,6 +134,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   standalone/coordinator parity, shared off-runtime mutation admission, complete standalone rebuild
   verification, and fail-loud durable acknowledgement
   ([ADR-152](decisions/adr-152-alias-import-api-contract.md)).
+- Hardened native `POST /_vocab/aliases/learn_and_apply` with strict bodyless evidence controls,
+  bounded no-store transport, timed standalone/coordinator response parity, shared off-runtime
+  corpus/rebuild admission, complete standalone rebuild verification, fail-loud durable
+  acknowledgement, and an explicit native boundary from Elasticsearch/OpenSearch synonym management
+  ([ADR-153](decisions/adr-153-alias-learn-apply-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

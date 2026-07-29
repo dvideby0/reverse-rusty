@@ -20,10 +20,11 @@ pub(crate) use admin::{
     HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, STATS_BODY_LIMIT,
 };
 pub(crate) use alias::{
-    alias_import_method_not_allowed, alias_read_method_not_allowed, discover_aliases,
-    discover_and_record_aliases, get_alias_feedback, get_aliases, import_aliases,
-    learn_and_apply_aliases, reset_alias_feedback, validate_and_apply_feedback,
-    ALIAS_IMPORT_BODY_LIMIT, ALIAS_READ_BODY_LIMIT,
+    alias_import_method_not_allowed, alias_learn_apply_method_not_allowed,
+    alias_read_method_not_allowed, discover_aliases, discover_and_record_aliases,
+    get_alias_feedback, get_aliases, import_aliases, learn_and_apply_aliases, reset_alias_feedback,
+    validate_and_apply_feedback, ALIAS_IMPORT_BODY_LIMIT, ALIAS_LEARN_APPLY_BODY_LIMIT,
+    ALIAS_READ_BODY_LIMIT,
 };
 pub(crate) use backup::{backup_route, BACKUP_BODY_LIMIT};
 pub(crate) use cluster::{
