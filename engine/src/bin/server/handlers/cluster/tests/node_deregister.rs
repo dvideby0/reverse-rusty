@@ -206,7 +206,7 @@ async fn path_query_method_and_body_transport_are_strict() {
         assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
     }
 
-    for id in ["0", "-1", "node-7", "18446744073709551616", "%37"] {
+    for id in ["0", "007", "-1", "node-7", "18446744073709551616", "%37"] {
         let (status, _, bytes) = send_raw(
             &state,
             deregister_request(&format!("/_cluster/nodes/{id}"), Body::empty()),

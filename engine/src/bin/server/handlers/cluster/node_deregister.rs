@@ -85,6 +85,11 @@ fn parse_node_id(path: &str) -> Result<NodeId, String> {
     if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("node id must be a positive unsigned integer".to_string());
     }
+    if raw.len() > 1 && raw.starts_with('0') {
+        return Err(
+            "node id must use canonical decimal notation without leading zeros".to_string(),
+        );
+    }
     let id = raw
         .parse::<u64>()
         .map_err(|_| "node id is outside the unsigned 64-bit range".to_string())?;
