@@ -78,6 +78,10 @@ fn record_feedback_stamps_evidence_and_maxes_confidence() {
         AliasStatus::Candidate,
         "stamping never changes status"
     );
+    assert!(
+        !reg.record_feedback(&forms(&["ns", "northstar"]), ev),
+        "an identical evidence retry is a no-op"
+    );
     // A NaN overlap must not poison confidence.
     let nan = FeedbackEvidence {
         overlap: f64::NAN,

@@ -237,6 +237,16 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 ),
         )
         .route(
+            "/_vocab/aliases/validate_and_apply",
+            post(cluster_validate_and_apply_feedback)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::handlers::ALIAS_FEEDBACK_APPLY_BODY_LIMIT,
+                ))
+                .fallback(
+                    crate::handlers::alias_feedback_apply_method_not_allowed::<ClusterAppState>,
+                ),
+        )
+        .route(
             "/_settings",
             get(cluster_get_settings).put(cluster_put_settings),
         )
@@ -304,6 +314,7 @@ mod alias_discover;
 mod alias_discover_record;
 mod alias_feedback_read;
 mod alias_feedback_reset;
+mod alias_feedback_validate;
 mod alias_import;
 mod alias_learn_apply;
 mod backup;

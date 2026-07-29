@@ -200,6 +200,11 @@ capture mutex, captures an immutable engine snapshot, and releases the mutex bef
 resolution, exclusion filtering, overlap calculation, and serialization. The standalone response
 is timed and no-store; coordinator mode validates the same read contract before returning the
 single-node capture alternative.
+Evidence validation and application use that same one-slot, off-runtime boundary. The default
+operation stamps changed evidence metadata only and treats an identical retry as a no-op.
+`activate=true` remains explicit and promotes only eligible candidates through a complete,
+durability-checked recompile before publication. Runtime metadata and activations are not written
+back to the standalone startup vocabulary file.
 Embedded callers use the deliberately split `set_vocab()` then `recompile_stale_segments()` sequence
 and must not publish a snapshot between those calls. Single-node durable deployments must persist
 the same vocabulary file used on reopen; clusters checkpoint the vocabulary in coordinator state. See

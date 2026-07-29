@@ -22,12 +22,13 @@ use crate::handlers::alias::{
     acquire_alias_import_permit, acquire_alias_learn_apply_permit, acquire_alias_read_permit,
     alias_discover_record_error_response, alias_import_error_response, alias_import_success,
     alias_learn_apply_error_response, alias_learn_apply_success, execute_alias_discovery,
-    finish_alias_discover_record_response, finish_alias_feedback_read_response,
-    finish_alias_feedback_reset_response, finish_alias_import_response,
-    finish_alias_learn_apply_response, finish_alias_read_worker, serialize_aliases,
-    validate_alias_discover_record_body, AliasDiscoverRecordTransport, AliasDiscoverTransport,
-    AliasFeedbackReadTransport, AliasFeedbackResetTransport, AliasImportTransport,
-    AliasLearnApplyTransport, AliasReadTransport,
+    finish_alias_discover_record_response, finish_alias_feedback_apply_response,
+    finish_alias_feedback_read_response, finish_alias_feedback_reset_response,
+    finish_alias_import_response, finish_alias_learn_apply_response, finish_alias_read_worker,
+    serialize_aliases, validate_alias_discover_record_body, AliasDiscoverRecordTransport,
+    AliasDiscoverTransport, AliasFeedbackApplyTransport, AliasFeedbackReadTransport,
+    AliasFeedbackResetTransport, AliasImportTransport, AliasLearnApplyTransport,
+    AliasReadTransport,
 };
 use crate::handlers::vocab::{
     acquire_vocab_learn_apply_permit, acquire_vocab_read_permit, acquire_vocab_write_permit,
@@ -370,10 +371,17 @@ pub(crate) async fn cluster_get_alias_feedback(
 }
 
 /// POST /_vocab/aliases/validate_and_apply — 501 in cluster mode (ADR-103).
-pub(crate) async fn cluster_validate_and_apply_feedback() -> Response {
-    not_in_cluster_mode(
-        "POST /_vocab/aliases/validate_and_apply",
-        "validate on a single-node replica, then install reviewed activations via PUT /_vocab",
+pub(crate) async fn cluster_validate_and_apply_feedback(
+    State(state): State<Arc<ClusterAppState>>,
+    transport: AliasFeedbackApplyTransport,
+) -> Response {
+    let (_duration, _started, _controls) = transport.into_parts();
+    finish_alias_feedback_apply_response(
+        &state.prom,
+        not_in_cluster_mode(
+            "POST /_vocab/aliases/validate_and_apply",
+            "validate on a single-node replica, then install reviewed activations via PUT /_vocab",
+        ),
     )
 }
 

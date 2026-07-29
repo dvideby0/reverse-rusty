@@ -157,6 +157,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   timed no-store output, shared off-runtime admission, a linearizable in-place evidence clear that
   preserves tracked candidates, and an observed fail-loud coordinator alternative
   ([ADR-157](decisions/adr-157-alias-feedback-reset-api-contract.md)).
+- Hardened native `POST /_vocab/aliases/validate_and_apply` with strict positive evidence
+  controls, bounded bodyless transport, timed no-store output, idempotent stamping, shared
+  off-runtime admission, success-only publication, fail-loud activation durability, and a
+  validated coordinator alternative
+  ([ADR-158](decisions/adr-158-alias-feedback-validate-apply-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

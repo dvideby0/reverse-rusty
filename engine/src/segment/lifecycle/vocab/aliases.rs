@@ -162,8 +162,12 @@ impl Engine {
         let recompiled = if activated_n > 0 {
             self.set_vocab(vocab)?;
             self.recompile_stale_segments()
-        } else {
+        } else if stamped > 0 {
             self.install_vocab_metadata_only(vocab)?;
+            0
+        } else {
+            // An identical retry is a real no-op: do not swap an equal vocabulary Arc or make
+            // the HTTP layer publish an unchanged snapshot.
             0
         };
         Ok(crate::segment::AliasFeedbackApplyReport {
