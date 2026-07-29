@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State},
+    extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -24,6 +24,9 @@ mod feedback;
 mod import;
 #[cfg(test)]
 mod import_tests;
+mod learn_apply;
+#[cfg(test)]
+mod learn_apply_tests;
 mod read;
 #[cfg(test)]
 mod read_tests;
@@ -33,63 +36,16 @@ pub(crate) use import::{
     alias_import_success, finish_alias_import_response, import_aliases, AliasImportTransport,
     ALIAS_IMPORT_BODY_LIMIT,
 };
+pub(crate) use learn_apply::{
+    acquire_alias_learn_apply_permit, alias_learn_apply_error_response,
+    alias_learn_apply_method_not_allowed, alias_learn_apply_success,
+    finish_alias_learn_apply_response, learn_and_apply_aliases, AliasLearnApplyTransport,
+    ALIAS_LEARN_APPLY_BODY_LIMIT,
+};
 pub(crate) use read::{
     acquire_alias_read_permit, alias_read_method_not_allowed, finish_alias_read_worker,
     get_aliases, serialize_aliases, AliasReadTransport, ALIAS_READ_BODY_LIMIT,
 };
-
-fn default_min_count() -> usize {
-    2
-}
-
-#[derive(Serialize)]
-struct AliasApplyResponse {
-    acknowledged: bool,
-    activated: usize,
-    recompiled: usize,
-    summary: reverse_rusty::vocab::AliasSummary,
-}
-
-#[derive(Deserialize, Default)]
-pub(crate) struct AliasLearnQuery {
-    /// Minimum any-of occurrences for a group to be considered (default 2).
-    #[serde(default = "default_min_count")]
-    min_count: usize,
-}
-
-/// POST /_vocab/aliases/learn_and_apply — learn alias candidates from the engine's OWN stored
-/// queries (any-of co-occurrence) into the registry and apply (ADR-060 item 2). Conservative:
-/// only clear single-token variants auto-activate; everything else is a review candidate
-/// (inspect via `GET /_vocab/aliases`). `?min_count=N` (default 2).
-pub(crate) async fn learn_and_apply_aliases(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<AliasLearnQuery>,
-) -> Response {
-    let result = {
-        let mut engine = state.engine.lock();
-        match engine.learn_aliases_and_apply(q.min_count) {
-            Ok(report) => alias_apply_response(report),
-            Err(e) => ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
-                .into_response(),
-        }
-    };
-    state.publish_snapshot();
-    result
-}
-
-/// Render a successful apply as the shared 200 response.
-fn alias_apply_response(report: reverse_rusty::AliasApplyReport) -> Response {
-    (
-        StatusCode::OK,
-        Json(AliasApplyResponse {
-            acknowledged: true,
-            activated: report.activated,
-            recompiled: report.recompiled,
-            summary: report.summary,
-        }),
-    )
-        .into_response()
-}
 
 #[derive(Deserialize, Default)]
 pub(crate) struct DiscoverAliasesRequest {

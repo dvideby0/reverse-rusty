@@ -162,20 +162,20 @@ relationship expansion, phrase tokens and growth passes, body/result size, and b
 validation, learning, and serialization on the shared administrative blocking slot. It does not
 inspect stored queries or apply its result.
 
-The REST replacement, alias-import, and stored-corpus learn-and-apply paths perform any required
-O(corpus) rebuild through the same one-slot blocking-work boundary and recompile stored queries
-before publishing the new normalizer. Alias imports parse atomically, bound rules and forms, and
-skip installation entirely when an identical registry declaration is retried. The mutating learner
-accepts only bounded, bodyless, validated query controls; both mutations return the same timed
-`recompiled` result in standalone and coordinator modes. A successful durable response means the
-rebuilt query state committed; a coherent live rebuild whose storage commit fails is published but
-explicitly not acknowledged. Retrying the identical coordinator import in that state recommits the
-live vocabulary generation and repairs any pending feature-model control transition before it
-returns a no-op acknowledgement. The retry may replace only the exact pre-import manifest retained
-by that attempt; if the new manifest was renamed before directory sync failed, it re-attests and
-syncs that exact next-epoch commit, including its segment registry, next segment IDs, source
-sidecars, and log replay cursor. Every other unreadable, divergent, or newer manifest remains a
-fail-loud incompatibility.
+The REST replacement, alias-import, vocabulary learn-and-apply, and governed-alias learn-and-apply
+paths perform any required O(corpus) rebuild through the same one-slot blocking-work boundary and
+recompile stored queries before publishing the new normalizer. Alias imports parse atomically, bound
+rules and forms, and skip installation entirely when an identical registry declaration is retried.
+Both stored-corpus learners accept only bounded, bodyless, validated query controls; every mutation
+returns the same timed `recompiled` result in standalone and coordinator modes. A successful durable
+response means the rebuilt query state committed; a coherent live rebuild whose storage commit
+fails is published but explicitly not acknowledged. Retrying the identical coordinator import in
+that state recommits the live vocabulary generation and repairs any pending feature-model control
+transition before it returns a no-op acknowledgement. The retry may replace only the exact
+pre-import manifest retained by that attempt; if the new manifest was renamed before directory sync
+failed, it re-attests and syncs that exact next-epoch commit, including its segment registry, next
+segment IDs, source sidecars, and log replay cursor. Every other unreadable, divergent, or newer
+manifest remains a fail-loud incompatibility.
 Embedded imports also complete any stale-plan rebuild left between the public split apply steps.
 Alias-registry review shares that administrative slot for potentially large JSON snapshots. A
 standalone read captures one immutable engine snapshot; a coordinator read clones the registry
