@@ -141,6 +141,13 @@ Raw DSL and raw tag values are persisted in coordinator mutations and re-resolve
 Request tag filters compile once at the coordinator and fan out as integer `TagId` groups. Tags apply
 only after candidate retrieval and therefore cannot invalidate the routing proof.
 
+Named CPU ranking profiles are shared by semantic identity rather than model bytes (ADR-163).
+The coordinator and every remote shard independently load a strict registry at startup. Each ranked
+request carries the selected name plus compiled fingerprint, the shard resolves it locally, and the
+terminal reply echoes it. Unknown, divergent, missing, or pre-attestation peers fail the whole ranked
+operation; unused extra profiles on a node are harmless. The public format, loading, and rollout
+contract is in the [ranking reference](../reference/ranking.md).
+
 ---
 
 ## 4. Shared-nothing durable architecture
@@ -293,6 +300,10 @@ for final winners only. Standalone and in-process clusters can pin the rank/orde
 PIT/cursor pagination; remote gRPC assemblies currently reject PIT. Exhaustive delivery requires
 disjoint ownership, zero pending repairs, an authoritative logical-ID directory, and a stable
 placement/mutation barrier.
+
+Scalar top-K replies and terminal batch/exhaustive summaries also attest the selected ranking-profile
+fingerprint. Streamed frames remain provisional until that terminal identity is validated, so model
+drift or mixed-version omission cannot escape as a successful partial ranking.
 
 ---
 

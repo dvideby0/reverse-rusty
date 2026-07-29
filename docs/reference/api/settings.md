@@ -9,6 +9,10 @@ object is the complete serialized `EngineConfig`; some fields also have server C
 library-only construction fields are read-only here. `HEAD` performs the same read and returns its
 representation headers without a body.
 
+The startup-loaded ranking-profile registry is server serving configuration, not `EngineConfig`.
+It is intentionally absent from this response and cannot be changed through `PUT /_settings`; see
+the canonical [ranking settings contract](../ranking.md#3-profile-file).
+
 ```bash
 curl localhost:9200/_settings
 ```
@@ -146,6 +150,11 @@ subsequent lock-free reads.
 - **Static (startup only):** `data_dir`, `wal_sync_on_write`, `retain_source`.
   `retention_lease_ttl_secs` is also explicitly classified as non-dynamic through this REST surface;
   configure it when constructing a library `EngineConfig`.
+
+Ranking profiles are also startup-only, but they are not a setting key: load their separate
+immutable registry with `--ranking-profiles-file` or `RR_RANKING_PROFILES_FILE` as documented in
+the [ranking reference](../ranking.md). Attempting to invent a ranking-profile key here is an
+unknown-setting error.
 
 The query-complexity limits (`max_query_length`, `max_query_clauses`, `max_anyof_group_size`) and
 `max_tags` are enforced on every live/build ingest path; a change applies to **subsequent** ingests,

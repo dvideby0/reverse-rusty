@@ -57,6 +57,10 @@ RAYON_NUM_THREADS=4 cargo run --release --bin perfgate -- \
   capture /tmp/perf-current.json
 ```
 
+The benchmark selects a profile defined by the canonical
+[ranking-profile contract](../reference/ranking.md); the checked-in weights are illustrative rather
+than trained quality evidence.
+
 `bench` args:
 `<num_queries> <num_titles> <broad_frac> <skew> [seed] [reps] [hot_theta] [dedup]`.
 

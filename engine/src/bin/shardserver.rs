@@ -55,6 +55,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut health_addr: Option<SocketAddr> = None;
     // Optional SEPARATE plaintext port for the Prometheus `/_metrics` endpoint (ADR-091).
     let mut metrics_addr: Option<SocketAddr> = None;
+    // Immutable CPU ranking models used by native ranked RPCs. Every remote
+    // coordinator request carries name + semantic fingerprint, so a missing or
+    // different local file fails before scoring.
+    let mut ranking_profiles_file: Option<PathBuf> = None;
     // The hot-anchor threshold θ (class H, ADR-105). Cost-only: this node CLASSIFIES the
     // queries the coordinator places on it, so θ decides whether a fat-anchored query
     // lands in the always-probed realtime lane (θ=0) or the columnar hot tier. Run the
@@ -86,6 +90,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(v) = args.get(i + 1) {
                     metrics_addr = Some(v.parse().map_err(|e| format!("--metrics-addr {v}: {e}"))?);
                 }
+                i += 1;
+            }
+            "--ranking-profiles-file" => {
+                ranking_profiles_file = Some(PathBuf::from(
+                    args.get(i + 1)
+                        .ok_or("--ranking-profiles-file requires a path")?,
+                ));
                 i += 1;
             }
             "--hot-anchor-threshold" => {
@@ -149,9 +160,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         i += 1;
     }
+    if ranking_profiles_file.is_none() {
+        ranking_profiles_file = std::env::var_os("RR_RANKING_PROFILES_FILE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+    }
     let addr: SocketAddr = addr_arg.as_deref().unwrap_or("127.0.0.1:50051").parse()?;
     let (security, client_security) =
         resolve_security(tls_cert, tls_key, tls_ca, tls_domain, token_flag)?;
+    let rank_profiles = match &ranking_profiles_file {
+        Some(path) => reverse_rusty::RankProfiles::load_json(path)?,
+        None => reverse_rusty::RankProfiles::default(),
+    };
+    let mut profile_descriptions: Vec<_> = rank_profiles
+        .names()
+        .map(|name| {
+            let fingerprint = rank_profiles.fingerprint(name).map_or(0, |value| value);
+            format!("{name}@fnv1a64:{fingerprint:016x}")
+        })
+        .collect();
+    profile_descriptions.sort_unstable();
+    println!(
+        "shardserver: ranking profiles active: {}",
+        profile_descriptions.join(", ")
+    );
+    let rank_profiles = Arc::new(rank_profiles);
 
     let norm = Arc::new(Normalizer::default_vocab()?);
     let engine_cfg = EngineConfig {
@@ -171,6 +204,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None => ShardServer::pending(norm, engine_cfg.clone()),
         };
         let server = server
+            .with_rank_profiles(Arc::clone(&rank_profiles))
             .with_max_grpc_result_bytes(max_grpc_result_bytes)?
             .with_max_concurrent_exhaustive_streams(max_concurrent_exhaustive_streams)?
             .with_max_exhaustive_stream_duration(max_exhaustive_stream_duration)?;
@@ -230,6 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => ShardServer::new(Arc::clone(&norm), Arc::new(dict), engine_cfg.clone()),
     };
     let server = server
+        .with_rank_profiles(rank_profiles)
         .with_max_grpc_result_bytes(max_grpc_result_bytes)?
         .with_max_concurrent_exhaustive_streams(max_concurrent_exhaustive_streams)?
         .with_max_exhaustive_stream_duration(max_exhaustive_stream_duration)?;

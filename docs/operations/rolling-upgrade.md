@@ -102,6 +102,14 @@ pre-upgrade backup:
   `/v2/_search` against an old shard fails closed (`UNIMPLEMENTED` → 502) with no partial hits. Enable
   or route v2 traffic only after every shard is upgraded; keep each shard's
   `--max-grpc-result-bytes` at or below 4 MiB.
+- **ADR-163 ranking-profile attestation:** no durable format changes. A new shard accepts an old
+  request without profile identity only as built-in `static_v1`, but a new coordinator rejects an
+  old shard's missing terminal identity even for that profile. Preserve the same profile
+  file/ConfigMap on every node, upgrade all shards before the coordinator when uninterrupted ranked
+  reads matter, and select a newly deployed profile only after the mesh is green. A concurrent Helm
+  roll remains correct but may return transient protocol failures. Divergent content never falls
+  back. The compatibility matrix is also summarized in the canonical
+  [ranking contract](../reference/ranking.md#6-rollout-and-compatibility).
 - **ADR-114 exhaustive delivery:** no durable format changes. `PercolateAll` is an additive
   server-streaming RPC, but an exact-capable remote coordinator must use the exclusive builder
   selected by the HTTP cluster connector. Its attestation is semantically mandatory: an older
@@ -201,7 +209,9 @@ What the chart guarantees while that runs:
   pause` applies to Deployments only, never StatefulSets). If you need it, gate each StatefulSet
   manually with `updateStrategy.rollingUpdate.partition` (`kubectl patch` the partition down as
   each workload finishes) — otherwise rely on the readiness gates + the fail-loud fences, which
-  is what the concurrent roll is designed around.
+  is what the concurrent roll is designed around. ADR-163 profile requests may return a transient
+  protocol failure if the new coordinator starts before every shard can echo its identity; use
+  shard-first ordering when uninterrupted ranked traffic is required.
 - A stuck pod (readiness never true on the new version) **halts the rollout** at that ordinal —
   the remaining replicas keep serving the old version. `kubectl rollout undo` (or `helm rollback
   rr`) rolls back; the format-fence caveat from §4 applies unchanged.

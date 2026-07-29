@@ -6,18 +6,6 @@ use super::{
     ShardRankedMatch, ShardRankedTitle, TagPredicate,
 };
 
-fn refuse_nonstatic_rank_program(
-    program: &crate::rank::CompiledRankProgram,
-) -> Result<(), ShardError> {
-    if program.is_static_profile() {
-        Ok(())
-    } else {
-        Err(ShardError::RankProfileUnsupported(
-            program.profile_name().to_string(),
-        ))
-    }
-}
-
 impl Shard for RemoteShard {
     fn percolate_filtered(
         &self,
@@ -162,9 +150,6 @@ impl Shard for RemoteShard {
         sink: &mut dyn crate::delivery::ChunkSink,
     ) -> Result<crate::delivery::ExhaustiveMatchResult, ShardError> {
         self.validate_ownership(current_position, context.generation(), context.num_shards())?;
-        if let Some(program) = program {
-            refuse_nonstatic_rank_program(program)?;
-        }
         if chunk_size == 0 || chunk_size > crate::delivery::MAX_MATCH_CHUNK_SIZE {
             return Err(ShardError::Config(format!(
                 "exhaustive chunk size {chunk_size} is outside 1..={}",
@@ -183,6 +168,7 @@ impl Shard for RemoteShard {
             ownership: Some(proto::ownership_to_proto(context)),
         };
         let expected_scores = program.is_some();
+        let expected_profile = program.map(proto::rank_profile_identity_to_proto);
         let generation = context.generation().get();
         let num_shards = context.num_shards();
         let started = Instant::now();
@@ -345,6 +331,11 @@ impl Shard for RemoteShard {
                                 crate::ownership::OwnershipError::PlacementDecisionMismatch,
                             ));
                         }
+                        if summary.rank_profile.as_ref() != expected_profile.as_ref() {
+                            return Err(ShardError::Protocol(
+                                "exhaustive summary failed ranking-profile attestation".into(),
+                            ));
+                        }
                         if summary.chunk_count != next_sequence
                             || summary.exact_total != exact_total
                             || summary.checksum_xor != checksum.xor
@@ -414,7 +405,6 @@ impl Shard for RemoteShard {
         deadline: Option<Instant>,
     ) -> Result<ShardRankedMatch, ShardError> {
         self.validate_ownership(current_position, context.generation(), context.num_shards())?;
-        refuse_nonstatic_rank_program(program)?;
         let absolute = self.bounded_deadline(deadline)?;
         let base = proto::PercolateTopKRequest {
             title: title.to_string(),
@@ -447,9 +437,10 @@ impl Shard for RemoteShard {
             || reply.placement_generation != context.generation().get()
             || reply.num_shards != context.num_shards()
             || reply.hits.len() > options.size
+            || !proto::rank_profile_identity_matches(reply.rank_profile.as_ref(), program)
         {
             return Err(ShardError::Protocol(
-                "top-k reply failed bounded/ownership/configuration attestation".into(),
+                "top-k reply failed bounded/ownership/configuration/profile attestation".into(),
             ));
         }
         let total_hits = reply
@@ -495,7 +486,6 @@ impl Shard for RemoteShard {
                 request.context.num_shards(),
             )?;
         }
-        refuse_nonstatic_rank_program(program)?;
         let absolute = self.bounded_deadline(deadline)?;
         let base = proto::PercolateTopKBatchRequest {
             titles: titles
@@ -530,12 +520,14 @@ impl Shard for RemoteShard {
         let expected = titles.len();
         let size = options.size as u32;
         let size_bound = options.size;
+        let expected_profile = proto::rank_profile_identity_to_proto(program);
         self.call_until(RpcMethod::PercolateTopKBatch, absolute, move |remaining| {
             let mut client = client.clone();
             let mut body = base.clone();
             body.remaining_micros = remaining_micros(remaining);
             let mut request = tonic::Request::new(body);
             request.set_timeout(remaining);
+            let expected_profile = expected_profile.clone();
             async move {
                 use crate::cluster::ranked_wire::{attach, RankedWireCode};
                 use proto::percolate_top_k_batch_frame::Frame;
@@ -639,6 +631,15 @@ impl Shard for RemoteShard {
                             {
                                 return Err(tonic::Status::out_of_range(
                                     "batch summary disagrees with the delivered title frames",
+                                ));
+                            }
+                            if summary.rank_profile.as_ref() != Some(&expected_profile) {
+                                return Err(attach(
+                                    tonic::Status::failed_precondition(
+                                        "batch summary failed ranking-profile attestation",
+                                    ),
+                                    RankedWireCode::Protocol,
+                                    None,
                                 ));
                             }
                             summary_stats = Some(

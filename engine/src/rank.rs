@@ -64,7 +64,7 @@ pub struct CompiledRankProgram {
 }
 
 impl CompiledRankProgram {
-    fn new(
+    pub(crate) fn new(
         profile_name: String,
         profile: Arc<RankProfileProgram>,
         profile_fingerprint: u64,
@@ -78,17 +78,6 @@ impl CompiledRankProgram {
             use_priority,
             boosts,
         }
-    }
-
-    #[cfg(feature = "distributed")]
-    pub(crate) fn new_static(use_priority: bool, boosts: FastMap<TagId, i64>) -> Self {
-        Self::new(
-            STATIC_RANK_PROFILE.to_string(),
-            Arc::new(RankProfileProgram::Static),
-            RankProfileProgram::Static.fingerprint(),
-            use_priority,
-            boosts,
-        )
     }
 
     #[must_use]
@@ -110,8 +99,7 @@ impl CompiledRankProgram {
         self.profile_fingerprint
     }
 
-    /// The current gRPC rank wire carries only the historical static program.
-    /// Remote callers use this predicate to reject richer profiles before flight.
+    /// Whether title-dependent evidence can be skipped for this program.
     #[must_use]
     pub fn is_static_profile(&self) -> bool {
         self.profile.is_static()

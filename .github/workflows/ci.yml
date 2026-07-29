@@ -196,9 +196,16 @@ jobs:
       # env interpolation, volume/network refs); the fail-loud required-secret guards
       # need dummy values supplied, exactly as a real bring-up would. Fails fast.
       - name: Lint the production cluster compose
-        run: >
-          RR_CLUSTER_TOKEN=ci-lint RR_AUTH_TOKEN=ci-lint RR_CERT_DIR=./deploy/certs
-          docker compose --project-directory . -f deploy/compose.cluster.yml config >/dev/null
+        run: |
+          set -euo pipefail
+          RR_CLUSTER_TOKEN=ci-lint RR_AUTH_TOKEN=ci-lint RR_CERT_DIR=./deploy/certs \
+            docker compose --project-directory . \
+              -f deploy/compose.cluster.yml config >/dev/null
+          RR_CLUSTER_TOKEN=ci-lint RR_AUTH_TOKEN=ci-lint RR_CERT_DIR=./deploy/certs \
+          RR_RANKING_PROFILES_FILE=./deploy/ranking-profiles.example.json \
+            docker compose --project-directory . \
+              -f deploy/compose.cluster.yml \
+              -f deploy/compose.ranking-profiles.yml config >/dev/null
 
       - name: Install pinned toolchain
         working-directory: engine
@@ -270,6 +277,16 @@ jobs:
           validate --set tls.enabled=false --set auth.enabled=false
           validate --set clusterToken.create=true --set clusterToken.value=x \
                    --set auth.create=true --set auth.value=y
+          validate --set rankingProfiles.configMapName=rr-ranking-profiles
+          validate \
+            --set rankingProfiles.volumeSource.persistentVolumeClaim.claimName=rr-ranking-profiles \
+            --set rankingProfiles.volumeSource.persistentVolumeClaim.readOnly=true
+          if helm template rr deploy/helm/reverse-rusty -n rrns \
+              --set rankingProfiles.configMapName=rr-ranking-profiles \
+              --set rankingProfiles.volumeSource.emptyDir={} >/dev/null 2>&1; then
+            echo "rankingProfiles accepted mutually exclusive sources" >&2
+            exit 1
+          fi
 
       # Drift tripwires (Tier 5 M2, ADR-098): compose ≡ rendered chart on the
       # load-bearing topology facts, and crate version ≡ chart appVersion (the

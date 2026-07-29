@@ -149,14 +149,14 @@ async fn failed_status_preserves_a_specific_execution_error_type() {
     let started = state
         .exhaustive_jobs
         .start(
-            "status-profile-transport".into(),
+            "status-specific-error".into(),
             [0xA5; 32],
             reverse_rusty::QueryScope::Standard,
             Duration::from_secs(1),
             |_sink, _deadline| {
                 Err(JobExecutionError::new(
-                    "rank_profile_transport_unsupported",
-                    "remote shard cannot execute ranking profile `linear_v1`",
+                    "shard_protocol_error",
+                    "remote shard returned an invalid completeness attestation",
                 ))
             },
         )
@@ -168,7 +168,7 @@ async fn failed_status_preserves_a_specific_execution_error_type() {
     let (status, json, _) = send(route(&state), &uri).await;
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["state"], "failed");
-    assert_eq!(json["error"]["type"], "rank_profile_transport_unsupported");
+    assert_eq!(json["error"]["type"], "shard_protocol_error");
     assert_eq!(json["error"]["reason"], json["failure"]);
 }
 

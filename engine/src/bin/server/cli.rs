@@ -57,7 +57,9 @@ pub(crate) struct Cli {
 
     /// Load versioned CPU ranking profiles from a bounded JSON file. The
     /// built-in `static_v1` profile is always available; requests name loaded
-    /// linear/tree profiles through `rank.profile`.
+    /// linear/tree profiles through `rank.profile`. The
+    /// `RR_RANKING_PROFILES_FILE` environment variable is the equivalent
+    /// container-friendly source.
     #[arg(long)]
     pub(crate) ranking_profiles_file: Option<PathBuf>,
 

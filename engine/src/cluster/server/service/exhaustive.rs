@@ -12,7 +12,7 @@ use crate::cluster::shard::{Shard, ShardError};
 use crate::delivery::{ChunkSink, ChunkSinkError, MatchChunk, MAX_MATCH_CHUNK_SIZE};
 
 use super::super::{ShardServer, ShardSlot};
-use super::ranked::{deadline_from_remaining, read_status};
+use super::ranked::{deadline_from_remaining, decode_rank_program, read_status};
 
 struct GrpcChunkSink {
     tx: tokio::sync::mpsc::Sender<Result<proto::PercolateAllFrame, Status>>,
@@ -193,7 +193,10 @@ pub(super) fn percolate_all(
     }
     let deadline = deadline_from_remaining(req.remaining_micros)?;
     let pred = proto::tag_predicate_from_proto(req.filter);
-    let program = req.rank.map(proto::rank_program_from_proto);
+    let program = req
+        .rank
+        .map(|rank| decode_rank_program(server, rank))
+        .transpose()?;
     let (slot, state) = server.loaded_slot(req.shard_id)?;
     let max_result_bytes = server.max_grpc_result_bytes;
     let placement_generation = ownership.generation().get();
@@ -276,6 +279,9 @@ pub(super) fn percolate_all(
                             ownership_applied: true,
                             placement_generation,
                             num_shards,
+                            rank_profile: program
+                                .as_ref()
+                                .map(proto::rank_profile_identity_to_proto),
                         },
                     )),
                 };

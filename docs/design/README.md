@@ -37,19 +37,22 @@ COMPILE TIME (per stored query, off the hot path)
     → visibility + scheduling classification (A/B/C/D/H)
     → append to segment build (postings + SoA exact-match plan)
 
-MATCH TIME (per incoming title, the hot path — allocation-free)
+MATCH TIME (per incoming title; retrieval + verification core is allocation-free)
   raw title bytes
     → normalize (in-place, into a reusable scratch buffer)
     → extract sorted/deduplicated feature IDs into reusable scratch
     → enumerate the title's arity-1/arity-2 signature keys
     → probe candidate index → union of candidate SegmentLocalQueryIds
     → exact integer verification (mask + sorted-slice/phrase checks)
-    → map survivors to GlobalLogicalQueryId  → emit matches
+    → map survivors to GlobalLogicalQueryId
+    → post-match metadata filters + optional integer ranking
+    → exact all/top-K/paginated delivery
 ```
 
-The compile phase is allowed to be expensive and clever. The match phase is dumb, branch-predictable
-integer work. **No parsing, no strings, no regex, no allocation, no generic AST interpretation on the
-hot path** — those are all pushed into compile time.
+The compile phase is allowed to be expensive and clever. Candidate retrieval and verification are
+dumb, branch-predictable integer work. **No parsing, no strings, no regex, no allocation, no generic
+AST interpretation in that matching core** — those are pushed into compile time or post-match
+presentation layers.
 
 The DSL, normalizer, and feature dictionary are detailed in [`normalization.md`](normalization.md);
 the optimizer, candidate index, exact matcher, cost classes, and explain in
@@ -111,6 +114,10 @@ contract.
 - **Observe and control skew?** The broad/hot lanes have separate batch evaluation and cost metrics;
   operators can tune the hot threshold and placement. Automatic skew-driven reclassification and
   split policy remain roadmap work.
+- **Improve result order without weakening recall?** Static, linear, and bounded tree profiles score
+  only confirmed matches. They share deterministic integer features across local and remote
+  topologies; profile selection cannot affect candidate retrieval or Boolean membership. The
+  user-facing contract lives in the [ranking reference](../reference/ranking.md).
 - **vs generic percolator?** Semantic (not term) gating, integer (not Scorer) verification, and
   broad-query quarantine — each removes a class of work generic percolators still pay.
 
@@ -130,6 +137,7 @@ pointer).
 | Signature optimizer ([matching](matching.md)) | `src/compile.rs` + `src/compile/` |
 | Candidate index ([matching](matching.md)) | `src/index.rs` |
 | Exact matcher ([matching](matching.md)) | `src/exact.rs` |
+| Ranking, collectors, and delivery ([matching](matching.md), [reference](../reference/ranking.md)) | `src/rank.rs`, `src/collect.rs`, `src/delivery.rs` |
 | Broad/hot lanes + placement classes ([matching](matching.md)) | `src/compile.rs`, `src/segment.rs` + `src/segment/` |
 | Segments / delta / tombstones ([ingestion](ingestion-and-updates.md)) | `src/segment.rs` + `src/segment/` |
 | Explain ([matching](matching.md)) | `src/explain.rs` |

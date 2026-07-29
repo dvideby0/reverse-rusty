@@ -3,6 +3,11 @@
 {{- $control := include "reverse-rusty.controlName" . -}}
 {{- $ns := .Release.Namespace -}}
 {{- $domain := .Values.clusterDomain -}}
+{{- $rankingProfilesVolume := not (empty .Values.rankingProfiles.volumeSource) -}}
+{{- if and .Values.rankingProfiles.configMapName $rankingProfilesVolume -}}
+{{- fail "rankingProfiles.configMapName and rankingProfiles.volumeSource are mutually exclusive" -}}
+{{- end -}}
+{{- $rankingProfilesEnabled := or (ne .Values.rankingProfiles.configMapName "") $rankingProfilesVolume -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -86,6 +91,10 @@ spec:
             {{- if .Values.coordinator.acceptClassD }}
             - --accept-class-d
             {{- end }}
+            {{- if $rankingProfilesEnabled }}
+            - --ranking-profiles-file
+            - /ranking-profiles/{{ .Values.rankingProfiles.key }}
+            {{- end }}
           env:
             - name: RR_CLUSTER_TOKEN
               valueFrom:
@@ -117,21 +126,42 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
-          {{- if .Values.tls.enabled }}
+          {{- if or .Values.tls.enabled $rankingProfilesEnabled }}
           volumeMounts:
+            {{- if .Values.tls.enabled }}
             - name: certs
               mountPath: /certs
               readOnly: true
+            {{- end }}
+            {{- if $rankingProfilesEnabled }}
+            - name: ranking-profiles
+              mountPath: /ranking-profiles
+              readOnly: true
+            {{- end }}
           {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if .Values.tls.enabled }}
+      {{- if or .Values.tls.enabled $rankingProfilesEnabled }}
       volumes:
+        {{- if .Values.tls.enabled }}
         - name: certs
           secret:
             secretName: {{ .Values.tls.secretName }}
+        {{- end }}
+        {{- if $rankingProfilesEnabled }}
+        - name: ranking-profiles
+          {{- if .Values.rankingProfiles.configMapName }}
+          configMap:
+            name: {{ .Values.rankingProfiles.configMapName }}
+            items:
+              - key: {{ .Values.rankingProfiles.key }}
+                path: {{ .Values.rankingProfiles.key }}
+          {{- else }}
+          {{- toYaml .Values.rankingProfiles.volumeSource | nindent 10 }}
+          {{- end }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

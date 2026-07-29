@@ -62,6 +62,9 @@ Four levels, each giving *just enough* to decide whether to go deeper:
 - [`reference/api.md`](reference/api.md) — the REST API index (server flags + endpoint groups + a
   method/path matrix); per-group endpoint detail lives in [`reference/api/`](reference/api/).
 - [`reference/dsl.md`](reference/dsl.md) — the query DSL, normalization, and vocabulary.
+- [`reference/ranking.md`](reference/ranking.md) — the canonical ranking-profile contract: scoring,
+  profile JSON, fixed feature semantics, admission bounds, startup settings, and behavior across all
+  topologies.
 
 ### Operations
 - [`operations/deployment-modes.md`](operations/deployment-modes.md) — the **supported-deployment
@@ -151,6 +154,7 @@ never a second copy. This is what keeps the docs from drifting.
 | Test count | `cargo test` | docs describe the suites qualitatively; no hand-maintained integer. |
 | Testing / benchmark / CI workflow | [`testing.md`](testing.md) | agent entry points keep the commands; CI rationale in [`DECISIONS.md`](DECISIONS.md) ADR-024; benchmark numbers in `performance/`. |
 | REST API / query DSL | [`reference/api.md`](reference/api.md) index + [`reference/api/`](reference/api/) subfiles · [`reference/dsl.md`](reference/dsl.md) | `../README.md` links here instead of inlining. |
+| Ranking profile format, features, loading, and topology contract | [`reference/ranking.md`](reference/ranking.md) | API pages own only request/response shapes; operations own exact deploy commands; design and ADRs link for implementation and rationale. |
 
 ---
 

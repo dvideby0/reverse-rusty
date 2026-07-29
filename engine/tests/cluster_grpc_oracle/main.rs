@@ -37,6 +37,7 @@ mod legacy_layout;
 mod parallel;
 mod partial_apply;
 mod pit;
+mod profile_transport;
 mod ranked_batch;
 mod reassign;
 mod rebalance;

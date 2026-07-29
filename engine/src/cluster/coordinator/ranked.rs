@@ -127,8 +127,8 @@ impl ClusterEngine {
     }
 
     /// Compile against an operator-loaded profile registry. In-process shards
-    /// receive the compiled integer program directly; remote shards fail loud
-    /// at their wire boundary for non-static profiles.
+    /// receive the compiled integer program directly; remote shards resolve
+    /// and attest the same named semantic fingerprint before scores are used.
     pub fn compile_rank_program_with_profiles(
         &self,
         spec: &RankProgramSpec,

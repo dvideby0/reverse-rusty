@@ -113,11 +113,13 @@ helm template rr deploy/helm/reverse-rusty -n rrns [VALUES] \
   | kubeconform -strict -summary -kubernetes-version 1.29.0
 ```
 
-Renders the chart across the CI value matrix (default, `shardCount=5`, `controlPlane.enabled=false`,
-`tls.enabled=false auth.enabled=false`, and the created-secrets variant) and validates every manifest
-against Kubernetes 1.29 schemas (`-strict` rejects unknown fields). The release workflow additionally
-runs `deploy/k8s-smoke.sh` against the exact candidate image in a kind cluster before publishing it.
-An independent multi-machine Kubernetes failure/corpus exercise remains a roadmap item.
+Renders the chart across the CI value matrix (default, `shardCount=5`,
+`controlPlane.enabled=false`, `tls.enabled=false auth.enabled=false`, created secrets, ranking
+profiles from a ConfigMap, and ranking profiles from a generic PVC `volumeSource`) and validates
+every manifest against Kubernetes 1.29 schemas (`-strict` rejects unknown fields). It also proves
+that configuring both profile sources fails rendering. The release workflow additionally runs
+`deploy/k8s-smoke.sh` against the exact candidate image in a kind cluster before publishing it. An
+independent multi-machine Kubernetes failure/corpus exercise remains a roadmap item.
 
 ## What CI already enforces
 
@@ -125,10 +127,11 @@ An independent multi-machine Kubernetes failure/corpus exercise remains a roadma
 build** on each PR and push: the `gate` job runs `check.sh`, then the **local deploy smoke**
 (`local-smoke.sh --prebuilt`, the M1 gate — ADR-098), the pinned variance-tolerant `perfgate`
 (ADR-124), and the advisory deep benchmark sweeps; the `harness` job lints
-`compose.cluster.yml`, runs `harness.sh --prebuilt`, then runs the **reference-compose smoke**
-(leg 4) on the same prebuilt image; and the `helm chart` job runs the lint + kubeconform matrix
-plus the **topology-parity** and **version-drift** tripwires (ADR-098). The exact 10M mixed-ops
-soak runs weekly and remains manually dispatchable, with its output retained as an artifact.
+`compose.cluster.yml` with and without the ranking-profile overlay, runs `harness.sh --prebuilt`,
+then runs the **reference-compose smoke** (leg 4) on the same prebuilt image; and the `helm chart`
+job runs the lint + kubeconform matrix plus the **topology-parity** and **version-drift** tripwires
+(ADR-098). The exact 10M mixed-ops soak runs weekly and remains manually dispatchable, with its
+output retained as an artifact.
 Releases add the rest: [`release.yml`](../../.github/workflows/release.yml) builds the candidate
 image (leg 3), re-runs the compose smoke against it, runs the **kind Helm smoke**
 (`k8s-smoke.sh`) against it, and only then publishes to GHCR — so a tagged image has passed every

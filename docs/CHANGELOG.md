@@ -9,7 +9,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
-## 2026-07-26 to 2026-07-28 — Documentation, module boundaries, and API parity
+## 2026-07-26 to 2026-07-29 — Documentation, module boundaries, and API parity
 
 - Replaced the monolithic ADR index with an area hub, nine compact catalogs, and one canonical
   page per ADR.
@@ -24,6 +24,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   bounds, title-dependent batch support, pre-dedup semantic feature persistence plus source-driven
   legacy migration, benchmark selection, and fail-loud remote-wire refusal
   ([ADR-162](decisions/adr-162-versioned-cpu-ranking-profiles.md)).
+- Extended named CPU profiles across remote top-K, batch, and exhaustive gRPC delivery with
+  request/terminal fingerprint attestation, fail-closed version skew, shared Compose mounts, and
+  Helm ConfigMap or generic PVC/CSI-capable volume sources
+  ([ADR-163](decisions/adr-163-distributed-ranking-profile-attestation.md)).
 - Aligned document deletion with the ES/OpenSearch shape and refresh controls, made logical delete
   counts placement-independent, and exposed the existing remote partial-repair contract accurately
   ([ADR-125](decisions/adr-125-delete-document-contract.md)).

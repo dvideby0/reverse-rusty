@@ -53,5 +53,7 @@ policy, queue deadline, and explicit fail behavior.
 
 [ADR-162](../decisions/adr-162-versioned-cpu-ranking-profiles.md) implements the first three CPU
 steps as named profiles. The checked-in example demonstrates and fingerprints the format; it is not
-trained evidence. The next decision should be driven by representative-corpus quality and cost
-measurements, not by adding model complexity in advance.
+trained evidence. Current score semantics, profile configuration, features, limits, and topology
+support are canonical in the [ranking reference](../reference/ranking.md). The next decision should
+be driven by representative-corpus quality and cost measurements, not by adding model complexity in
+advance.

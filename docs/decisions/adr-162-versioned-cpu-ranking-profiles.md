@@ -101,6 +101,9 @@ first-stage window rather than on every match.
 Remote multi-process deployments remain on `static_v1` until the rank wire can distribute or
 reference a model and attest the same semantic fingerprint on every shard.
 
+**Outcome update:** [ADR-163](adr-163-distributed-ranking-profile-attestation.md) subsequently
+shipped that fingerprint-attested wire contract without changing this profile format or scorer.
+
 ## Safety and proof
 
 Unit tests validate feature extraction, linear/tree scores, graph rejection, reserved static
