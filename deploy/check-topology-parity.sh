@@ -66,6 +66,8 @@ expect_both "route-by-assignments" "--route-by-assignments"
 # 4. Both shipped topologies expose the restart-safe resolve-only transition:
 #    explicit endpoint arguments disappear, --shards remains, and the outer
 #    termination budget covers the 30s drain plus a one-hour move allowance.
+#    Helm additionally uses stop-before-start replacement and does not gate a
+#    resolve-only restart on obsolete bootstrap shard ordinals.
 c_resolve_eps=$(count_arg "$compose_resolve" "shard-endpoint")
 h_resolve_eps=$(count_arg "$chart_resolve" "shard-endpoint")
 expect_eq "resolve-only shard endpoints" "$c_resolve_eps" "$h_resolve_eps"
@@ -78,6 +80,16 @@ grep -qF 'stop_grace_period: 1h0m30s' <<<"$compose_resolve" ||
   fail "compose coordinator shutdown budget is not 3630s"
 grep -qF 'terminationGracePeriodSeconds: 3630' <<<"$chart_resolve" ||
   fail "helm coordinator shutdown budget is not 3630s"
+grep -qF 'type: Recreate' <<<"$chart_resolve" ||
+  fail "helm coordinator does not use stop-before-start replacement"
+resolve_required_targets=$(grep -E '^[[:space:]]+required_targets=' <<<"$chart_resolve" || true)
+[[ -n "$resolve_required_targets" ]] ||
+  fail "resolve-only helm render is missing the required-targets startup guard"
+[[ "$resolve_required_targets" != *shard* ]] ||
+  fail "resolve-only helm startup still waits on bootstrap shard ordinals"
+resolve_control_targets=$(grep -E '^[[:space:]]+control_targets=' <<<"$chart_resolve" || true)
+[[ "$resolve_control_targets" == *control* ]] ||
+  fail "resolve-only helm startup does not wait for a control-plane member"
 echo "  ok: resolve-only transition and shutdown budget present on both sides"
 
 # 5. The mesh ports agree (shard gRPC / control gRPC / coordinator REST).

@@ -72,6 +72,8 @@ controlPlane:
 coordinator:
   # Keep at 1. Stateless means restartable without a coordinator volume, not active-active:
   # shard owner leases fence a second coordinator, and the chart has no REST-tier leader election.
+  # The Deployment therefore uses Recreate so upgrades stop the old lease holder
+  # before starting its replacement.
   replicas: 1
   # Broad (class-C) queries match by default when true; also a per-request flag in the
   # _search body, so leave off unless every request should include broad.

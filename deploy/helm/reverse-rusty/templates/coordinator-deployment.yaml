@@ -23,6 +23,10 @@ metadata:
     app.kubernetes.io/component: coordinator
 spec:
   replicas: {{ .Values.coordinator.replicas }}
+  # Shard nodes admit exactly one coordinator lease. Stop the old pod before
+  # starting its replacement so upgrades cannot deadlock behind that lease.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "reverse-rusty.selectorLabels" . | nindent 6 }}
@@ -39,9 +43,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      # k8s has no compose `depends_on`: wait for every shard's gRPC port to be OPEN
-      # (liveness, NOT readiness — shards stay pending until this coordinator adopts them)
-      # and, when wired, the control quorum's leader. Avoids a noisy connect crashloop.
+      # k8s has no compose `depends_on`: bootstrap waits for every seed shard;
+      # resolve-only deliberately does not, because a moved-away ordinal may be
+      # unavailable. Both modes wait for any reachable control member and let
+      # coordinator startup validate the authoritative resolved shard endpoints.
       initContainers:
         - name: wait-for-mesh
           image: {{ include "reverse-rusty.image" . }}
@@ -51,13 +56,29 @@ spec:
             - -c
             - |
               set -u
-              targets="{{ range $i := until (int .Values.shardCount) }}{{ printf "%s-%d.%s.%s.svc.%s:%v " $shard $i $shard $ns $domain $.Values.ports.shardGrpc }}{{ end }}{{ if and .Values.controlPlane.enabled .Values.controlPlane.wireToCoordinator }}{{ printf "%s-0.%s.%s.svc.%s:%v" $control $control $ns $domain $.Values.ports.controlGrpc }}{{ end }}"
-              for t in $targets; do
+              required_targets="{{ if not .Values.coordinator.resolveOnly }}{{ range $i := until (int .Values.shardCount) }}{{ printf "%s-%d.%s.%s.svc.%s:%v " $shard $i $shard $ns $domain $.Values.ports.shardGrpc }}{{ end }}{{ end }}"
+              for t in $required_targets; do
                 host="${t%:*}"; port="${t##*:}"
                 echo "waiting for ${host}:${port}"
                 until (exec 3<>/dev/tcp/${host}/${port}) 2>/dev/null; do sleep 2; done
                 echo "  ${host}:${port} is up"
               done
+              control_targets="{{ if and .Values.controlPlane.enabled .Values.controlPlane.wireToCoordinator }}{{ range $i := until (int .Values.controlPlane.replicas) }}{{ printf "%s-%d.%s.%s.svc.%s:%v " $control $i $control $ns $domain $.Values.ports.controlGrpc }}{{ end }}{{ end }}"
+              if [ -n "$control_targets" ]; then
+                echo "waiting for any control-plane member"
+                while true; do
+                  for t in $control_targets; do
+                    host="${t%:*}"; port="${t##*:}"
+                    if (exec 3<>/dev/tcp/${host}/${port}) 2>/dev/null; then
+                      echo "  ${host}:${port} is up"
+                      control_ready=1
+                      break
+                    fi
+                  done
+                  [ "${control_ready:-0}" = 1 ] && break
+                  sleep 2
+                done
+              fi
       containers:
         - name: coordinator
           image: {{ include "reverse-rusty.image" . }}

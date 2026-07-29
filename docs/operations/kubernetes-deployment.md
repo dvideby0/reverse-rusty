@@ -158,10 +158,11 @@ cluster-level counters + a per-shard `reverse_rusty_cluster_shard_queries{shard=
   [disaster-recovery.md](disaster-recovery.md) for the flows that need those snapshots.
 - **Upgrades:** `helm upgrade --set image.tag=vX.Y.Z` — each StatefulSet sets
   `updateStrategy: RollingUpdate` explicitly (one pod at a time *within that workload*, gated on
-  Ready; the control, shard, and coordinator workloads may roll concurrently) and ships
-  PodDisruptionBudgets (`podDisruptionBudget.enabled`, default on) so node drains cannot take a
-  second shard or break the control quorum mid-roll. Full procedure incl. the
-  compatibility-fence contract and rollback: [rolling-upgrade.md](rolling-upgrade.md).
+  Ready), while the single coordinator Deployment uses stop-before-start `Recreate` because its
+  shard lease is exclusive. The workloads may update concurrently. PodDisruptionBudgets
+  (`podDisruptionBudget.enabled`, default on) keep node drains from taking a second shard or
+  breaking the control quorum mid-roll. Full procedure incl. the compatibility-fence contract and
+  rollback: [rolling-upgrade.md](rolling-upgrade.md).
 
 ## 6. Control-plane wiring & limits
 
@@ -180,6 +181,13 @@ helm upgrade rr deploy/helm/reverse-rusty --reuse-values \
   --set coordinator.resolveOnly=true
 kubectl rollout status deployment/rr-reverse-rusty-coordinator
 ```
+
+The coordinator Deployment uses the `Recreate` strategy because shard nodes lease themselves to
+exactly one coordinator. The upgrade therefore stops the old lease holder before starting the
+resolve-only replacement; expect a brief coordinator interruption during this transition. In
+resolve-only mode the startup guard waits for any control-plane member, not the original shard
+ordinals. Coordinator assembly then reads the committed map and probes its authoritative shard
+targets, so an unavailable node that no longer owns an assignment cannot prevent recovery.
 
 The chart then omits `--shard-endpoint`, passes `--shards` from `shardCount`, and resolves only from
 the committed quorum. Leave `resolveOnly=true` after the map changes. Before that transition,
