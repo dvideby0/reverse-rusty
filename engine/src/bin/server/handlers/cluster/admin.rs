@@ -20,7 +20,7 @@ pub(crate) use health::cluster_health;
 pub(crate) use metrics::cluster_metrics;
 pub(crate) use ops::{
     cluster_deregister_node, cluster_handoff, cluster_reassign, cluster_rebalance,
-    cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync,
+    cluster_reconcile, cluster_resize, cluster_resync,
 };
 
 use std::sync::Arc;

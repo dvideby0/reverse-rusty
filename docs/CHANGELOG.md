@@ -95,6 +95,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   exact familiar `version` projection and manager-timeout aliases, and explicit rejection of
   nonexistent index-state semantics
   ([ADR-162](decisions/adr-162-cluster-state-api-contract.md)).
+- Hardened native coordinator `POST /_cluster/nodes` with strict endpoint identity and mesh-origin
+  validation, exact committed versions, bounded off-runtime consensus writes, outcome-aware
+  timeouts, sanitized failures, and explicit separation from voter membership, placement, and data
+  movement ([ADR-164](decisions/adr-164-node-registration-api-contract.md)).
 - Hardened native `GET /_stats` with a strict no-store transport, truthful physical/live/tombstone
   and resident-memory/WAL projections, familiar timing and shard metadata, single-slot blocking
   collection, fail-loud cluster aggregation, and one shard-count fan-out instead of two

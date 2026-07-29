@@ -19,7 +19,7 @@ use tracing::{info, instrument};
 #[cfg(feature = "distributed")]
 use tracing::error;
 
-use reverse_rusty::cluster::{NodeDescriptor, NodeId, NodeRole};
+use reverse_rusty::cluster::NodeId;
 
 use crate::dto::ApiError;
 use crate::state::ClusterAppState;
@@ -28,52 +28,6 @@ use super::super::shard_error_response;
 // `not_in_cluster_mode` is used only by the non-`distributed` 501 stubs.
 #[cfg(not(feature = "distributed"))]
 use super::super::not_in_cluster_mode;
-
-#[derive(Deserialize)]
-pub(crate) struct RegisterNodeBody {
-    id: u64,
-    #[serde(default)]
-    addr: Option<String>,
-    /// "data" (default) or "manager".
-    #[serde(default)]
-    role: Option<String>,
-}
-
-/// POST /_cluster/nodes — register (or replace) a cluster member.
-#[instrument(skip_all)]
-pub(crate) async fn cluster_register_node(
-    State(state): State<Arc<ClusterAppState>>,
-    Json(body): Json<RegisterNodeBody>,
-) -> Response {
-    let role = match body.role.as_deref() {
-        None | Some("data") => NodeRole::Data,
-        Some("manager") => NodeRole::Manager,
-        Some(other) => {
-            return ApiError::response(
-                StatusCode::BAD_REQUEST,
-                "validation_error",
-                format!("unknown node role {other:?}: expected \"data\" or \"manager\""),
-            )
-            .into_response()
-        }
-    };
-    let node = NodeDescriptor {
-        id: NodeId(body.id),
-        addr: body.addr,
-        role,
-    };
-    let result = {
-        let cluster = state.cluster.read();
-        cluster.register_node(node)
-    };
-    match result {
-        Ok(()) => {
-            info!(node_id = body.id, "node registered");
-            Json(serde_json::json!({"acknowledged": true})).into_response()
-        }
-        Err(e) => shard_error_response("node registration failed", &e),
-    }
-}
 
 /// DELETE /_cluster/nodes/{id} — deregister a member (idempotent).
 #[instrument(skip(state))]

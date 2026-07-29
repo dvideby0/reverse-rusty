@@ -260,11 +260,18 @@ The default in-process backend applies the same deterministic state transitions 
 paths; persisted vote, committed-log identity, snapshot, and CRC-framed log allow a manager to restart
 and rejoin.
 
+Node registration upserts only the descriptor by logical id; it does not change voters,
+assignments, or physical data. A manager role is eligibility metadata, while the Raft voter set is
+changed separately through joint consensus. The REST boundary reserves bootstrap `NodeId(0)`,
+requires an HTTP(S) mesh origin, and reports the exact committed application version; replacement
+must name the same recovered logical node unless data was moved safely first. The full operator
+contract is in the [cluster-membership API reference](../reference/api/cluster.md).
+
 The allocator ranks registered nodes for each logical position with rendezvous (HRW) hashing.
 `register_node`, `deregister_node`, and `rebalance` compute/commit desired assignments. A committed
 map is routing authority only after deployment topology is resolved and, for a populated remote
-cluster, the corresponding data movement has completed. Boot and reconcile guards fail closed instead
-of routing a position to an empty slot.
+cluster, the corresponding data movement has completed. Boot and reconcile guards fail closed
+instead of routing a position to an empty slot.
 
 Consensus holds topology only. It never stores query DSL, tags, source, translog records, or compiled
 segments.
