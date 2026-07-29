@@ -127,9 +127,10 @@ available.
 For a **remote** cluster, the coordinator has no `data_dir` and no cross-shard snapshot barrier.
 Pause ingest, wait for in-flight writes to finish, snapshot every shard and control-plane volume as
 one named set, then resume ingest. Each volume is individually crash-consistent; quiescing is what
-makes the set globally consistent. `POST /_checkpoint` on the stateless coordinator does not flush
-remote shards, and `POST /_backup` returns 400. Restore the complete volume set into the same logical
-topology; see [`disaster-recovery.md`](disaster-recovery.md).
+makes the set globally consistent. `POST /_checkpoint` on the stateless coordinator reports
+`durable: false` and `shards_checkpointed: 0`; it does not flush remote shards, and
+`POST /_backup` returns 400. Restore the complete volume set into the same logical topology; see
+[`disaster-recovery.md`](disaster-recovery.md).
 
 ## Scheduling
 

@@ -1,6 +1,7 @@
 //! Cluster-mode admin handlers (ADR-070): read-only introspection (root, stats,
-//! `_cat/shards`, health, metrics) + the durability commit points (flush,
-//! `POST /_checkpoint`, `POST /_backup`) + the single-node-only `_cat`/compact stubs.
+//! `_cat/shards`, health, metrics) + flush/backup durability operations + the
+//! single-node-only `_cat`/compact stubs. The strict `POST /_checkpoint`
+//! boundary lives in the sibling `checkpoint` module.
 //!
 //! The `_cluster/*` control-plane operations (state, node register/deregister,
 //! rebalance, handoff, reassign, resize, resync) live in the [`ops`] submodule — plus
@@ -270,33 +271,6 @@ pub(crate) async fn cluster_flush_route(
     }
 }
 
-/// POST /_checkpoint — the cluster durability commit point (ADR-031/032): seal
-/// shards, commit the coordinator manifest, truncate the log. A no-op (still 200)
-/// on an in-memory cluster.
-#[instrument(skip_all)]
-pub(crate) async fn cluster_checkpoint(State(state): State<Arc<ClusterAppState>>) -> Response {
-    let start = Instant::now();
-    let result = {
-        let _w = state.write_serial.lock();
-        let cluster = state.cluster.read();
-        cluster.checkpoint().map(|()| cluster.epoch())
-    };
-    match result {
-        Ok(epoch) => {
-            info!(
-                epoch,
-                took_ms = start.elapsed().as_millis() as u64,
-                "cluster checkpoint complete"
-            );
-            Json(serde_json::json!({"acknowledged": true, "epoch": epoch})).into_response()
-        }
-        Err(e) => {
-            error!(error = %e, "cluster checkpoint failed");
-            shard_error_response("checkpoint failed", &e)
-        }
-    }
-}
-
 /// POST /_backup — snapshot the cluster's durable state into `dest`, a server-side
 /// path that must not already exist (ADR-079): checkpoint, then copy the coordinator
 /// manifest + per-shard segments + `sources.dat` + the coordinator log. Restore by
@@ -328,7 +302,7 @@ pub(crate) async fn cluster_backup(
         Ok(prepared) => prepared,
         Err(response) => return *response,
     };
-    let Ok(permit) = acquire_backup_permit(&state.backup_permits).await else {
+    let Ok(permit) = acquire_backup_permit(&state.durability_permits).await else {
         error!("cluster backup admission unexpectedly closed");
         return backup_rejection(
             &state.prom,

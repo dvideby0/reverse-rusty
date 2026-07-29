@@ -76,6 +76,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   survives disconnects with independently supervised outcomes, unique staging, and fail-closed
   atomic no-clobber promotion that refuses dangling or raced destination entries
   ([ADR-139](decisions/adr-139-backup-api-contract.md)).
+- Hardened native `POST /_checkpoint` with strict bounded transport, supervised off-runtime
+  durability work shared with backup, no-store telemetry, fail-loud persistence errors, and
+  explicit `durable`/`shards_checkpointed` results that cannot disguise a stateless coordinator
+  maintenance no-op as a recovery point
+  ([ADR-161](decisions/adr-161-checkpoint-api-contract.md)).
 - Hardened native `GET /_stats` with a strict no-store transport, truthful physical/live/tombstone
   and resident-memory/WAL projections, familiar timing and shard metadata, single-slot blocking
   collection, fail-loud cluster aggregation, and one shard-count fan-out instead of two

@@ -32,6 +32,9 @@ pub(crate) const DEFAULT_MAX_RANKED_ENRICHMENT_BYTES: usize = 16 * 1024 * 1024;
 /// Backups serialize behind the engine/cluster writer lock, so admitting more
 /// than one blocking worker would only create a detached blocking-pool queue.
 pub(crate) const MAX_CONCURRENT_BACKUPS: usize = 1;
+/// Checkpoint and backup share the coordinator writer boundary, so admit one
+/// durability operation at a time instead of queuing blocking workers.
+pub(crate) const MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS: usize = 1;
 /// The health route stays open even when read auth is enabled. Bound all of
 /// its requests independently before their bodies are buffered.
 pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
@@ -138,8 +141,11 @@ pub(crate) struct ClusterAppState {
     /// Explicit-flush admission, separate from the general write serializer for
     /// the same `wait_if_ongoing` reason as [`AppState::flush_serial`].
     pub(crate) flush_serial: Mutex<()>,
-    /// Coordinator analogue of [`AppState::backup_permits`].
-    pub(crate) backup_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// One admitted checkpoint or backup at a time. Both operations serialize
+    /// behind `write_serial`; sharing this owned permit prevents disconnected
+    /// requests from accumulating blocking workers behind the same durability
+    /// boundary.
+    pub(crate) durability_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Coordinator analogue of [`AppState::health_permits`].
     pub(crate) health_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Coordinator analogue of [`AppState::stats_permits`], including bounded

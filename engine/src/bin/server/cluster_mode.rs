@@ -55,9 +55,10 @@ use crate::handlers::{
     ALIAS_DISCOVER_RECORD_BODY_LIMIT, ALIAS_FEEDBACK_APPLY_BODY_LIMIT,
     ALIAS_FEEDBACK_READ_BODY_LIMIT, ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT,
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
-    CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT,
-    METRICS_BODY_LIMIT, PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT,
-    STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
+    CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT,
+    EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT,
+    SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
+    VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
     VOCAB_WRITE_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
@@ -348,8 +349,8 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         cluster: RwLock::new(cluster),
         write_serial: Mutex::new(()),
         flush_serial: Mutex::new(()),
-        backup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
-            crate::state::MAX_CONCURRENT_BACKUPS,
+        durability_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS,
         )),
         health_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
@@ -407,7 +408,10 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         .route("/_mpercolate", post(cluster_mpercolate_route))
         .route("/_bulk", post(cluster_bulk_route))
         .route("/_flush", any(cluster_flush_route))
-        .route("/_checkpoint", post(cluster_checkpoint))
+        .route(
+            "/_checkpoint",
+            any(cluster_checkpoint).layer(DefaultBodyLimit::max(CHECKPOINT_BODY_LIMIT)),
+        )
         .route(
             "/_backup",
             any(cluster_backup).layer(DefaultBodyLimit::max(BACKUP_BODY_LIMIT)),

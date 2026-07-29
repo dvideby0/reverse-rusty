@@ -217,8 +217,9 @@ Backup depends on topology, because the durable state lives in different places:
   lock. This is the path with a real consistency barrier. Full procedure:
   [backup-restore.md](backup-restore.md).
 - **Remote topology** (this compose — the coordinator is **stateless**): `POST /_checkpoint` does
-  not seal the remote shards, and `POST /_backup` returns 400 because the coordinator has no
-  `data_dir`. The durable state is each node's own `--data-dir` volume (`shardN-data`,
+  not seal the remote shards; its response therefore reports `durable: false` and
+  `shards_checkpointed: 0`. `POST /_backup` returns 400 because the coordinator has no `data_dir`.
+  The durable state is each node's own `--data-dir` volume (`shardN-data`,
   `controlN-data`), fsync'd by that node per its log policy. **There is no coordinator-driven
   cross-shard consistency barrier in v1**, so for a globally consistent backup you must
   **quiesce writes**:

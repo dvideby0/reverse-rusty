@@ -256,14 +256,3 @@ async fn filtered_search_narrows_by_tags() {
     );
     assert_eq!(body["hits"]["hits"][0]["_id"], 41);
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn checkpoint_acknowledges_and_bumps_epoch() {
-    let state = test_state(&seed());
-    // In-memory cluster: checkpoint is a no-op but still acknowledged (epoch 0).
-    let (status, body) = send(&state, req_empty("POST", "/_checkpoint")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["acknowledged"], true);
-    let (status, body) = send(&state, req_empty("POST", "/_flush")).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-}

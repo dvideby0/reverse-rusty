@@ -108,7 +108,7 @@ async fn dropped_cluster_request_keeps_admission_until_blocking_backup_finishes(
             .is_err(),
         "the cluster backup worker should wait off the async runtime"
     );
-    assert_eq!(state.backup_permits.available_permits(), 0);
+    assert_eq!(state.durability_permits.available_permits(), 0);
 
     let mut queued = Box::pin(router(&state).oneshot(req(
         "POST",
@@ -127,7 +127,7 @@ async fn dropped_cluster_request_keeps_admission_until_blocking_backup_finishes(
     holder.join().expect("writer holder");
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !dest.exists() || state.backup_permits.available_permits() != 1 {
+        while !dest.exists() || state.durability_permits.available_permits() != 1 {
             tokio::task::yield_now().await;
         }
     })
@@ -173,7 +173,7 @@ async fn detached_cluster_backup_failure_is_reported_and_counted() {
     holder.join().expect("writer holder");
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while state.backup_permits.available_permits() != 1
+        while state.durability_permits.available_permits() != 1
             || state
                 .prom
                 .http_requests_total
