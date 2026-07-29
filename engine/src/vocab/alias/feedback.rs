@@ -147,6 +147,14 @@ impl TrackedPair {
             sketches: [BottomK::default(), BottomK::default()],
         }
     }
+
+    fn clear_evidence(&mut self) {
+        self.titles = [0, 0];
+        self.titles_both = 0;
+        self.sketches
+            .iter_mut()
+            .for_each(|sketch| sketch.entries.clear());
+    }
 }
 
 /// One pair's rendered feedback report row.
@@ -239,6 +247,16 @@ impl AliasFeedback {
     /// next sync.
     pub fn reset(&mut self) {
         self.pairs.clear();
+    }
+
+    /// Begin a new evidence window without changing the tracked candidate
+    /// universe. The feedback mutex makes this a linearizable boundary:
+    /// observations before the guard are cleared and observations after it
+    /// accumulate in the new window.
+    pub fn clear_evidence(&mut self) -> usize {
+        let tracked_pairs = self.pairs.len();
+        self.pairs.iter_mut().for_each(TrackedPair::clear_evidence);
+        tracked_pairs
     }
 
     pub fn tracked_pairs(&self) -> usize {

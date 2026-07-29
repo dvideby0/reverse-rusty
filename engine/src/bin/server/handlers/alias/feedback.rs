@@ -1,4 +1,4 @@
-//! Match-feedback endpoints (ADR-103): `/_vocab/aliases/feedback*` + `validate_and_apply`.
+//! Match-feedback validation endpoint (ADR-103): `validate_and_apply`.
 //!
 //! The read side renders the aggregator's per-candidate-pair behavioral evidence (with the
 //! degenerate-evidence exclusion applied against the live snapshot's query sources); the apply
@@ -124,17 +124,4 @@ pub(crate) async fn validate_and_apply_feedback(
     };
     state.publish_snapshot();
     result
-}
-
-#[derive(Serialize)]
-struct ResetResponse {
-    acknowledged: bool,
-}
-
-/// POST /_vocab/aliases/feedback/reset — wipe accumulated evidence (an explicit measurement
-/// window boundary). Tracked pairs re-derive from the registry on the next snapshot publish.
-pub(crate) async fn reset_alias_feedback(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.feedback.lock().reset();
-    state.publish_snapshot(); // re-sync tracked pairs immediately
-    Json(ResetResponse { acknowledged: true })
 }
