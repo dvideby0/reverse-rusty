@@ -6,10 +6,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use tracing::{error, info};
 
-use super::{
-    ClusterRebalanceError, ClusterRebalanceWorkerOutcome, ClusterRebalanceWorkerResult,
-    RebalanceMode,
-};
+use super::{ClusterRebalanceWorkerOutcome, ClusterRebalanceWorkerResult};
 
 #[derive(Debug)]
 pub(super) struct ClusterRebalanceWorkerFailure;
@@ -46,14 +43,7 @@ pub(super) fn supervise_cluster_rebalance_worker(
                 Ok(ClusterRebalanceWorkerOutcome::NotStarted) => {
                     info!(detached, "rebalance was not started");
                 }
-                Ok(ClusterRebalanceWorkerOutcome::Finished(Err(
-                    ClusterRebalanceError::Request(source),
-                ))) => {
-                    info!(detached, error = ?source, "rebalance request was rejected");
-                }
-                Ok(ClusterRebalanceWorkerOutcome::Finished(Err(
-                    ClusterRebalanceError::Backend(source),
-                ))) => {
+                Ok(ClusterRebalanceWorkerOutcome::Finished(Err(source))) => {
                     error!(detached, error = %source, "rebalance failed");
                 }
                 Ok(ClusterRebalanceWorkerOutcome::Finished(Ok(success))) => {
@@ -71,7 +61,7 @@ pub(super) fn supervise_cluster_rebalance_worker(
                         info!(
                             detached,
                             version = success.version.0,
-                            moved_data = matches!(success.mode, RebalanceMode::DataMoving { .. }),
+                            moved_data = success.mode.moves_data(),
                             reassigned = success.reassigned,
                             "rebalance completed"
                         );

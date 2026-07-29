@@ -43,12 +43,26 @@ const CLUSTER_REBALANCE_ENDPOINT: &str = "cluster_rebalance";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RebalanceMode {
     MapOnly,
-    DataMoving { max_parallel: usize },
+    #[cfg(feature = "distributed")]
+    DataMoving {
+        max_parallel: usize,
+    },
+}
+
+impl RebalanceMode {
+    fn moves_data(self) -> bool {
+        match self {
+            Self::MapOnly => false,
+            #[cfg(feature = "distributed")]
+            Self::DataMoving { .. } => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 enum RebalanceRequestError {
     AssignmentRoutingRequired,
+    #[cfg(feature = "distributed")]
     UnsafeRemoteMapOnly,
     DataMovementRequiresRemote,
     ParallelismRequiresMovement,
@@ -64,6 +78,12 @@ fn resolve_rebalance_mode(
             return Err(RebalanceRequestError::AssignmentRoutingRequired);
         }
         ClusterRebalanceTopology::AssignmentRoutedRemote => {
+            #[cfg(not(feature = "distributed"))]
+            {
+                let _ = (requested_move, max_parallel);
+                return Err(RebalanceRequestError::DataMovementRequiresRemote);
+            }
+            #[cfg(feature = "distributed")]
             return match requested_move {
                 Some(false) => Err(RebalanceRequestError::UnsafeRemoteMapOnly),
                 None | Some(true) => Ok(RebalanceMode::DataMoving {
@@ -137,15 +157,9 @@ struct ClusterRebalanceSuccess {
     not_attempted: Vec<u32>,
 }
 
-#[derive(Debug)]
-enum ClusterRebalanceError {
-    Request(RebalanceRequestError),
-    Backend(ShardError),
-}
-
 enum ClusterRebalanceWorkerOutcome {
     NotStarted,
-    Finished(Result<ClusterRebalanceSuccess, ClusterRebalanceError>),
+    Finished(Result<ClusterRebalanceSuccess, ShardError>),
 }
 
 type ClusterRebalanceWorkerResult =
@@ -177,6 +191,14 @@ pub(crate) async fn cluster_rebalance(
     transport: ClusterRebalanceTransport,
 ) -> Response {
     let (_duration, manager_timeout, body) = transport.into_parts();
+    // Topology and request mode are immutable/pure for this server process.
+    // Reject impossible combinations before admission so contention cannot
+    // turn a deterministic 400/409/501 into a manager-start timeout.
+    let mode =
+        match resolve_rebalance_mode(state.rebalance_topology, body.do_move, body.max_parallel) {
+            Ok(mode) => mode,
+            Err(source) => return cluster_rebalance_request_error(&state.prom, source),
+        };
     let no_wait = manager_timeout.is_zero();
     let Some(deadline) = Instant::now().checked_add(manager_timeout) else {
         return cluster_rebalance_rejection(
@@ -260,18 +282,6 @@ pub(crate) async fn cluster_rebalance(
             return ClusterRebalanceWorkerOutcome::NotStarted;
         }
         let _ = started_sender.send(());
-        let mode = match resolve_rebalance_mode(
-            worker_state.rebalance_topology,
-            body.do_move,
-            body.max_parallel,
-        ) {
-            Ok(mode) => mode,
-            Err(source) => {
-                return ClusterRebalanceWorkerOutcome::Finished(Err(
-                    ClusterRebalanceError::Request(source),
-                ));
-            }
-        };
         let result = execute_cluster_rebalance(
             &cluster,
             mode,
@@ -339,16 +349,12 @@ fn execute_cluster_rebalance(
     cluster: &reverse_rusty::cluster::ClusterEngine,
     mode: RebalanceMode,
     #[cfg(feature = "distributed")] handle: &tokio::runtime::Handle,
-) -> Result<ClusterRebalanceSuccess, ClusterRebalanceError> {
+) -> Result<ClusterRebalanceSuccess, ShardError> {
     let rf = cluster.replication_factor();
     match mode {
         RebalanceMode::MapOnly => {
-            let reassigned = cluster
-                .rebalance(rf)
-                .map_err(ClusterRebalanceError::Backend)?;
-            let version = cluster
-                .control_version()
-                .map_err(ClusterRebalanceError::Backend)?;
+            let reassigned = cluster.rebalance(rf)?;
+            let version = cluster.control_version()?;
             Ok(ClusterRebalanceSuccess {
                 mode,
                 version,
@@ -358,35 +364,22 @@ fn execute_cluster_rebalance(
                 not_attempted: Vec::new(),
             })
         }
+        #[cfg(feature = "distributed")]
         RebalanceMode::DataMoving { max_parallel } => {
-            #[cfg(feature = "distributed")]
-            {
-                let report = cluster
-                    .rebalance_and_move_with(rf, max_parallel, handle)
-                    .map_err(ClusterRebalanceError::Backend)?;
-                let version = cluster
-                    .control_version()
-                    .map_err(ClusterRebalanceError::Backend)?;
-                let reassigned = report.moved.len();
-                let failed = report
-                    .failed
-                    .map(|(position, reason)| RebalanceFailure { position, reason });
-                Ok(ClusterRebalanceSuccess {
-                    mode,
-                    version,
-                    reassigned,
-                    moved: report.moved,
-                    failed,
-                    not_attempted: report.not_attempted,
-                })
-            }
-            #[cfg(not(feature = "distributed"))]
-            {
-                let _ = max_parallel;
-                Err(ClusterRebalanceError::Request(
-                    RebalanceRequestError::DataMovementRequiresRemote,
-                ))
-            }
+            let report = cluster.rebalance_and_move_with(rf, max_parallel, handle)?;
+            let version = cluster.control_version()?;
+            let reassigned = report.moved.len();
+            let failed = report
+                .failed
+                .map(|(position, reason)| RebalanceFailure { position, reason });
+            Ok(ClusterRebalanceSuccess {
+                mode,
+                version,
+                reassigned,
+                moved: report.moved,
+                failed,
+                not_attempted: report.not_attempted,
+            })
         }
     }
 }
@@ -405,12 +398,7 @@ fn finish_cluster_rebalance_worker(
         Ok(ClusterRebalanceWorkerOutcome::NotStarted) => {
             cluster_rebalance_not_started_timeout(prom)
         }
-        Ok(ClusterRebalanceWorkerOutcome::Finished(Err(ClusterRebalanceError::Request(
-            source,
-        )))) => cluster_rebalance_request_error(prom, source),
-        Ok(ClusterRebalanceWorkerOutcome::Finished(Err(ClusterRebalanceError::Backend(
-            source,
-        )))) => {
+        Ok(ClusterRebalanceWorkerOutcome::Finished(Err(source))) => {
             let status = shard_error_status(&source);
             let status = if status.is_success() {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -427,7 +415,7 @@ fn finish_cluster_rebalance_worker(
             )
         }
         Ok(ClusterRebalanceWorkerOutcome::Finished(Ok(success))) => {
-            let moved_data = matches!(success.mode, RebalanceMode::DataMoving { .. });
+            let moved_data = success.mode.moves_data();
             let acknowledged = success.failed.is_none();
             let failed = success.failed.map(|failure| RebalanceFailureResponse {
                 position: failure.position,
@@ -464,6 +452,7 @@ fn cluster_rebalance_request_error(
              do not follow the committed assignment map; restart with --route-by-assignments and \
              --control-endpoint before retrying",
         ),
+        #[cfg(feature = "distributed")]
         RebalanceRequestError::UnsafeRemoteMapOnly => cluster_rebalance_rejection(
             prom,
             StatusCode::CONFLICT,
@@ -574,27 +563,39 @@ mod tests {
             Err(RebalanceRequestError::ParallelismRequiresMovement)
         ));
 
-        assert_eq!(
-            resolve_rebalance_mode(ClusterRebalanceTopology::AssignmentRoutedRemote, None, None)
+        #[cfg(feature = "distributed")]
+        {
+            assert_eq!(
+                resolve_rebalance_mode(
+                    ClusterRebalanceTopology::AssignmentRoutedRemote,
+                    None,
+                    None
+                )
                 .expect("assignment-routed remote safe default"),
-            RebalanceMode::DataMoving { max_parallel: 1 }
-        );
-        assert_eq!(
-            resolve_rebalance_mode(
-                ClusterRebalanceTopology::AssignmentRoutedRemote,
-                Some(true),
-                NonZeroUsize::new(4)
-            )
-            .expect("remote parallel move"),
-            RebalanceMode::DataMoving { max_parallel: 4 }
-        );
+                RebalanceMode::DataMoving { max_parallel: 1 }
+            );
+            assert_eq!(
+                resolve_rebalance_mode(
+                    ClusterRebalanceTopology::AssignmentRoutedRemote,
+                    Some(true),
+                    NonZeroUsize::new(4)
+                )
+                .expect("remote parallel move"),
+                RebalanceMode::DataMoving { max_parallel: 4 }
+            );
+            assert!(matches!(
+                resolve_rebalance_mode(
+                    ClusterRebalanceTopology::AssignmentRoutedRemote,
+                    Some(false),
+                    None
+                ),
+                Err(RebalanceRequestError::UnsafeRemoteMapOnly)
+            ));
+        }
+        #[cfg(not(feature = "distributed"))]
         assert!(matches!(
-            resolve_rebalance_mode(
-                ClusterRebalanceTopology::AssignmentRoutedRemote,
-                Some(false),
-                None
-            ),
-            Err(RebalanceRequestError::UnsafeRemoteMapOnly)
+            resolve_rebalance_mode(ClusterRebalanceTopology::AssignmentRoutedRemote, None, None),
+            Err(RebalanceRequestError::DataMovementRequiresRemote)
         ));
         for requested_move in [None, Some(false), Some(true)] {
             assert!(matches!(

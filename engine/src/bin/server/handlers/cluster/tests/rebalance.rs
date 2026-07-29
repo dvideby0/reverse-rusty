@@ -165,6 +165,72 @@ async fn static_remote_routing_is_rejected_before_planning() {
 }
 
 #[tokio::test]
+async fn invalid_modes_are_rejected_before_rebalance_admission() {
+    let config = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let cluster = ClusterEngine::build(
+        Normalizer::default_vocab().expect("vocab"),
+        &config,
+        &seed(),
+    )
+    .expect("cluster");
+    let static_remote = state_from_cluster_with_rebalance_topology(
+        cluster,
+        crate::state::ClusterRebalanceTopology::StaticRemote,
+    );
+    let _static_admission = Arc::clone(&static_remote.rebalance_permits)
+        .acquire_owned()
+        .await
+        .expect("hold static-remote admission");
+    let (status, _, bytes) = send_raw(
+        &static_remote,
+        rebalance_request(
+            "/_cluster/rebalance?cluster_manager_timeout=0",
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_error(
+        status,
+        &bytes,
+        StatusCode::CONFLICT,
+        "rebalance_routing_not_authoritative",
+    );
+
+    let in_process = test_state(&seed());
+    let _in_process_admission = Arc::clone(&in_process.rebalance_permits)
+        .acquire_owned()
+        .await
+        .expect("hold in-process admission");
+    for body in [r#"{"max_parallel":2}"#, r#"{"move":true}"#] {
+        let (status, _, bytes) = send_raw(
+            &in_process,
+            rebalance_request(
+                "/_cluster/rebalance?cluster_manager_timeout=0",
+                Body::from(body),
+            ),
+        )
+        .await;
+        #[cfg(feature = "distributed")]
+        assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
+        #[cfg(not(feature = "distributed"))]
+        if body.contains("move") {
+            assert_error(
+                status,
+                &bytes,
+                StatusCode::NOT_IMPLEMENTED,
+                "not_supported_in_cluster_mode",
+            );
+        } else {
+            assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
+        }
+    }
+}
+
+#[tokio::test]
 async fn query_method_media_and_json_controls_are_strict() {
     let state = test_state(&seed());
 
