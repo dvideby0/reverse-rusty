@@ -1,6 +1,7 @@
 use super::{
-    encode_predicate, predicate_has_phrases, Dict, ExactStore, Extracted, PlacementGeneration,
-    PlacementMode, QueryPlacement, QueryPlacementRef, RankValues, TagId, NO_MASK_BIT,
+    encode_predicate, predicate_has_phrases, predicate_rank_term_counts, Dict, ExactStore,
+    Extracted, PlacementGeneration, PlacementMode, QueryPlacement, QueryPlacementRef, RankValues,
+    TagId, NO_MASK_BIT,
 };
 
 impl ExactStore {
@@ -190,6 +191,30 @@ impl ExactStore {
     pub fn rank_values(&self, id: u32) -> RankValues {
         RankValues {
             priority: self.priority[id as usize],
+        }
+    }
+    #[inline]
+    pub fn rank_query_features(&self, id: u32) -> crate::rank::RankQueryFeatures {
+        let i = id as usize;
+        let predicate_off = self.predicate_off[i] as usize;
+        let predicate_len = self.predicate_len[i] as usize;
+        let proxy_anyof_groups = u32::from(self.q_group_count[i]);
+        let (predicate_positive, predicate_negative, semantic_anyof_groups) =
+            predicate_rank_term_counts(
+                &self.predicate_blob[predicate_off..predicate_off + predicate_len],
+                proxy_anyof_groups,
+            );
+        crate::rank::RankQueryFeatures {
+            positive_terms: self.req_mask[i]
+                .count_ones()
+                .saturating_add(u32::from(self.req_len[i]))
+                .saturating_add(predicate_positive),
+            negative_terms: self.forb_mask[i]
+                .count_ones()
+                .saturating_add(u32::from(self.forb_len[i]))
+                .saturating_add(predicate_negative),
+            any_of_groups: semantic_anyof_groups,
+            tag_count: u32::from(self.tag_len[i]),
         }
     }
     #[inline]

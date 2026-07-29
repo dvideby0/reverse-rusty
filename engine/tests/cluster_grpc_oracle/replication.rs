@@ -123,6 +123,7 @@ fn grpc_replicated_failover_and_peer_recovery() {
         .expect("ingest over gRPC (fans to primary + replica)");
     let rank_program = cluster
         .compile_rank_program(&RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: Vec::new(),
         })
@@ -241,6 +242,7 @@ fn grpc_replicated_failover_and_peer_recovery() {
     .expect("verify cluster over the recovered node");
     let verify_program = verify
         .compile_rank_program(&RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: Vec::new(),
         })

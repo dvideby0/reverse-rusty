@@ -77,7 +77,11 @@ mod reconcile_loop;
 
 /// Run the server in coordinator mode. Mirrors `main`'s single-node flow: build
 /// the cluster, wire observability, serve, shut down cleanly.
-pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
+pub(crate) async fn run(
+    cli: Cli,
+    auth_config: Option<AuthConfig>,
+    rank_profiles: Arc<reverse_rusty::RankProfiles>,
+) {
     // Per-shard engine config from the same flags single-node mode maps; the
     // coordinator derives each shard's data dir itself (ADR-032), so data_dir
     // stays unset here.
@@ -363,6 +367,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
         ranked_search_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(ranked_workers)),
         exhaustive_jobs,
+        rank_profiles,
         max_ranked_enrichment_bytes: cli.max_ranked_enrichment_bytes,
         include_broad: cli.include_broad,
         prom,

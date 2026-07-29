@@ -51,18 +51,28 @@ fn better(candidate: HeapHit, worst: HeapHit) -> bool {
 /// poll hook entirely; the polling policy may stop an unbounded metadata walk
 /// and returns `None` only when that hook fired.
 pub(crate) trait TopKScorer {
-    fn score(&mut self, logical_id: u64, should_stop: &mut dyn FnMut() -> bool) -> Option<i64>;
+    fn score(
+        &mut self,
+        title_index: usize,
+        logical_id: u64,
+        should_stop: &mut dyn FnMut() -> bool,
+    ) -> Option<i64>;
 }
 
 pub(crate) struct PlainScorer<F>(F);
 
 impl<F> TopKScorer for PlainScorer<F>
 where
-    F: FnMut(u64) -> i64,
+    F: FnMut(usize, u64) -> i64,
 {
     #[inline]
-    fn score(&mut self, logical_id: u64, _should_stop: &mut dyn FnMut() -> bool) -> Option<i64> {
-        Some((self.0)(logical_id))
+    fn score(
+        &mut self,
+        title_index: usize,
+        logical_id: u64,
+        _should_stop: &mut dyn FnMut() -> bool,
+    ) -> Option<i64> {
+        Some((self.0)(title_index, logical_id))
     }
 }
 
@@ -70,11 +80,16 @@ pub(crate) struct PollingScorer<F>(F);
 
 impl<F> TopKScorer for PollingScorer<F>
 where
-    F: FnMut(u64, &mut dyn FnMut() -> bool) -> Option<i64>,
+    F: FnMut(usize, u64, &mut dyn FnMut() -> bool) -> Option<i64>,
 {
     #[inline]
-    fn score(&mut self, logical_id: u64, should_stop: &mut dyn FnMut() -> bool) -> Option<i64> {
-        (self.0)(logical_id, should_stop)
+    fn score(
+        &mut self,
+        title_index: usize,
+        logical_id: u64,
+        should_stop: &mut dyn FnMut() -> bool,
+    ) -> Option<i64> {
+        (self.0)(title_index, logical_id, should_stop)
     }
 }
 
@@ -117,6 +132,7 @@ impl TopKState {
     #[inline]
     pub(crate) fn observe(
         &mut self,
+        title_index: usize,
         logical_id: u64,
         scorer: &mut impl TopKScorer,
         should_stop: &mut dyn FnMut() -> bool,
@@ -128,7 +144,7 @@ impl TopKState {
         }
 
         self.evaluations = self.evaluations.saturating_add(1);
-        let Some(score) = scorer.score(logical_id, should_stop) else {
+        let Some(score) = scorer.score(title_index, logical_id, should_stop) else {
             return;
         };
         let hit = HeapHit { logical_id, score };
@@ -209,7 +225,7 @@ pub(crate) struct TopKCollector<F> {
 
 impl<F> TopKCollector<PlainScorer<F>>
 where
-    F: FnMut(u64) -> i64,
+    F: FnMut(usize, u64) -> i64,
 {
     pub(crate) fn new(
         k: usize,
@@ -226,7 +242,7 @@ where
 
 impl<F> TopKCollector<PollingScorer<F>>
 where
-    F: FnMut(u64, &mut dyn FnMut() -> bool) -> Option<i64>,
+    F: FnMut(usize, u64, &mut dyn FnMut() -> bool) -> Option<i64>,
 {
     pub(crate) fn new_polling(
         k: usize,
@@ -262,7 +278,7 @@ where
     #[inline]
     fn on_match(&mut self, logical_id: u64) {
         self.state
-            .observe(logical_id, &mut self.scorer, &mut || false);
+            .observe(0, logical_id, &mut self.scorer, &mut || false);
     }
 
     #[inline]
@@ -273,7 +289,7 @@ where
         should_stop: &mut dyn FnMut() -> bool,
     ) {
         self.state
-            .observe(logical_id, &mut self.scorer, should_stop);
+            .observe(0, logical_id, &mut self.scorer, should_stop);
     }
 }
 
@@ -300,13 +316,24 @@ where
 pub(crate) struct BatchTopKCollector<F> {
     slots: Vec<TopKState>,
     scorer: F,
+    title_base: usize,
 }
 
 impl<F> BatchTopKCollector<PlainScorer<F>>
 where
-    F: FnMut(u64) -> i64,
+    F: FnMut(usize, u64) -> i64,
 {
     pub(crate) fn new(titles: usize, k: usize, total_threshold: usize, scorer: F) -> Self {
+        Self::new_with_base(titles, k, total_threshold, 0, scorer)
+    }
+
+    pub(crate) fn new_with_base(
+        titles: usize,
+        k: usize,
+        total_threshold: usize,
+        title_base: usize,
+        scorer: F,
+    ) -> Self {
         Self {
             // Batch slots never carry a pagination boundary: `search_after`
             // is a single-title cursor primitive and batch admission rejects
@@ -315,20 +342,32 @@ where
                 .map(|_| TopKState::new(k, total_threshold, None))
                 .collect(),
             scorer: PlainScorer(scorer),
+            title_base,
         }
     }
 }
 
 impl<F> BatchTopKCollector<PollingScorer<F>>
 where
-    F: FnMut(u64, &mut dyn FnMut() -> bool) -> Option<i64>,
+    F: FnMut(usize, u64, &mut dyn FnMut() -> bool) -> Option<i64>,
 {
     pub(crate) fn new_polling(titles: usize, k: usize, total_threshold: usize, scorer: F) -> Self {
+        Self::new_polling_with_base(titles, k, total_threshold, 0, scorer)
+    }
+
+    pub(crate) fn new_polling_with_base(
+        titles: usize,
+        k: usize,
+        total_threshold: usize,
+        title_base: usize,
+        scorer: F,
+    ) -> Self {
         Self {
             slots: (0..titles)
                 .map(|_| TopKState::new(k, total_threshold, None))
                 .collect(),
             scorer: PollingScorer(scorer),
+            title_base,
         }
     }
 }
@@ -352,7 +391,12 @@ where
 {
     #[inline]
     fn on_match(&mut self, title_index: usize, logical_id: u64) {
-        self.slots[title_index].observe(logical_id, &mut self.scorer, &mut || false);
+        self.slots[title_index].observe(
+            self.title_base.saturating_add(title_index),
+            logical_id,
+            &mut self.scorer,
+            &mut || false,
+        );
     }
 
     #[inline]
@@ -362,7 +406,12 @@ where
         logical_id: u64,
         should_stop: &mut dyn FnMut() -> bool,
     ) {
-        self.slots[title_index].observe(logical_id, &mut self.scorer, should_stop);
+        self.slots[title_index].observe(
+            self.title_base.saturating_add(title_index),
+            logical_id,
+            &mut self.scorer,
+            should_stop,
+        );
     }
 }
 

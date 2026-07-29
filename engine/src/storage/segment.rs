@@ -85,9 +85,11 @@ const FORMAT_VERSION_PHRASE_PREDICATE: u32 = 10;
 /// preserves a multi-feature negated bare term as one complete predicate
 /// instead of rejecting each emitted feature independently. Version 5 removes
 /// built-in domain analysis and makes numeric contexts entirely caller-defined.
+/// Version 6 preserves pre-dedup semantic any-of group and shortest-member term
+/// counts for deterministic CPU ranking.
 /// This lives in the format's old reserved header word so
 /// recovery can source-rebuild every older materialization before serving it.
-pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 5;
+pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 6;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).
@@ -395,20 +397,26 @@ mod tests {
     fn v10_phrase_predicate_round_trips_and_malformed_graph_fails_loud() {
         let (path, original) = v10_segment_bytes();
         assert_eq!(read_u32(&original, 4), FORMAT_VERSION_PHRASE_PREDICATE);
-        MmapSegment::open(&path).expect("open valid v10");
+        let mmap = MmapSegment::open(&path).expect("open valid v10");
+        assert_eq!(
+            mmap.rank_query_features(0).positive_terms,
+            2,
+            "mmap ranking reconstructs quoted query terms from the predicate program"
+        );
+        drop(mmap);
 
         let blob_count = predicate_blob_offset(&original);
         assert!(read_u32(&original, blob_count) > 0, "predicate blob");
         let program = blob_count + 4;
         assert_eq!(
             read_u32(&original, program),
-            2,
-            "phrase rows use predicate-program v2"
+            4,
+            "new phrase rows use the ranking-aware predicate program"
         );
-        assert_eq!(read_u32(&original, program + 16), 2, "query positions");
+        assert_eq!(read_u32(&original, program + 24), 2, "query positions");
 
         let mut malformed = original;
-        malformed[program + 16..program + 20].copy_from_slice(&0u32.to_le_bytes());
+        malformed[program + 24..program + 28].copy_from_slice(&0u32.to_le_bytes());
         reseal(&mut malformed);
         std::fs::write(&path, malformed).expect("write malformed phrase graph");
         let error = MmapSegment::open(&path).expect_err("empty graph must fail loud");

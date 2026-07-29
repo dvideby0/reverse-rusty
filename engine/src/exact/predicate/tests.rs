@@ -36,6 +36,11 @@ fn program_validates_and_preserves_member_boundaries() {
     assert!(!matches(&[1], &[]));
     assert!(matches(&[3], &[4]));
     assert!(!matches(&[3], &[4, 5]));
+    assert_eq!(
+        predicate_rank_term_counts(words, 1),
+        (1, 2, 1),
+        "the shortest positive member contributes the any-of group's one semantic term"
+    );
 }
 
 #[test]
@@ -43,6 +48,114 @@ fn malformed_program_fails_validation() {
     assert!(validate_predicate(&[99, 0, 0]).is_err());
     assert!(validate_predicate(&[FEATURE_PROGRAM_VERSION, 1, 1, 1, 2, 7]).is_err());
     assert!(validate_predicate(&[FEATURE_PROGRAM_VERSION, 0, 1, 1, 7]).is_err());
+}
+
+#[test]
+fn rank_term_counts_include_compound_requirements() {
+    let ex = Extracted {
+        anyof: vec![vec![1, 3]],
+        anyof_predicates: vec![AnyOfPredicate {
+            members: vec![
+                AnyOfMember {
+                    requirements: vec![vec![1], vec![2]],
+                },
+                AnyOfMember {
+                    requirements: vec![vec![3], vec![4], vec![5]],
+                },
+            ],
+        }],
+        forbidden_conjunctions: vec![vec![6, 7, 8]],
+        ..Extracted::default()
+    };
+    let mut blob = Vec::new();
+    let (off, len) = encode_predicate(&ex, &mut blob);
+    let words = &blob[off as usize..off as usize + len as usize];
+    validate_predicate(words).expect("valid compound program");
+    assert_eq!(
+        predicate_rank_term_counts(words, 1),
+        (2, 3, 1),
+        "the two-term shortest member contributes both semantic terms"
+    );
+}
+
+#[test]
+fn rank_features_preserve_semantic_groups_when_retrieval_proxies_collide() {
+    let predicate = |tail| AnyOfPredicate {
+        members: vec![
+            AnyOfMember {
+                requirements: vec![vec![1], vec![tail]],
+            },
+            AnyOfMember {
+                requirements: vec![vec![1], vec![tail + 1]],
+            },
+        ],
+    };
+    let ex = Extracted {
+        anyof: vec![vec![1]],
+        semantic_anyof_groups: 2,
+        anyof_predicates: vec![predicate(2), predicate(4)],
+        ..Extracted::default()
+    };
+    let mut blob = Vec::new();
+    let (off, len) = encode_predicate(&ex, &mut blob);
+    let words = &blob[off as usize..off as usize + len as usize];
+    validate_predicate(words).expect("valid colliding-proxy program");
+    assert_eq!(
+        predicate_rank_term_counts(words, 1),
+        (4, 0, 2),
+        "each two-term semantic group contributes both terms despite the shared proxy"
+    );
+}
+
+#[test]
+fn rank_features_preserve_compound_terms_when_predicates_deduplicate() {
+    let predicate = AnyOfPredicate {
+        members: vec![
+            AnyOfMember {
+                requirements: vec![vec![1], vec![2]],
+            },
+            AnyOfMember {
+                requirements: vec![vec![1], vec![3]],
+            },
+        ],
+    };
+    let ex = Extracted {
+        anyof: vec![vec![1]],
+        semantic_anyof_groups: 2,
+        semantic_anyof_terms: 4,
+        anyof_predicates: vec![predicate],
+        ..Extracted::default()
+    };
+    let mut blob = Vec::new();
+    let (off, len) = encode_predicate(&ex, &mut blob);
+    let words = &blob[off as usize..off as usize + len as usize];
+    validate_predicate(words).expect("valid deduplicated-compound program");
+    assert_eq!(predicate_rank_term_counts(words, 1), (4, 0, 2));
+}
+
+#[test]
+fn rank_features_emit_a_program_for_proxy_only_group_dedup() {
+    let ex = Extracted {
+        anyof: vec![vec![1, 2]],
+        semantic_anyof_groups: 2,
+        ..Extracted::default()
+    };
+    let mut blob = Vec::new();
+    let (off, len) = encode_predicate(&ex, &mut blob);
+    assert_ne!(len, 0, "ranking-only metadata must survive persistence");
+    let words = &blob[off as usize..off as usize + len as usize];
+    validate_predicate(words).expect("valid ranking-only program");
+    assert_eq!(predicate_rank_term_counts(words, 1), (2, 0, 2));
+    assert_eq!(
+        predicate_boolean_program(words),
+        (0, &[][..]),
+        "ranking-only metadata is not part of Boolean body identity"
+    );
+    let mut understated = words.to_vec();
+    understated[2] = 1;
+    assert!(validate_predicate(&understated)
+        .expect_err("term total below group count must fail")
+        .contains("term count"));
 }
 
 #[test]
@@ -85,6 +198,7 @@ fn phrase_program_preserves_required_and_forbidden_adjacency() {
     let words = &blob[off as usize..off as usize + len as usize];
     validate_predicate(words).expect("valid phrase program");
     assert!(predicate_has_phrases(words));
+    assert_eq!(predicate_rank_term_counts(words, 0), (2, 2, 0));
 
     let verify = |positions: u32, arcs: &[PositionArc]| {
         let scratch = std::cell::RefCell::new(crate::exact::PhraseMatchScratch::default());

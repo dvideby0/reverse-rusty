@@ -55,6 +55,12 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) vocab_file: Option<PathBuf>,
 
+    /// Load versioned CPU ranking profiles from a bounded JSON file. The
+    /// built-in `static_v1` profile is always available; requests name loaded
+    /// linear/tree profiles through `rank.profile`.
+    #[arg(long)]
+    pub(crate) ranking_profiles_file: Option<PathBuf>,
+
     /// Include broad-lane queries in match results.
     #[arg(long, default_value_t = false)]
     pub(crate) include_broad: bool,

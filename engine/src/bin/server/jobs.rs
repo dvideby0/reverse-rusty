@@ -61,6 +61,31 @@ impl JobPhase {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JobExecutionError {
+    pub(crate) error_type: &'static str,
+    pub(crate) detail: String,
+}
+
+impl JobExecutionError {
+    pub(crate) fn new(error_type: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            error_type,
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn generic(detail: impl Into<String>) -> Self {
+        Self::new("exhaustive_job_failed", detail)
+    }
+}
+
+impl From<String> for JobExecutionError {
+    fn from(detail: String) -> Self {
+        Self::generic(detail)
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub(crate) struct JobView {
     pub(crate) job_id: String,
@@ -77,6 +102,8 @@ pub(crate) struct JobView {
     pub(crate) chunk_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) checksum: Option<DeliveryChecksum>,
+    #[serde(skip)]
+    pub(crate) failure_type: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failure: Option<String>,
 }
@@ -85,7 +112,7 @@ struct JobState {
     phase: JobPhase,
     completed_unix_ms: Option<u64>,
     summary: Option<ExhaustiveSummary>,
-    failure: Option<String>,
+    failure: Option<JobExecutionError>,
 }
 
 pub(crate) struct JobRecord {
@@ -117,7 +144,8 @@ impl JobRecord {
             exact_total: state.summary.map(|summary| summary.exact_total),
             chunk_count: state.summary.map(|summary| summary.chunk_count),
             checksum: state.summary.map(|summary| summary.checksum),
-            failure: state.failure.clone(),
+            failure_type: state.failure.as_ref().map(|error| error.error_type),
+            failure: state.failure.as_ref().map(|error| error.detail.clone()),
         }
     }
 }

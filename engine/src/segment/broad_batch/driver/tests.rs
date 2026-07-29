@@ -134,7 +134,8 @@ fn ranked_columnar_metadata_walk_uses_the_active_sampler_and_aborts() {
         has_phrase_predicates: snapshot.has_phrase_predicates,
         pred: &pred,
     };
-    let scorer = snapshot.program_scorer_with_poll(&program);
+    let title_features = [crate::rank::RankTitleFeatures::from_title("alpha")];
+    let scorer = snapshot.program_scorer_with_poll(&program, &title_features);
     let mut collector = BatchTopKCollector::new_polling(1, 10, 100, &scorer);
     let mut match_scratch = MatchScratch::new();
     let mut broad_scratch = BroadBatchScratch::new();

@@ -122,7 +122,7 @@ pub(super) fn capture_bounded(
     snap: &reverse_rusty::EngineSnapshot,
     cluster: &ClusterEngine,
     titles: &[String],
-    compatibility_rank: &reverse_rusty::CompiledRankSpec,
+    compatibility_rank: Option<&reverse_rusty::CompiledRankSpec>,
     program: &reverse_rusty::CompiledRankProgram,
     cluster_program: &reverse_rusty::CompiledRankProgram,
     k: usize,
@@ -143,10 +143,13 @@ pub(super) fn capture_bounded(
     let mut fetch_bytes = 0usize;
     let mut fetch_time = Duration::ZERO;
     for title in titles {
-        snap.match_title(title, &mut oracle_scratch, &mut oracle_ids, true);
-        let mut expected = snap.rank(&oracle_ids, compatibility_rank);
-        expected.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        expected.truncate(k);
+        let expected = compatibility_rank.map(|rank| {
+            snap.match_title(title, &mut oracle_scratch, &mut oracle_ids, true);
+            let mut rows = snap.rank(&oracle_ids, rank);
+            rows.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            rows.truncate(k);
+            rows
+        });
 
         let started = Instant::now();
         let actual = snap
@@ -170,7 +173,9 @@ pub(super) fn capture_bounded(
             .iter()
             .map(|hit| (hit.logical_id, hit.score))
             .collect();
-        assert_eq!(rows, expected, "bounded result diverged at K={k}");
+        if let Some(expected) = &expected {
+            assert_eq!(&rows, expected, "bounded result diverged at K={k}");
+        }
         retained = retained.saturating_add(rows.len());
         encoded_bytes = encoded_bytes.saturating_add(
             serde_json::to_vec(&rows)
@@ -202,8 +207,8 @@ pub(super) fn capture_bounded(
             .map(|hit| (hit.logical_id, hit.score))
             .collect();
         assert_eq!(
-            distributed_rows, expected,
-            "distributed result diverged at K={k}"
+            distributed_rows, rows,
+            "distributed result diverged from local at K={k}"
         );
         assert_eq!(distributed.total_hits, actual.total_hits);
         assert!(

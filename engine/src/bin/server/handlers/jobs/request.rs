@@ -32,6 +32,8 @@ pub(super) struct BoostBody {
 #[serde(deny_unknown_fields)]
 pub(super) struct RankBody {
     #[serde(default, deserialize_with = "deserialize_non_null")]
+    pub(super) profile: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_non_null")]
     pub(super) priority_field: Option<String>,
     #[serde(default)]
     pub(super) boosts: Vec<BoostBody>,
@@ -40,6 +42,7 @@ pub(super) struct RankBody {
 impl RankBody {
     fn into_spec(self) -> reverse_rusty::RankProgramSpec {
         reverse_rusty::RankProgramSpec {
+            profile: self.profile,
             priority_field: Some(
                 self.priority_field
                     .unwrap_or_else(|| "priority".to_string()),
@@ -167,6 +170,12 @@ pub(super) fn request_fingerprint(
         None => piece(&[0]),
         Some(rank) => {
             piece(&[1]);
+            piece(
+                rank.profile
+                    .as_deref()
+                    .unwrap_or(reverse_rusty::STATIC_RANK_PROFILE)
+                    .as_bytes(),
+            );
             piece(rank.priority_field.as_deref().unwrap_or("").as_bytes());
             // Canonicalize the raw semantic key rather than the compiled
             // TagId. A standalone TagDict grows as writes intern new tags, so

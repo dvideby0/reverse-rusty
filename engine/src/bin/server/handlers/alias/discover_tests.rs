@@ -62,6 +62,7 @@ fn test_state(queries: &[(u64, String)]) -> Arc<AppState> {
         search_permits: None,
         ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(1)),
         exhaustive_jobs: crate::jobs::ExhaustiveJobs::for_tests(prom.clone()),
+        rank_profiles: Arc::new(reverse_rusty::RankProfiles::default()),
         max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
         include_broad: false,
         prom,

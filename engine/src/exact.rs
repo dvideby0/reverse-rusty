@@ -31,8 +31,8 @@ mod store;
 mod tests;
 
 pub(crate) use predicate::{
-    encode_predicate, eval_predicate_batch, predicate_has_phrases, validate_predicate,
-    verify_predicate,
+    encode_predicate, eval_predicate_batch, predicate_boolean_program, predicate_has_phrases,
+    predicate_rank_term_counts, validate_predicate, verify_predicate,
 };
 pub use slices::{eval_batch_slices, prefilter_slices, verify_slices};
 pub use store::ExactStore;

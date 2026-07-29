@@ -1,6 +1,6 @@
 use super::{
-    infallible, DeadlineAt, DeadlineCheck, EngineSnapshot, Instant, MatchScratch, MatchView,
-    NoDeadline, TagPredicate, TopKCollector, TopKScorer,
+    infallible, DeadlineAt, DeadlineCheck, EngineSnapshot, Instant, MatchCancelled, MatchScratch,
+    MatchView, NoDeadline, TagPredicate, TopKCollector, TopKScorer,
 };
 
 impl EngineSnapshot {
@@ -73,14 +73,26 @@ impl EngineSnapshot {
                 },
             ));
         }
+        // Queue time belongs to the request deadline. Rich-profile title
+        // extraction is linear in title bytes, so reject an already-expired
+        // request before doing that preprocessing; the matcher retains its own
+        // entry check for expiry after extraction.
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            return Err(crate::rank::RankedMatchError::Cancelled(MatchCancelled));
+        }
         let threshold =
             usize::try_from(options.track_total_hits_up_to).unwrap_or(crate::result::MAX_TOP_K);
+        let title_features = [if program.is_static_profile() {
+            crate::rank::RankTitleFeatures::default()
+        } else {
+            crate::rank::RankTitleFeatures::from_title(title)
+        }];
         if let Some(at) = deadline {
             let mut collector = TopKCollector::new_polling(
                 options.size,
                 threshold,
                 options.search_after,
-                self.program_scorer_with_poll(program),
+                self.program_scorer_with_poll(program, &title_features),
             );
             self.collect_top_k_with_policy(
                 title,
@@ -97,7 +109,7 @@ impl EngineSnapshot {
                 options.size,
                 threshold,
                 options.search_after,
-                self.program_scorer(program),
+                self.program_scorer(program, &title_features),
             );
             Ok(infallible(self.collect_top_k_with_policy(
                 title,

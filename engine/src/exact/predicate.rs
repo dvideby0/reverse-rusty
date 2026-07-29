@@ -7,13 +7,16 @@
 //!
 //! ```text
 //! version
+//! # versions 3/4 only:
+//! semantic_positive_group_count
+//! semantic_positive_group_term_count
 //! positive_group_count
 //!   member_count
 //!     requirement_count
 //!       alternative_count feature_id...
 //! negative_conjunction_count
 //!   feature_count feature_id...
-//! # version 2 only:
+//! # versions 2/4 only:
 //! required_phrase_count
 //!   positions arc_count
 //!     start end alternative_count feature_id...
@@ -33,24 +36,45 @@ use crate::normalize::{PhraseGraph, PHRASE_GRAPH_MAX_STATES, PHRASE_GRAPH_MAX_WO
 
 const FEATURE_PROGRAM_VERSION: u32 = 1;
 const PHRASE_PROGRAM_VERSION: u32 = 2;
+const RANK_FEATURE_PROGRAM_VERSION: u32 = 3;
+const RANK_PHRASE_PROGRAM_VERSION: u32 = 4;
 
 /// Append `ex`'s optional compound predicate and return its `(offset, length)`.
 pub(crate) fn encode_predicate(ex: &Extracted, blob: &mut Vec<u32>) -> (u32, u32) {
+    let proxy_anyof_groups = u32::try_from(ex.anyof.len()).unwrap_or(u32::MAX);
+    let semantic_anyof_groups = ex
+        .semantic_anyof_groups
+        .max(proxy_anyof_groups)
+        .max(u32::try_from(ex.anyof_predicates.len()).unwrap_or(u32::MAX));
+    let reconstructed_anyof_terms = ex
+        .anyof_predicates
+        .iter()
+        .fold(semantic_anyof_groups, |terms, predicate| {
+            terms.saturating_add(compound_extra_terms(predicate))
+        });
+    let semantic_anyof_terms = ex
+        .semantic_anyof_terms
+        .max(reconstructed_anyof_terms)
+        .max(semantic_anyof_groups);
     if ex.anyof_predicates.is_empty()
         && ex.forbidden_conjunctions.is_empty()
         && ex.required_phrases.is_empty()
         && ex.forbidden_phrases.is_empty()
+        && semantic_anyof_groups == proxy_anyof_groups
+        && semantic_anyof_terms == proxy_anyof_groups
     {
         return (blob.len() as u32, 0);
     }
 
     let offset = blob.len() as u32;
     let version = if ex.required_phrases.is_empty() && ex.forbidden_phrases.is_empty() {
-        FEATURE_PROGRAM_VERSION
+        RANK_FEATURE_PROGRAM_VERSION
     } else {
-        PHRASE_PROGRAM_VERSION
+        RANK_PHRASE_PROGRAM_VERSION
     };
     blob.push(version);
+    blob.push(semantic_anyof_groups);
+    blob.push(semantic_anyof_terms);
     blob.push(ex.anyof_predicates.len() as u32);
     for predicate in &ex.anyof_predicates {
         blob.push(predicate.members.len() as u32);
@@ -67,11 +91,21 @@ pub(crate) fn encode_predicate(ex: &Extracted, blob: &mut Vec<u32>) -> (u32, u32
         blob.push(conjunction.len() as u32);
         blob.extend_from_slice(conjunction);
     }
-    if version == PHRASE_PROGRAM_VERSION {
+    if version == RANK_PHRASE_PROGRAM_VERSION {
         encode_phrases(&ex.required_phrases, blob);
         encode_phrases(&ex.forbidden_phrases, blob);
     }
     (offset, blob.len() as u32 - offset)
+}
+
+fn compound_extra_terms(predicate: &crate::compile::AnyOfPredicate) -> u32 {
+    predicate
+        .members
+        .iter()
+        .map(|member| u32::try_from(member.requirements.len()).unwrap_or(u32::MAX))
+        .min()
+        .unwrap_or(0)
+        .saturating_sub(1)
 }
 
 fn encode_phrases(phrases: &[PhraseGraph], blob: &mut Vec<u32>) {
@@ -90,7 +124,133 @@ fn encode_phrases(phrases: &[PhraseGraph], blob: &mut Vec<u32>) {
 
 #[inline]
 pub(crate) fn predicate_has_phrases(words: &[u32]) -> bool {
-    words.first().copied() == Some(PHRASE_PROGRAM_VERSION)
+    matches!(
+        words.first().copied(),
+        Some(PHRASE_PROGRAM_VERSION | RANK_PHRASE_PROGRAM_VERSION)
+    )
+}
+
+/// Return the canonical Boolean portion of a predicate program.
+///
+/// Versions 3/4 prepend two ranking-only words to the corresponding v1/v2
+/// Boolean program. Canonical-body dedup must ignore those words: members may
+/// share retrieval and exact verification while retaining different per-query
+/// ranking features. A metadata-only program is therefore Boolean-equivalent
+/// to no predicate program at all.
+#[inline]
+pub(crate) fn predicate_boolean_program(words: &[u32]) -> (u32, &[u32]) {
+    let Some(&version) = words.first() else {
+        return (0, &[]);
+    };
+    let (boolean_version, body) = match version {
+        FEATURE_PROGRAM_VERSION => (FEATURE_PROGRAM_VERSION, &words[1..]),
+        PHRASE_PROGRAM_VERSION => (PHRASE_PROGRAM_VERSION, &words[1..]),
+        RANK_FEATURE_PROGRAM_VERSION => (FEATURE_PROGRAM_VERSION, &words[3..]),
+        RANK_PHRASE_PROGRAM_VERSION => (PHRASE_PROGRAM_VERSION, &words[3..]),
+        _ => (version, &words[1..]),
+    };
+    let empty = match boolean_version {
+        FEATURE_PROGRAM_VERSION => body == [0, 0],
+        PHRASE_PROGRAM_VERSION => body == [0, 0, 0, 0],
+        _ => false,
+    };
+    if empty {
+        (0, &[])
+    } else {
+        (boolean_version, body)
+    }
+}
+
+/// Return complete any-of/phrase positive terms, predicate-backed negative
+/// terms, and the semantic any-of count.
+///
+/// Flat required/forbidden columns are counted by callers. Versions 3/4 carry
+/// exact semantic group and shortest-member term totals captured before
+/// retrieval-proxy or predicate deduplication. Versions 1/2 recover the exact
+/// count for distinct encoded compound groups where possible; the compiler
+/// semantics fence source-rebuilds or rejects legacy rows whose pre-dedup
+/// totals cannot be reconstructed. Quoted graphs contribute their analyzer
+/// positions; forbidden conjunctions contribute every feature in the
+/// conjunction. Programs have already been validated when built or opened,
+/// keeping this scoring-path walk allocation-free.
+#[inline]
+pub(crate) fn predicate_rank_term_counts(
+    words: &[u32],
+    proxy_anyof_groups: u32,
+) -> (u32, u32, u32) {
+    if words.is_empty() {
+        return (proxy_anyof_groups, 0, proxy_anyof_groups);
+    }
+
+    let version = words[0];
+    let mut at = 1usize;
+    let semantic_anyof = if matches!(
+        version,
+        RANK_FEATURE_PROGRAM_VERSION | RANK_PHRASE_PROGRAM_VERSION
+    ) {
+        let groups = words[at];
+        let terms = words[at + 1];
+        at += 2;
+        Some((groups, terms))
+    } else {
+        None
+    };
+    let positive_group_count = words[at] as usize;
+    at += 1;
+    let mut compound_extra = 0u32;
+    for _ in 0..positive_group_count {
+        let member_count = words[at] as usize;
+        at += 1;
+        let mut shortest_member = u32::MAX;
+        for _ in 0..member_count {
+            let requirement_count = words[at];
+            at += 1;
+            shortest_member = shortest_member.min(requirement_count);
+            for _ in 0..requirement_count {
+                let alternative_count = words[at] as usize;
+                at += 1 + alternative_count;
+            }
+        }
+        compound_extra = compound_extra.saturating_add(shortest_member.saturating_sub(1));
+    }
+
+    let negative_conjunction_count = words[at] as usize;
+    at += 1;
+    let mut negative_terms = 0u32;
+    for _ in 0..negative_conjunction_count {
+        let feature_count = words[at];
+        at += 1 + feature_count as usize;
+        negative_terms = negative_terms.saturating_add(feature_count);
+    }
+
+    let mut phrase_positive_terms = 0u32;
+    if matches!(
+        version,
+        PHRASE_PROGRAM_VERSION | RANK_PHRASE_PROGRAM_VERSION
+    ) {
+        let required_phrase_count = words[at] as usize;
+        at += 1;
+        for _ in 0..required_phrase_count {
+            phrase_positive_terms = phrase_positive_terms.saturating_add(words[at]);
+            skip_graph(words, &mut at);
+        }
+        let forbidden_phrase_count = words[at] as usize;
+        at += 1;
+        for _ in 0..forbidden_phrase_count {
+            negative_terms = negative_terms.saturating_add(words[at]);
+            skip_graph(words, &mut at);
+        }
+    }
+    let (semantic_anyof_groups, semantic_anyof_terms) = semantic_anyof.unwrap_or_else(|| {
+        let groups =
+            proxy_anyof_groups.max(u32::try_from(positive_group_count).unwrap_or(u32::MAX));
+        (groups, groups.saturating_add(compound_extra))
+    });
+    (
+        semantic_anyof_terms.saturating_add(phrase_positive_terms),
+        negative_terms,
+        semantic_anyof_groups,
+    )
 }
 
 /// Validate one persisted predicate program before the mmap hot path can see it.
@@ -100,20 +260,43 @@ pub(crate) fn validate_predicate(words: &[u32]) -> Result<(), &'static str> {
     }
     let mut at = 0usize;
     let version = read_word(words, &mut at)?;
-    if !matches!(version, FEATURE_PROGRAM_VERSION | PHRASE_PROGRAM_VERSION) {
+    if !matches!(
+        version,
+        FEATURE_PROGRAM_VERSION
+            | PHRASE_PROGRAM_VERSION
+            | RANK_FEATURE_PROGRAM_VERSION
+            | RANK_PHRASE_PROGRAM_VERSION
+    ) {
         return Err("unsupported compound predicate version");
     }
+    let semantic_anyof = if matches!(
+        version,
+        RANK_FEATURE_PROGRAM_VERSION | RANK_PHRASE_PROGRAM_VERSION
+    ) {
+        Some((read_word(words, &mut at)?, read_word(words, &mut at)?))
+    } else {
+        None
+    };
     let positive_count = read_word(words, &mut at)?;
+    if semantic_anyof.is_some_and(|(groups, _)| groups < positive_count) {
+        return Err("semantic any-of count is smaller than compound group count");
+    }
+    if semantic_anyof.is_some_and(|(groups, terms)| terms < groups) {
+        return Err("semantic any-of term count is smaller than group count");
+    }
+    let mut minimum_compound_extra = 0u32;
     for _ in 0..positive_count {
         let member_count = read_word(words, &mut at)?;
         if member_count == 0 {
             return Err("compound positive group has no members");
         }
+        let mut shortest_member = u32::MAX;
         for _ in 0..member_count {
             let requirement_count = read_word(words, &mut at)?;
             if requirement_count == 0 {
                 return Err("compound member has no requirements");
             }
+            shortest_member = shortest_member.min(requirement_count);
             for _ in 0..requirement_count {
                 let alternative_count = read_word(words, &mut at)?;
                 if alternative_count == 0 {
@@ -122,6 +305,13 @@ pub(crate) fn validate_predicate(words: &[u32]) -> Result<(), &'static str> {
                 take_words(words, &mut at, alternative_count)?;
             }
         }
+        minimum_compound_extra =
+            minimum_compound_extra.saturating_add(shortest_member.saturating_sub(1));
+    }
+    if semantic_anyof
+        .is_some_and(|(groups, terms)| terms < groups.saturating_add(minimum_compound_extra))
+    {
+        return Err("semantic any-of term count omits compound requirements");
     }
     let negative_count = read_word(words, &mut at)?;
     for _ in 0..negative_count {
@@ -131,7 +321,10 @@ pub(crate) fn validate_predicate(words: &[u32]) -> Result<(), &'static str> {
         }
         take_words(words, &mut at, feature_count)?;
     }
-    if version == PHRASE_PROGRAM_VERSION {
+    if matches!(
+        version,
+        PHRASE_PROGRAM_VERSION | RANK_PHRASE_PROGRAM_VERSION
+    ) {
         let required = validate_phrases(words, &mut at)?;
         let forbidden = validate_phrases(words, &mut at)?;
         if required == 0 && forbidden == 0 {
@@ -217,6 +410,12 @@ pub(crate) fn verify_predicate(words: &[u32], view: &TitleView<'_>) -> bool {
 
     let version = words[0];
     let mut at = 1usize; // version was validated when persisted/built
+    if matches!(
+        version,
+        RANK_FEATURE_PROGRAM_VERSION | RANK_PHRASE_PROGRAM_VERSION
+    ) {
+        at += 2; // ranking-only semantic any-of group + term counts
+    }
     let positive_count = words[at] as usize;
     at += 1;
     for _ in 0..positive_count {
@@ -261,7 +460,10 @@ pub(crate) fn verify_predicate(words: &[u32], view: &TitleView<'_>) -> bool {
             return false;
         }
     }
-    if version == PHRASE_PROGRAM_VERSION {
+    if matches!(
+        version,
+        PHRASE_PROGRAM_VERSION | RANK_PHRASE_PROGRAM_VERSION
+    ) {
         let required_count = words[at] as usize;
         at += 1;
         let required_start = at;
@@ -411,7 +613,14 @@ pub(crate) fn eval_predicate_batch<'a>(
         return;
     }
 
+    let version = words[0];
     let mut at = 1usize;
+    if matches!(
+        version,
+        RANK_FEATURE_PROGRAM_VERSION | RANK_PHRASE_PROGRAM_VERSION
+    ) {
+        at += 2; // ranking-only semantic any-of group + term counts
+    }
     let positive_count = words[at] as usize;
     at += 1;
     for _ in 0..positive_count {

@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "profiles": {
+    "linear_v1": {
+      "kind": "linear",
+      "expected_fingerprint": "fnv1a64:b79de9ce5a0231d6",
+      "intercept": 0,
+      "weights": [
+        {
+          "feature": "query_positive_terms",
+          "weight": 120
+        },
+        {
+          "feature": "query_negative_terms",
+          "weight": 20
+        },
+        {
+          "feature": "unmatched_title_tokens",
+          "weight": -15
+        }
+      ]
+    },
+    "ltr_v1": {
+      "kind": "tree_ensemble",
+      "expected_fingerprint": "fnv1a64:f11561d8f5fd9d88",
+      "base_score": 0,
+      "trees": [
+        {
+          "nodes": [
+            {
+              "kind": "split",
+              "feature": "positive_coverage_milli",
+              "threshold": 500,
+              "left": 1,
+              "right": 2
+            },
+            {
+              "kind": "leaf",
+              "value": -80
+            },
+            {
+              "kind": "leaf",
+              "value": 80
+            }
+          ]
+        },
+        {
+          "nodes": [
+            {
+              "kind": "split",
+              "feature": "query_positive_terms",
+              "threshold": 1,
+              "left": 1,
+              "right": 2
+            },
+            {
+              "kind": "leaf",
+              "value": -30
+            },
+            {
+              "kind": "leaf",
+              "value": 30
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

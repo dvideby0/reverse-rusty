@@ -61,6 +61,7 @@ fn corpus() -> Corpus {
 
 fn program() -> RankProgramSpec {
     RankProgramSpec {
+        profile: None,
         priority_field: None,
         boosts: vec![
             ("tier".to_string(), "gold".to_string(), 17),

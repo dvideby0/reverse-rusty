@@ -72,7 +72,8 @@ response; a deadline returns a structured 408 instead of partial hits. `took_ms`
 higher-precision extension. Native v2 keeps numeric `_id` and does not synthesize an `_index`,
 because stored queries are logical IDs rather than resources in a caller-selected index.
 
-Defaults are `result_mode="top_k"`, `query_scope="standard"`, `size=100`, typed `priority` ranking,
+Defaults are `result_mode="top_k"`, `query_scope="standard"`, `size=100`, `static_v1` ranking with
+typed `priority`,
 `track_total_hits_up_to=10000`, `include_source=true`, `explain=false`,
 `allow_partial_results=false`, and `timeout_ms=5000`. Hard limits are `size <= 10000` and
 `track_total_hits_up_to <= 10000`. A native `filter` uses the same tag predicate as compatibility
@@ -101,8 +102,16 @@ cluster configuration returns 503. `allow_partial_results=true` remains a 400. M
 the same structured 400 envelope; missing/wrong content type remains 415 and an oversized body
 remains 413 rather than being flattened into a generic validation status.
 
-The optional rank program supports only `priority_field="priority"` plus additive integer tag boosts.
-Unknown rank fields return `unsupported_rank_field`. `result_mode="all"` or `"terminated"`,
+The optional rank program accepts `profile`, `priority_field="priority"`, and additive integer tag
+boosts. `profile` defaults to the built-in `static_v1`; operator-loaded `linear` and
+`tree_ensemble` profiles add title-dependent relevance, producing
+`profile relevance + priority + matching boosts`. Profile arithmetic is saturating integer math and
+ties remain `_id` ascending. Unknown profiles return `unknown_rank_profile`; unknown priority fields
+return `unsupported_rank_field`. K bounds retained and returned hits, but every confirmed match is
+still scored. Non-static profiles are supported in single-node and in-process cluster modes; a
+remote/gRPC coordinator fails with `501 rank_profile_transport_unsupported` rather than changing
+scores. See [ADR-162](../../decisions/adr-162-versioned-cpu-ranking-profiles.md).
+`result_mode="all"` or `"terminated"`,
 `allow_partial_results=true`, `from`, `documents`, and `query` return explicit 400s.
 
 ## `POST /v2/_pit`, `DELETE /v2/_pit` — Point-in-time cursor pagination (ADR-113/129/130)
@@ -187,7 +196,8 @@ gauge tracks them.
 
 Cursor rules: a FULL page (`hits.length == size`, `size > 0`) returns `next_cursor`; a short page
 ends the stream (no cursor). The client resends the **same** `document`/`query_scope`/`rank`/
-`filter` with each cursor — they are fingerprinted into the token and a drifted resend is a 400
+`filter` with each cursor — matcher semantics and any non-static title-feature tuple are
+fingerprinted into the token, and a drifted resend is a 400
 `cursor_mismatch`; `size`, `timeout_ms`, and `track_total_hits_up_to` may vary per page. Totals
 are page-invariant (every page of one PIT reports the identical total). `pit` + `cursor` together
 is a 400. Concatenating pages yields exactly the one-shot ranked result over the same PIT — no
@@ -239,6 +249,10 @@ optional. The JSON request schema and its typed nested objects are strict: unkno
 duplicate schema controls, explicit nulls, malformed JSON, and wrong types are structured 400
 errors. Missing/wrong JSON content type is 415, and the endpoint rejects a body larger than 1 MiB
 with 413 before JSON deserialization.
+
+Named non-static profiles execute in single-node and in-process cluster jobs. A remote/gRPC job
+cannot carry the model program: it may be admitted asynchronously, then records a terminal
+`rank_profile_transport_unsupported` failure before any rank RPC. Use `static_v1` in that topology.
 
 The execution deadline can be supplied in the body or query string as native `timeout_ms` or as
 ES/OpenSearch-style `timeout`, but aliases and locations are mutually exclusive. `timeout` is a

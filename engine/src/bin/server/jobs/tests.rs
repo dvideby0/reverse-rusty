@@ -140,7 +140,11 @@ fn worker_failure_keeps_its_concrete_status_diagnostic() {
             [0x5A; 32],
             QueryScope::Standard,
             Duration::from_secs(1),
-            |_sink, _deadline| Err("shard 2 failed exact convergence".to_string()),
+            |_sink, _deadline| {
+                Err(JobExecutionError::generic(
+                    "shard 2 failed exact convergence",
+                ))
+            },
         )
         .expect("job admitted");
 

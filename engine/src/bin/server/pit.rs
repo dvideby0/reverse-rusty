@@ -168,9 +168,11 @@ impl PitTokens {
 /// matcher distinguishes (codex review). Boosts are reduced to their EFFECTIVE
 /// compiled map first (`compile_rank_program` is last-write-wins per
 /// `(key, value)`), so duplicate-boost reorderings that change scoring change
-/// the fingerprint too. Every variable-length region is count-prefixed and
-/// every piece length-prefixed — no cross-section ambiguity. Filter groups
-/// keep their key→values structure (a flattened encoding would collide
+/// the fingerprint too. Non-static profiles also bind the exact title-feature
+/// tuple used by ranking; normalized-equivalent surface titles can differ in
+/// byte or digit counts and therefore in score. Every variable-length region is
+/// count-prefixed and every piece length-prefixed — no cross-section ambiguity.
+/// Filter groups keep their key→values structure; flattening would collide
 /// `{"a":["b","c"]}` with `{"a":["b"],"c":[]}`); values within a group are
 /// sorted (JSON order is not semantic), groups sorted by key.
 /// `size`/`timeout_ms`/`track_total_hits_up_to` are deliberately excluded —
@@ -228,6 +230,17 @@ pub(crate) fn request_fingerprint(
         QueryScope::Standard => 0u8,
         QueryScope::WithBroad => 1u8,
     }]);
+    let profile_name = rank
+        .profile
+        .as_deref()
+        .unwrap_or(reverse_rusty::STATIC_RANK_PROFILE);
+    piece(profile_name.as_bytes());
+    if profile_name != reverse_rusty::STATIC_RANK_PROFILE {
+        let title_features = reverse_rusty::RankTitleFeatures::from_title(title);
+        piece(&title_features.tokens.to_le_bytes());
+        piece(&title_features.bytes.to_le_bytes());
+        piece(&title_features.digits.to_le_bytes());
+    }
     piece(rank.priority_field.as_deref().unwrap_or("").as_bytes());
 
     // The effective boost program: last-write-wins per (key, value), exactly
@@ -425,6 +438,7 @@ mod tests {
             request_fingerprint(&norm, &dict, title, scope, rank, filter)
         };
         let rank = RankProgramSpec {
+            profile: None,
             priority_field: Some("priority".into()),
             boosts: vec![("tier".into(), "gold".into(), 100)],
         };
@@ -440,6 +454,16 @@ mod tests {
         assert_eq!(
             base,
             fp("  Acme   CHROME ", QueryScope::Standard, &rank, &filter)
+        );
+        let learned = RankProgramSpec {
+            profile: Some("linear_v1".into()),
+            priority_field: None,
+            boosts: Vec::new(),
+        };
+        assert_ne!(
+            fp("acme", QueryScope::Standard, &learned, &[]),
+            fp(" acme ", QueryScope::Standard, &learned, &[]),
+            "learned-profile cursors must bind exact title features"
         );
 
         // Every covered component moves it.
@@ -507,10 +531,12 @@ mod tests {
         // program, so it must change the fingerprint — while true duplicates
         // in a different interleaving (same effective map) must not.
         let last_wins_a = RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: vec![("k".into(), "v".into(), 1), ("k".into(), "v".into(), 2)],
         };
         let last_wins_b = RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: vec![("k".into(), "v".into(), 2), ("k".into(), "v".into(), 1)],
         };
@@ -519,6 +545,7 @@ mod tests {
             request_fingerprint(&norm, &dict, "t", QueryScope::Standard, &last_wins_b, &[])
         );
         let effective_same = RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: vec![
                 ("k".into(), "v".into(), 1),
@@ -527,6 +554,7 @@ mod tests {
             ],
         };
         let effective_same_reordered = RankProgramSpec {
+            profile: None,
             priority_field: None,
             boosts: vec![("j".into(), "w".into(), 3), ("k".into(), "v".into(), 2)],
         };

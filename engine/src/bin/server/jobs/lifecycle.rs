@@ -15,8 +15,8 @@ use crate::metrics::PrometheusMetrics;
 
 use super::stream::{CompletionState, JobChunkSink, JobFrame, TerminalRequest, TerminalResolution};
 use super::{
-    ExhaustiveJobConfig, ExhaustiveJobs, JobPhase, JobRecord, JobState, Registry, StartError,
-    StartOutcome,
+    ExhaustiveJobConfig, ExhaustiveJobs, JobExecutionError, JobPhase, JobRecord, JobState,
+    Registry, StartError, StartOutcome,
 };
 
 struct JobPermit {
@@ -120,7 +120,7 @@ impl ExhaustiveJobs {
         execute: F,
     ) -> Result<StartOutcome, StartError>
     where
-        F: FnOnce(&mut dyn ChunkSink, Instant) -> Result<ExhaustiveSummary, String>
+        F: FnOnce(&mut dyn ChunkSink, Instant) -> Result<ExhaustiveSummary, JobExecutionError>
             + Send
             + 'static,
     {
@@ -215,7 +215,7 @@ impl ExhaustiveJobs {
         permit: JobPermit,
         execute: F,
     ) where
-        F: FnOnce(&mut dyn ChunkSink, Instant) -> Result<ExhaustiveSummary, String>,
+        F: FnOnce(&mut dyn ChunkSink, Instant) -> Result<ExhaustiveSummary, JobExecutionError>,
     {
         let mut sink = JobChunkSink::new(
             tx,
@@ -227,9 +227,11 @@ impl ExhaustiveJobs {
             &self.prom,
         );
         let result = if record.cancel.load(Ordering::Acquire) {
-            Err("job cancelled before execution".to_string())
+            Err(JobExecutionError::generic("job cancelled before execution"))
         } else if Instant::now() >= deadline {
-            Err("job deadline exceeded before execution".to_string())
+            Err(JobExecutionError::generic(
+                "job deadline exceeded before execution",
+            ))
         } else {
             execute(&mut sink, deadline)
         };
@@ -241,7 +243,7 @@ impl ExhaustiveJobs {
                         record,
                         &sink,
                         "cancelled",
-                        "job cancelled".into(),
+                        JobExecutionError::generic("job cancelled"),
                         Some(summary),
                     )
                 } else if Instant::now() >= deadline {
@@ -249,7 +251,7 @@ impl ExhaustiveJobs {
                         record,
                         &sink,
                         "deadline_exceeded",
-                        "job deadline exceeded".into(),
+                        JobExecutionError::generic("job deadline exceeded"),
                         Some(summary),
                     )
                 } else {
@@ -259,24 +261,26 @@ impl ExhaustiveJobs {
                             record,
                             &sink,
                             "delivery_failed",
-                            error.to_string(),
+                            JobExecutionError::generic(error.to_string()),
                             Some(summary),
                         ),
                     }
                 }
             }
             Err(error) => {
-                let detail = if Instant::now() >= deadline {
-                    "job deadline exceeded".to_string()
+                let error = if Instant::now() >= deadline {
+                    JobExecutionError::generic("job deadline exceeded")
                 } else {
                     error
                 };
-                let code = if detail.contains("deadline exceeded") {
+                let code = if error.detail.contains("deadline exceeded") {
                     "deadline_exceeded"
+                } else if error.error_type != "exhaustive_job_failed" {
+                    error.error_type
                 } else {
                     "delivery_failed"
                 };
-                Self::commit_failure(record, &sink, code, detail, None)
+                Self::commit_failure(record, &sink, code, error, None)
             }
         };
         // Publish the terminal record and release admission capacity as one
@@ -293,24 +297,32 @@ impl ExhaustiveJobs {
         record: &JobRecord,
         sink: &JobChunkSink<'_>,
         code: &'static str,
-        detail: String,
+        error: JobExecutionError,
         completed_summary: Option<ExhaustiveSummary>,
-    ) -> (JobPhase, Option<ExhaustiveSummary>, Option<String>) {
+    ) -> (
+        JobPhase,
+        Option<ExhaustiveSummary>,
+        Option<JobExecutionError>,
+    ) {
         match record.completion.resolve_terminal(TerminalRequest::Failed) {
             TerminalResolution::Completed => (JobPhase::Completed, completed_summary, None),
             TerminalResolution::Cancelled => {
                 sink.send_failure_best_effort("cancelled", "job cancelled");
-                (JobPhase::Cancelled, None, Some("job cancelled".into()))
+                (
+                    JobPhase::Cancelled,
+                    None,
+                    Some(JobExecutionError::generic("job cancelled")),
+                )
             }
             TerminalResolution::Failed(canonical) => {
-                let detail = canonical.unwrap_or(detail);
-                let code = if detail.contains("deadline exceeded") {
+                let error = canonical.map_or(error, JobExecutionError::generic);
+                let code = if error.detail.contains("deadline exceeded") {
                     "deadline_exceeded"
                 } else {
                     code
                 };
-                sink.send_failure_best_effort(code, &detail);
-                (JobPhase::Failed, None, Some(detail))
+                sink.send_failure_best_effort(code, &error.detail);
+                (JobPhase::Failed, None, Some(error))
             }
         }
     }
@@ -320,7 +332,7 @@ impl ExhaustiveJobs {
         record: &JobRecord,
         phase: JobPhase,
         summary: Option<ExhaustiveSummary>,
-        failure: Option<String>,
+        failure: Option<JobExecutionError>,
         permit: JobPermit,
     ) {
         let requested = match phase {
@@ -330,16 +342,22 @@ impl ExhaustiveJobs {
         };
         let (phase, summary, failure) = match record.completion.resolve_terminal(requested) {
             TerminalResolution::Completed => (JobPhase::Completed, summary, None),
-            TerminalResolution::Cancelled => {
-                (JobPhase::Cancelled, None, Some("job cancelled".to_string()))
-            }
+            TerminalResolution::Cancelled => (
+                JobPhase::Cancelled,
+                None,
+                Some(JobExecutionError::generic("job cancelled")),
+            ),
             TerminalResolution::Failed(canonical) => {
                 // `commit_failure` has already resolved cancellation/deadline
                 // races and returns their canonical detail when they won. On
                 // the second resolution below the terminal gate can only
                 // reconstruct the generic `ExecutionFailed` text, so prefer
                 // the concrete worker/delivery diagnostic carried here.
-                (JobPhase::Failed, None, failure.or(canonical))
+                (
+                    JobPhase::Failed,
+                    None,
+                    failure.or_else(|| canonical.map(JobExecutionError::generic)),
+                )
             }
         };
         // `start` holds this registry lock while it acquires a permit and

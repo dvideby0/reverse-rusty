@@ -1,4 +1,4 @@
-use super::{predicate_has_phrases, ExactStore, FeatureId};
+use super::{predicate_boolean_program, predicate_has_phrases, ExactStore, FeatureId};
 
 impl ExactStore {
     /// Whether query `local`'s ENTIRE semantics is its single hot anchor: one
@@ -22,8 +22,9 @@ impl ExactStore {
     /// a 64-bit hash over the query's SEMANTIC columns only — the two mask
     /// words, the required/forbidden tails as SORTED sets, the any-of groups as
     /// a SORTED multiset of sorted proxy sets, and the canonical compound
-    /// predicate program. Tags, version and logical id are deliberately
-    /// excluded (they are per-member identity, not semantics). Two queries with
+    /// predicate program. Ranking-only predicate metadata, tags, version and
+    /// logical id are deliberately excluded (they are per-member identity, not
+    /// Boolean semantics). Two queries with
     /// equal signatures are *candidates* for sharing; the caller must confirm
     /// with [`bodies_equal`](Self::bodies_equal) (a hash collision must never
     /// cause false sharing — that would be a correctness bug, not a missed
@@ -64,7 +65,11 @@ impl ExactStore {
         mix(0xA5);
         let predicate_off = self.predicate_off[i] as usize;
         let predicate_len = self.predicate_len[i] as usize;
-        for &word in &self.predicate_blob[predicate_off..predicate_off + predicate_len] {
+        let (predicate_version, predicate) = predicate_boolean_program(
+            &self.predicate_blob[predicate_off..predicate_off + predicate_len],
+        );
+        mix(u64::from(predicate_version));
+        for &word in predicate {
             mix(u64::from(word));
         }
         h
@@ -99,7 +104,6 @@ impl ExactStore {
             || self.req_len[ia] != self.req_len[ib]
             || self.forb_len[ia] != self.forb_len[ib]
             || self.q_group_count[ia] != self.q_group_count[ib]
-            || self.predicate_len[ia] != self.predicate_len[ib]
         {
             return false;
         }
@@ -124,7 +128,7 @@ impl ExactStore {
         let predicate = |i: usize| {
             let off = self.predicate_off[i] as usize;
             let len = self.predicate_len[i] as usize;
-            &self.predicate_blob[off..off + len]
+            predicate_boolean_program(&self.predicate_blob[off..off + len])
         };
         predicate(ia) == predicate(ib)
     }

@@ -113,6 +113,9 @@ Four levels, each giving *just enough* to decide whether to go deeper:
 - [`research/percolator-workload.md`](research/percolator-workload.md) — the abstract **reference
   workload** a production percolator serves (per-query tags, filter-by-tag, two-stage recall+verify,
   ranking-as-presentation) and how Reverse Rusty maps to it (→ ADR-049, ADR-055, ADR-064).
+- [`research/learned-ranking.md`](research/learned-ranking.md) — static, linear, and
+  LambdaMART-style CPU ranking, the bounded neural-reranking boundary, and representative-corpus
+  evaluation (→ ADR-162).
 - [`research/clustering-prior-art.md`](research/clustering-prior-art.md) — consistent-hashing variants,
   content-based routing, and the ES distributed-percolator contrast (clustering design; → ADR-027).
 - [`research/dynamic-vocabulary.md`](research/dynamic-vocabulary.md) — absorbing new vocabulary after the

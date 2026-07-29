@@ -13,7 +13,7 @@ impl Rng {
     }
 }
 
-fn score(id: u64) -> i64 {
+fn score(_title_index: usize, id: u64) -> i64 {
     ((id.wrapping_mul(0x9E37_79B9) ^ (id >> 3)) % 41) as i64 - 20
 }
 
@@ -38,8 +38,10 @@ fn randomized_top_k_equals_collect_all_sort_and_truncate() {
                 expected_ids.sort_unstable();
                 expected_ids.dedup();
                 let exact_total = expected_ids.len();
-                let mut expected: Vec<(u64, i64)> =
-                    expected_ids.into_iter().map(|id| (id, score(id))).collect();
+                let mut expected: Vec<(u64, i64)> = expected_ids
+                    .into_iter()
+                    .map(|id| (id, score(0, id)))
+                    .collect();
                 expected.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 expected.truncate(k);
 
@@ -137,7 +139,7 @@ fn paging_by_search_after_concatenates_to_the_full_ranked_list() {
         expected_ids.sort_unstable();
         expected_ids.dedup();
         let mut expected: Vec<(u64, i64)> =
-            expected_ids.iter().map(|&id| (id, score(id))).collect();
+            expected_ids.iter().map(|&id| (id, score(0, id))).collect();
         expected.sort_unstable_by(|a, b| ranked_order((a.1, a.0), (b.1, b.0)));
 
         for &page in &[1usize, 3, 7, 50] {
@@ -196,5 +198,5 @@ fn batch_abort_clears_every_slot() {
     batch.on_match(1, 42);
     let summary = batch.finish();
     assert_eq!(summary.retained, 1);
-    assert_eq!(batch.slots()[1].winners(), &[(42, score(42))]);
+    assert_eq!(batch.slots()[1].winners(), &[(42, score(1, 42))]);
 }

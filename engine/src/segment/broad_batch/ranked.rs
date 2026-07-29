@@ -61,7 +61,7 @@ pub(in crate::segment) fn batch_top_k<P, F, T>(
 ) -> (Vec<RankedSlot>, MatchStats)
 where
     P: BatchEmissionPolicy,
-    F: Fn(u64) -> i64 + Sync,
+    F: Fn(usize, u64) -> i64 + Sync,
     T: AsRef<str> + Sync,
 {
     infallible(run_batch_top_k(
@@ -71,7 +71,7 @@ where
         total_threshold,
         policy_for,
         NoDeadline,
-        &|len| BatchTopKCollector::new(len, k, total_threshold, scorer),
+        &|base, len| BatchTopKCollector::new_with_base(len, k, total_threshold, base, scorer),
     ))
 }
 
@@ -88,7 +88,7 @@ pub(in crate::segment) fn try_batch_top_k<P, F, T>(
 ) -> Result<(Vec<RankedSlot>, MatchStats), MatchCancelled>
 where
     P: BatchEmissionPolicy,
-    F: Fn(u64, &mut dyn FnMut() -> bool) -> Option<i64> + Sync,
+    F: Fn(usize, u64, &mut dyn FnMut() -> bool) -> Option<i64> + Sync,
     T: AsRef<str> + Sync,
 {
     run_batch_top_k(
@@ -98,7 +98,9 @@ where
         total_threshold,
         policy_for,
         DeadlineAt(deadline),
-        &|len| BatchTopKCollector::new_polling(len, k, total_threshold, scorer),
+        &|base, len| {
+            BatchTopKCollector::new_polling_with_base(len, k, total_threshold, base, scorer)
+        },
     )
 }
 
@@ -110,7 +112,7 @@ fn run_batch_top_k<P, S, D, T>(
     total_threshold: usize,
     policy_for: &(impl Fn(usize, usize) -> P + Sync),
     deadline: D,
-    make_collector: &(impl Fn(usize) -> BatchTopKCollector<S> + Sync),
+    make_collector: &(impl Fn(usize, usize) -> BatchTopKCollector<S> + Sync),
 ) -> Result<(Vec<RankedSlot>, MatchStats), D::Cancelled>
 where
     P: BatchEmissionPolicy,
@@ -126,7 +128,8 @@ where
             || (MatchScratch::new(), BroadBatchScratch::new()),
             |(ms, bs), (ci, ct)| {
                 let mut st = MatchStats::default();
-                let mut collector = make_collector(ct.len());
+                let base = ci * chunk;
+                let mut collector = make_collector(base, ct.len());
                 match_batch_chunk(
                     view,
                     ct,
@@ -136,7 +139,7 @@ where
                     &mut collector,
                     &mut st,
                     deadline,
-                    policy_for(ci * chunk, ct.len()),
+                    policy_for(base, ct.len()),
                 )?;
                 Ok((harvest(&collector, &mut st), st))
             },

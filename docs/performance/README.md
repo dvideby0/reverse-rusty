@@ -47,6 +47,8 @@ cargo test --release                                          # correctness orac
 cargo run --release --bin bench -- 1000000 5000 0.0 2.0 60    # selective path benchmark
 cargo run --release --bin bench -- 1000000 5000 0.05 2.0 60   # with broad lane (shows its cost)
 cargo run --release --bin rankbench -- 20000 500 8 275775489  # ADR-107/108/110 local + distributed bounded top-K/fetch
+cargo run --release --bin rankbench -- 20000 500 8 275775489 \
+  ../deploy/ranking-profiles.example.json ltr_v1             # ADR-162 selected CPU profile
 cargo run --release --bin learn -- 500000 50 0.30            # corpus feature learner
 cargo run --release --bin segbench -- 300000 3000 0.0        # read-amplification vs segment count
 

@@ -9,8 +9,8 @@
 
 use reverse_rusty::segment::{Engine, MatchScratch};
 use reverse_rusty::{
-    EngineSnapshot, Normalizer, QueryScope, RankProgramSpec, RankSpec, RankValues, TopKOptions,
-    TotalHits,
+    EngineSnapshot, Normalizer, QueryScope, RankProfiles, RankProgramSpec, RankSpec, RankValues,
+    TopKOptions, TotalHits,
 };
 
 fn norm() -> Normalizer {
@@ -214,6 +214,7 @@ fn bounded_typed_top_k_matches_collect_all_full_sort() {
 
     let snap = eng.snapshot();
     let raw = RankProgramSpec {
+        profile: None,
         priority_field: Some("priority".into()),
         boosts: vec![boost("tier", "gold", 100)],
     };
@@ -274,6 +275,7 @@ fn bounded_top_k_honors_filters_size_zero_and_field_errors() {
     let snap = eng.snapshot();
     assert!(snap
         .compile_rank_program(&RankProgramSpec {
+            profile: None,
             priority_field: Some("unknown".into()),
             boosts: vec![],
         })
@@ -301,6 +303,367 @@ fn bounded_top_k_honors_filters_size_zero_and_field_errors() {
     assert!(got.hits.is_empty());
     assert_eq!(got.total_hits, TotalHits::exact(1));
     assert_eq!(got.rank_stats.evaluations, 0);
+}
+
+#[test]
+fn cpu_profiles_add_title_dependent_relevance_without_changing_membership() {
+    let profiles = RankProfiles::from_json_slice(
+        br#"{
+          "version": 1,
+          "profiles": {
+            "linear_v1": {
+              "kind": "linear",
+              "weights": [
+                {"feature": "query_positive_terms", "weight": 100},
+                {"feature": "unmatched_title_tokens", "weight": -10}
+              ]
+            },
+            "ltr_v1": {
+              "kind": "tree_ensemble",
+              "base_score": 5,
+              "trees": [{
+                "nodes": [
+                  {"kind": "split", "feature": "title_tokens",
+                   "threshold": 3, "left": 1, "right": 2},
+                  {"kind": "leaf", "value": 7},
+                  {"kind": "leaf", "value": 17}
+                ]
+              }]
+            }
+          }
+        }"#,
+    )
+    .expect("valid profile registry");
+    let mut engine = Engine::new(norm());
+    engine.insert_live("acme", 1, 1);
+    engine.insert_live("acme chrome pro", 2, 1);
+    let snapshot = engine.snapshot();
+    let predicate = reverse_rusty::exact::TagPredicate::empty();
+
+    let linear = snapshot
+        .compile_rank_program_with_profiles(
+            &RankProgramSpec {
+                profile: Some("linear_v1".into()),
+                priority_field: None,
+                boosts: Vec::new(),
+            },
+            &profiles,
+        )
+        .expect("linear profile");
+    let title = "acme chrome pro update";
+    let mut scratch = MatchScratch::new();
+    let ranked = snapshot
+        .try_match_title_top_k(
+            title,
+            TopKOptions {
+                size: 10,
+                track_total_hits_up_to: 10,
+                ..TopKOptions::default()
+            },
+            &linear,
+            &predicate,
+            &mut scratch,
+            None,
+        )
+        .expect("linear top-k");
+    assert_eq!(
+        ranked
+            .hits
+            .iter()
+            .map(|hit| hit.logical_id)
+            .collect::<Vec<_>>(),
+        vec![2, 1],
+        "the more specific confirmed query receives the higher relevance score"
+    );
+    let mut ranked_set: Vec<_> = ranked.hits.iter().map(|hit| hit.logical_id).collect();
+    ranked_set.sort_unstable();
+    assert_eq!(ranked_set, matched(&snapshot, title));
+    let expired = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_millis(1))
+        .expect("clock is past the epoch");
+    let error = snapshot
+        .try_match_title_top_k(
+            title,
+            TopKOptions::default(),
+            &linear,
+            &predicate,
+            &mut MatchScratch::new(),
+            Some(expired),
+        )
+        .expect_err("rich-profile preprocessing must honor an expired deadline");
+    assert!(matches!(
+        error,
+        reverse_rusty::RankedMatchError::Cancelled(_)
+    ));
+
+    let trees = snapshot
+        .compile_rank_program_with_profiles(
+            &RankProgramSpec {
+                profile: Some("ltr_v1".into()),
+                priority_field: None,
+                boosts: Vec::new(),
+            },
+            &profiles,
+        )
+        .expect("tree profile");
+    let score_for = |title: &str| {
+        let mut scratch = MatchScratch::new();
+        snapshot
+            .try_match_title_top_k(
+                title,
+                TopKOptions {
+                    size: 1,
+                    track_total_hits_up_to: 10,
+                    ..TopKOptions::default()
+                },
+                &trees,
+                &predicate,
+                &mut scratch,
+                None,
+            )
+            .expect("tree top-k")
+            .hits[0]
+            .score
+    };
+    assert_eq!(score_for("acme chrome"), 12);
+    assert_eq!(score_for("acme chrome pro update"), 22);
+
+    let unknown = snapshot.compile_rank_program_with_profiles(
+        &RankProgramSpec {
+            profile: Some("missing_v1".into()),
+            ..RankProgramSpec::default()
+        },
+        &profiles,
+    );
+    assert!(unknown.is_err(), "unknown profiles fail closed");
+}
+
+#[test]
+fn cpu_profiles_count_distinct_compound_groups_with_one_retrieval_proxy() {
+    let profiles = RankProfiles::from_json_slice(
+        br#"{
+          "version": 1,
+          "profiles": {
+            "groups_v1": {
+              "kind": "linear",
+              "weights": [
+                {"feature": "query_positive_terms", "weight": 1},
+                {"feature": "query_any_of_groups", "weight": 100}
+              ]
+            }
+          }
+        }"#,
+    )
+    .expect("valid group-count profile");
+    let mut engine = Engine::new(norm());
+    engine.insert_live("(red shoe,red boot) (red hat,red coat)", 1, 1);
+    let score = |snapshot: &EngineSnapshot| {
+        let program = snapshot
+            .compile_rank_program_with_profiles(
+                &RankProgramSpec {
+                    profile: Some("groups_v1".into()),
+                    priority_field: None,
+                    boosts: Vec::new(),
+                },
+                &profiles,
+            )
+            .expect("group-count rank program");
+        snapshot
+            .try_match_title_top_k(
+                "red shoe red hat",
+                TopKOptions {
+                    size: 1,
+                    track_total_hits_up_to: 10,
+                    ..TopKOptions::default()
+                },
+                &program,
+                &reverse_rusty::exact::TagPredicate::empty(),
+                &mut MatchScratch::new(),
+                None,
+            )
+            .expect("compound group top-k")
+            .hits[0]
+            .score
+    };
+
+    assert_eq!(score(&engine.snapshot()), 204);
+    engine.flush();
+    assert_eq!(score(&engine.snapshot()), 204);
+}
+
+#[test]
+fn cpu_profiles_preserve_terms_when_compound_groups_deduplicate() {
+    let profiles = RankProfiles::from_json_slice(
+        br#"{
+          "version": 1,
+          "profiles": {
+            "groups_v1": {
+              "kind": "linear",
+              "weights": [
+                {"feature": "query_positive_terms", "weight": 1},
+                {"feature": "query_any_of_groups", "weight": 100}
+              ]
+            }
+          }
+        }"#,
+    )
+    .expect("valid group-count profile");
+    let mut engine = Engine::new(norm());
+    engine.insert_live("(red shoe,red boot)", 1, 1);
+    engine.insert_live("(red shoe,red boot) (red shoe,red boot)", 2, 1);
+    let score = |snapshot: &EngineSnapshot| {
+        let program = snapshot
+            .compile_rank_program_with_profiles(
+                &RankProgramSpec {
+                    profile: Some("groups_v1".into()),
+                    priority_field: None,
+                    boosts: Vec::new(),
+                },
+                &profiles,
+            )
+            .expect("group-count rank program");
+        snapshot
+            .try_match_title_top_k(
+                "red shoe",
+                TopKOptions {
+                    size: 2,
+                    track_total_hits_up_to: 10,
+                    ..TopKOptions::default()
+                },
+                &program,
+                &reverse_rusty::exact::TagPredicate::empty(),
+                &mut MatchScratch::new(),
+                None,
+            )
+            .expect("deduplicated compound top-k")
+            .hits
+            .iter()
+            .map(|hit| (hit.logical_id, hit.score))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshot = engine.snapshot();
+    assert_eq!(score(&snapshot), vec![(2, 204), (1, 102)]);
+    engine.flush();
+    assert_eq!(score(&engine.snapshot()), vec![(2, 204), (1, 102)]);
+}
+
+#[test]
+fn cpu_profiles_preserve_proxy_only_groups_after_semantic_dedup() {
+    let profiles = RankProfiles::from_json_slice(
+        br#"{
+          "version": 1,
+          "profiles": {
+            "groups_v1": {
+              "kind": "linear",
+              "weights": [
+                {"feature": "query_positive_terms", "weight": 1},
+                {"feature": "query_any_of_groups", "weight": 100}
+              ]
+            }
+          }
+        }"#,
+    )
+    .expect("valid group-count profile");
+    let mut engine = Engine::new(norm());
+    engine.insert_live("(red,blue)", 1, 1);
+    engine.insert_live("(red,blue) (red,blue)", 2, 1);
+    let score = |snapshot: &EngineSnapshot| {
+        let program = snapshot
+            .compile_rank_program_with_profiles(
+                &RankProgramSpec {
+                    profile: Some("groups_v1".into()),
+                    priority_field: None,
+                    boosts: Vec::new(),
+                },
+                &profiles,
+            )
+            .expect("group-count rank program");
+        snapshot
+            .try_match_title_top_k(
+                "red",
+                TopKOptions {
+                    size: 2,
+                    track_total_hits_up_to: 10,
+                    ..TopKOptions::default()
+                },
+                &program,
+                &reverse_rusty::exact::TagPredicate::empty(),
+                &mut MatchScratch::new(),
+                None,
+            )
+            .expect("proxy-only group top-k")
+            .hits
+            .iter()
+            .map(|hit| (hit.logical_id, hit.score))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshot = engine.snapshot();
+    assert_eq!(
+        snapshot.dup_joined(),
+        1,
+        "ranking-only metadata must not prevent Boolean body sharing"
+    );
+    assert_eq!(score(&snapshot), vec![(2, 202), (1, 101)]);
+    engine.flush();
+    assert_eq!(score(&engine.snapshot()), vec![(2, 202), (1, 101)]);
+}
+
+#[test]
+fn cpu_profiles_count_phrase_terms_in_memory_and_after_flush() {
+    let profiles = RankProfiles::from_json_slice(
+        br#"{
+          "version": 1,
+          "profiles": {
+            "phrase_v1": {
+              "kind": "linear",
+              "weights": [
+                {"feature": "query_positive_terms", "weight": 100},
+                {"feature": "query_negative_terms", "weight": 1}
+              ]
+            }
+          }
+        }"#,
+    )
+    .expect("valid phrase profile");
+    let mut engine = Engine::new(norm());
+    engine.insert_live("\"red shoe\"", 1, 1);
+    engine.insert_live("red shoe -\"bad wolf\"", 2, 1);
+    let score = |snapshot: &EngineSnapshot| {
+        let program = snapshot
+            .compile_rank_program_with_profiles(
+                &RankProgramSpec {
+                    profile: Some("phrase_v1".into()),
+                    ..RankProgramSpec::default()
+                },
+                &profiles,
+            )
+            .expect("phrase rank program");
+        let mut scratch = MatchScratch::new();
+        snapshot
+            .try_match_title_top_k(
+                "red shoe",
+                TopKOptions {
+                    size: 10,
+                    track_total_hits_up_to: 10,
+                    ..TopKOptions::default()
+                },
+                &program,
+                &reverse_rusty::exact::TagPredicate::empty(),
+                &mut scratch,
+                None,
+            )
+            .expect("phrase top-k")
+            .hits
+            .iter()
+            .map(|hit| (hit.logical_id, hit.score))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(score(&engine.snapshot()), vec![(2, 202), (1, 200)]);
+    engine.flush();
+    assert_eq!(score(&engine.snapshot()), vec![(2, 202), (1, 200)]);
 }
 
 #[test]
@@ -369,6 +732,7 @@ fn bounded_differential_spans_every_cost_lane_scope_k_and_threshold() {
     let compat = snapshot.compile_rank_spec(&rank_spec);
     let program = snapshot
         .compile_rank_program(&RankProgramSpec {
+            profile: None,
             priority_field: Some("priority".into()),
             boosts: rank_spec.boosts.clone(),
         })
@@ -453,6 +817,7 @@ fn pit_snapshot_pages_concatenate_and_survive_engine_mutation() {
     }
     let snap = eng.snapshot();
     let raw = RankProgramSpec {
+        profile: None,
         priority_field: Some("priority".into()),
         boosts: Vec::new(),
     };

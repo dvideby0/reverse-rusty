@@ -57,6 +57,7 @@ fn grpc_exhaustive_chunks_equal_the_exact_cluster_set() {
         })
         .collect();
     let raw = RankProgramSpec {
+        profile: None,
         priority_field: None,
         boosts: vec![("tier".into(), "gold".into(), 11)],
     };

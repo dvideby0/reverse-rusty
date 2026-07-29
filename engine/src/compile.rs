@@ -121,6 +121,16 @@ pub struct Extracted {
     /// single-token any-of this is also the complete exact predicate. Compound
     /// groups additionally use `anyof_predicates` for the sufficient check.
     pub anyof: Vec<Vec<FeatureId>>,
+    /// Number of source-level positive any-of requirements after degenerate
+    /// singleton promotion but before retrieval-proxy deduplication. Ranking
+    /// uses this semantic count; matching continues to use the deduplicated
+    /// `anyof` proxy column plus `anyof_predicates`.
+    pub semantic_anyof_groups: u32,
+    /// Sum of the shortest satisfiable member widths for the source-level
+    /// positive any-of requirements counted above. This is captured before
+    /// retrieval-proxy and exact-predicate deduplication so ranking does not
+    /// depend on the physical lowering shape.
+    pub semantic_anyof_terms: u32,
     /// Exact OR-of-AND predicates for groups containing a multi-token member.
     pub anyof_predicates: Vec<AnyOfPredicate>,
     /// Multi-feature members of negated any-of groups. A query rejects when any
@@ -266,13 +276,23 @@ impl Extracted {
         }
         // A required feature in an equivalence group becomes an any-of over the group.
         let mut still_required = Vec::with_capacity(self.required.len());
+        let mut added_semantic_groups = 0u32;
         for &f in &self.required {
             match equiv.get(&f) {
-                Some(group) => self.anyof.push(group.clone()),
+                Some(group) => {
+                    self.anyof.push(group.clone());
+                    added_semantic_groups = added_semantic_groups.saturating_add(1);
+                }
                 None => still_required.push(f),
             }
         }
         self.required = still_required;
+        self.semantic_anyof_groups = self
+            .semantic_anyof_groups
+            .saturating_add(added_semantic_groups);
+        self.semantic_anyof_terms = self
+            .semantic_anyof_terms
+            .saturating_add(added_semantic_groups);
         // Widen every proxy any-of group (incl. the ones just added) by its
         // members' equivalence groups.
         for g in &mut self.anyof {

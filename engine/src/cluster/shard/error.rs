@@ -52,6 +52,10 @@ pub enum ShardError {
     /// current view instead would silently mix generations — fail closed and
     /// let the caller surface 409 stale-cursor semantics (ADR-113).
     PitNotFound(u64),
+    /// The selected rank profile cannot cross this shard transport. The
+    /// current gRPC contract carries only `static_v1`; richer programs fail
+    /// before the wire rather than silently degrading their scores.
+    RankProfileUnsupported(String),
     /// A cluster mutation could not be durably logged (the coordinator's externalized
     /// `ClusterLog`, ADR-031). The mutation is *rejected*, not applied — surfacing it
     /// rather than acknowledging an unlogged write is load-bearing for the
@@ -120,6 +124,10 @@ impl std::fmt::Display for ShardError {
             ShardError::PitNotFound(pit) => {
                 write!(f, "point-in-time {pit} is not held by this shard")
             }
+            ShardError::RankProfileUnsupported(profile) => write!(
+                f,
+                "ranking profile `{profile}` is unsupported by the remote shard transport"
+            ),
             ShardError::Log(m) => write!(f, "cluster log durability error: {m}"),
             ShardError::ControlPlane(m) => write!(f, "cluster control-plane error: {m}"),
             ShardError::PartiallyApplied {

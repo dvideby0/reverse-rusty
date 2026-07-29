@@ -262,11 +262,13 @@ always-candidate is visible only when the request includes the broad lane.
 
 ### 4.2 Canonical-body dedup, Stage A (ADR-106)
 
-Orthogonal to lane placement: queries whose **semantic bodies** are identical (masks +
+Orthogonal to lane placement: queries whose **Boolean semantic bodies** are identical (masks +
 required/forbidden tails + canonical any-of groups + canonical compound predicate program — never
-identity: logical id, version, tags) share ONE posting entry per in-memory segment. At `add_compiled`
-a body-hash hit
-confirmed by exact equality joins the group — the duplicate inserts no postings and **adopts
+identity: logical id, version, tags, or ranking-only feature metadata) share ONE posting entry per
+in-memory segment. Each member keeps its own ranking metadata, so redundant source constraints can
+share candidate retrieval and exact verification without being forced to share a score. At
+`add_compiled`, a body-hash hit confirmed by exact equality joins the group — the duplicate inserts
+no postings and **adopts
 the leader's class** (identical bodies can plan A vs H across a θ-crossing frequency bump;
 adoption is lossless because A/B/H are all always-visible, and C/D are structural under the
 frozen mask). Every match path — the scalar probe, the columnar kernel's vacuous-accept and
@@ -370,18 +372,16 @@ that would couple a caller-supplied filter to the cover proof.
 
 ### 5.4 Ranking — an optional layer *over* the boolean-correct set
 
-Matching stays boolean and complete; ranking is an **optional sort applied to the already-final result
-set**, never a change to which queries match. A query may carry a numeric **priority** (the value of a
-designated tag key, default `"priority"`, reusing §5.1) and/or the request may supply additive **boosts**
-keyed on a `(tag key, value)`; `EngineSnapshot::rank` (`src/rank.rs`) scores each matched id as
+Matching stays boolean and complete; ranking is an **optional sort applied after exact verification**,
+never a change to which queries match. The compatibility APIs use the historical static score
 `Σ boosts + priority` (**additive**, not strict `(boost, priority)` lexicographic — the simpler
-ES-`function_score`-"sum" model; strict dominance is reachable by choosing boost magnitudes above the
-priority range), and the handler orders by `(score desc, _id asc)` — a total order — then applies
-`from`/`size` and emits `_score`. This also adds `from` to `/_mpercolate` and per-slot hit truncation to
-multi-doc `/_search` (closing the ADR-052 #3 pagination tail). Because it runs after verification on a
-`Vec<u64>`, it touches neither the candidate index nor the verifier — and it is **opt-in**, so with no
-`rank` block the response is byte-identical to the pre-ranking engine. Tags are resolved to the **newest
-live copy** of each id (memtable first, then base segments newest→oldest). **Cluster ranking is built too**
+ES-`function_score`-"sum" model). Native bounded and exhaustive APIs may select an ADR-162 named CPU
+profile and score `profile relevance + Σ boosts + typed priority`; omission selects `static_v1`, whose
+relevance is zero and whose score is byte-compatible with the historical implementation. All integer
+operations saturate. The handler orders by `(score desc, _id asc)` — a total order — then paginates or
+delivers. Ranking touches neither the candidate index nor the verifier. Tags and query features resolve
+from the **newest live copy** of each id (memtable first, then base segments newest→oldest).
+**Cluster ranking is built too**
 ([ADR-075](../DECISIONS.md)): the coordinator compiles the `RankSpec` once against the shared frozen tag
 space (the [ADR-055](../DECISIONS.md) compile-once-fan pattern), each probed shard scores its own matched
 ids via the same `EngineSnapshot::rank`, and the merge dedups by id — copies of a logical are
@@ -410,16 +410,32 @@ slots, and no NDJSON or partial slot success. Only the standalone implementation
 ADR-026 columnar batch kernel and can emit its aggregate broad profile; the coordinator's
 compatibility path fans out per-title matches and rejects `profile: true` explicitly (ADR-135).
 
-**Bounded local + distributed ranking (ADR-107/108/110).** `ExactStore` also carries one fixed signed
-`i64` priority column. `RankProgramSpec` compiles the priority field and tag boosts to an integer-only
-`CompiledRankProgram`; addition saturates. `EngineSnapshot::try_match_title_top_k` connects the
+**Bounded local + distributed ranking (ADR-107/108/110/162).** `ExactStore` carries one fixed signed
+`i64` priority column. `RankProgramSpec` resolves a named profile, the priority field, and tag boosts
+to an integer-only `CompiledRankProgram`. `EngineSnapshot::try_match_title_top_k` connects the
 post-verification `TopKCollector` directly to the scalar matcher and retains only
-`O(K + total-threshold)` state. The scorer deliberately receives only `logical_id`: it then resolves
-priority + tags from the newest live copy, so segment probe order or an older duplicate cannot change
-rank. `MatchSink::on_match(logical_id)` stays unchanged, keeping all metadata work out of unranked and
-compatibility collectors. Local `POST /v2/_search` exposes this path for one document with deterministic
-`(score desc, logical_id asc)` winners and honest `eq`/`gte` totals. Source/explain enrichment is
-winner-only and fail-closed.
+`O(K + total-threshold)` state. Title evidence is computed once per title; the scorer then resolves
+priority, tags, and query evidence from the newest live copy, so segment probe order or an older
+duplicate cannot change rank. `MatchSink::on_match(logical_id)` stays unchanged, keeping all metadata
+work out of unranked and compatibility collectors. Local `POST /v2/_search` exposes this path for one
+document with deterministic `(score desc, logical_id asc)` winners and honest `eq`/`gte` totals.
+Source/explain enrichment is winner-only and fail-closed.
+
+The profile registry is loaded once from strict JSON. `static_v1` is built in; `linear` and
+`tree_ensemble` profiles use the fixed v1 feature schema: query required/forbidden counts, any-of
+groups, tag count, title token/byte/digit counts, positive coverage per thousand, and unmatched title
+tokens. Linear terms and flat tree traversal allocate nothing on the scoring path. File size, profile
+count, term count, trees, total nodes, depth, and aggregate evaluation steps are startup-bounded.
+Every model has a semantic fingerprint, and an optional configured fingerprint mismatch fails
+startup. The query counts include flat columns and predicate programs: phrases contribute analyzer
+positions, forbidden conjunctions contribute their features, and compound any-of groups use their
+shortest satisfiable member. Semantic any-of groups are counted before retrieval-proxy deduplication,
+so repeated or different compound constraints remain separate ranking groups and retain each
+group's shortest-member term contribution even when their proxies or exact predicates deduplicate.
+These features are reconstructed from existing exact columns plus the versioned predicate program;
+no segment column is added. Compiler semantics 6 source-rebuilds older durable materializations
+before rich profiles can observe them, or refuses a shard-local attach that cannot rebuild
+placement atomically.
 
 ADR-110 generalizes the same snapshot path over the post-verify `EmissionPolicy`: standalone uses
 `EmitAll`, while a cluster shard applies ADR-109 `UniqueOwner` **before** its `TopKCollector`. Each
@@ -428,6 +444,11 @@ ordering, or stale attestations, merges by the same total order, and truncates t
 if a global winner were below its owner's local K, that owner alone would contain K globally better
 rows. Exact shard totals are summed; global `eq` is returned only when every shard is exact and the sum
 does not cross the threshold, otherwise the result is the request threshold with relation `gte`.
+
+Rich CPU profiles work in a single engine and an in-process cluster. The current gRPC rank wire
+carries only the static program; a remote shard refuses any other profile with a typed 501 before
+flight. It never falls back to static scoring. Shipping model identity and fingerprint attestation
+across that compatibility boundary requires a separate decision.
 
 Cluster `/v2/_search` then performs query-then-fetch: final winner IDs are grouped by owning logical
 position and only their source is fetched. Missing source, placement-generation drift, a

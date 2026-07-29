@@ -28,6 +28,7 @@ fn ranked_tags(queries: &[(u64, String)]) -> Vec<Vec<(String, String)>> {
 
 fn rank_program() -> RankProgramSpec {
     RankProgramSpec {
+        profile: None,
         priority_field: Some("priority".to_string()),
         boosts: vec![
             ("category".to_string(), "items".to_string(), 1_000),
