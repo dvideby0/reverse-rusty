@@ -264,7 +264,24 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 ))
                 .fallback(crate::handlers::settings_method_not_allowed::<ClusterAppState>),
         )
-        .route("/_cluster/state", get(cluster_state))
+        .route(
+            "/_cluster/state",
+            any(cluster_state).layer(axum::extract::DefaultBodyLimit::max(
+                CLUSTER_STATE_BODY_LIMIT,
+            )),
+        )
+        .route(
+            "/_cluster/state/{metric}",
+            any(cluster_state).layer(axum::extract::DefaultBodyLimit::max(
+                CLUSTER_STATE_BODY_LIMIT,
+            )),
+        )
+        .route(
+            "/_cluster/state/{metric}/{target}",
+            any(cluster_state).layer(axum::extract::DefaultBodyLimit::max(
+                CLUSTER_STATE_BODY_LIMIT,
+            )),
+        )
         .route("/_cluster/nodes", post(cluster_register_node))
         .route(
             "/_cluster/nodes/{id}",
@@ -344,5 +361,6 @@ mod pit;
 mod ranked;
 mod settings_read;
 mod settings_write;
+mod state_read;
 mod v2;
 mod vocab;

@@ -192,7 +192,8 @@ Endpoints are grouped by concern — open the one you need:
   percolation and exhaustive `result_mode=all` jobs with a terminally verified NDJSON stream.
 - **[Ingest & lifecycle](api/ingest.md)** — bulk ingest + segment lifecycle (`POST /_bulk`,
   `/_flush`, native `/_compact`, and ES/OS `/_forcemerge`).
-- **[Observability](api/observability.md)** — metrics, cat tables, health (`/_stats`, `/_cat/stats`, `/_cat/segments`, `/_health`, `/_metrics`).
+- **[Observability](api/observability.md)** — metrics, cat tables, authoritative cluster state, and
+  health (`/_stats`, `/_cat/*`, `/_cluster/state`, `/_health`, `/_metrics`).
 - **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary
   (`GET`/`HEAD`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias
   registry (`/_vocab/aliases*`, ADR-060).
@@ -362,7 +363,7 @@ Cluster-only endpoints:
 | `/_checkpoint` | POST | Strict native durability commit: a durable in-process cluster seals shards, commits the coordinator manifest, and truncates the log; `durable` and `shards_checkpointed` make a no-`data_dir` maintenance boundary explicit. A stateless remote coordinator does not flush remote nodes (ADR-031/032/161) |
 | `/_backup` | POST | Strictly snapshot a durable in-process cluster to a fresh server-side dir: checkpoint, then copy and verify the coordinator manifest + per-shard segments + sources + log; the response includes that checkpoint `epoch`. A stateless remote coordinator returns 400; use node-volume snapshots ([backup/restore](../operations/backup-restore.md), ADR-079/139) |
 | `/_cat/shards` | GET | Strict no-store CAT table of logical-position physical query counts + committed node assignments; supports `v`, `h`, `help`, `s`, and `format=json` (ADR-143) |
-| `/_cluster/state` | GET | The committed control-plane document (membership + shard→node map + ring params, ADR-037) |
+| `/_cluster/state[/_all\|/version]` | GET/HEAD | Strict no-store authoritative control-plane document or exact version projection; bounded manager-timeout aliases, native membership + shard→node map + ring/model/placement identity, and no fabricated index metadata/routing schema (ADR-037/162) |
 | `/_cluster/nodes` | POST | Register a cluster member (`{"id": N, "addr": "...", "role": "data"\|"manager"}`) |
 | `/_cluster/nodes/{id}` | DELETE | Deregister a member (idempotent) |
 | `/_cluster/rebalance` | POST | Recompute + commit the shard→node map from membership (HRW, ADR-042). Default (or empty body) is **map-only** — it must NOT be used alone to re-point a populated remote cluster. `{"move": true}` (ADR-090, `--features distributed` only, else 501) additionally MOVES each reassigned position's data via live handoff so routing follows; an optional `"max_parallel": N` runs up to N conflict-free moves concurrently (ADR-095; default 1 = sequential); returns `{acknowledged, moved_data, moved[], failed, not_attempted}` |

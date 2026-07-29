@@ -29,17 +29,6 @@ use super::super::shard_error_response;
 #[cfg(not(feature = "distributed"))]
 use super::super::not_in_cluster_mode;
 
-/// GET /_cluster/state — the committed control-plane document (membership +
-/// shard→node map + ring params + model version).
-#[instrument(skip_all)]
-pub(crate) async fn cluster_state(State(state): State<Arc<ClusterAppState>>) -> Response {
-    let cluster = state.cluster.read();
-    match cluster.control_state() {
-        Ok(doc) => Json(doc).into_response(),
-        Err(e) => shard_error_response("control state unavailable", &e),
-    }
-}
-
 #[derive(Deserialize)]
 pub(crate) struct RegisterNodeBody {
     id: u64,
