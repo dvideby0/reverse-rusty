@@ -86,6 +86,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   explicit `durable`/`shards_checkpointed` results that cannot disguise a stateless coordinator
   maintenance no-op as a recovery point
   ([ADR-161](decisions/adr-161-checkpoint-api-contract.md)).
+- Hardened coordinator `GET`/`HEAD /_cluster/state` with strict bounded no-store transport,
+  authoritative off-runtime reads, shared introspection admission, sanitized fail-loud errors, an
+  exact familiar `version` projection and manager-timeout aliases, and explicit rejection of
+  nonexistent index-state semantics
+  ([ADR-162](decisions/adr-162-cluster-state-api-contract.md)).
 - Hardened native `GET /_stats` with a strict no-store transport, truthful physical/live/tombstone
   and resident-memory/WAL projections, familiar timing and shard metadata, single-slot blocking
   collection, fail-loud cluster aggregation, and one shard-count fan-out instead of two

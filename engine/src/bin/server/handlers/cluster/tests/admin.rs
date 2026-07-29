@@ -27,10 +27,6 @@ async fn stats_health_shards_and_cluster_ops() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.as_array().expect("rows").len(), 3);
 
-    let (status, body) = send(&state, req_empty("GET", "/_cluster/state")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["num_shards"], 3);
-
     // Register a node, rebalance, deregister — the control-plane round trip.
     let (status, _) = send(
         &state,

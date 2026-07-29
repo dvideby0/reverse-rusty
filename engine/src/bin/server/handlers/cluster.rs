@@ -27,6 +27,7 @@ mod admin;
 mod checkpoint;
 mod doc;
 mod search;
+mod state_read;
 mod vocab;
 
 #[cfg(test)]
@@ -36,12 +37,12 @@ pub(crate) use admin::{
     cluster_backup, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats, cluster_compact,
     cluster_deregister_node, cluster_flush_route, cluster_gc, cluster_handoff, cluster_health,
     cluster_metrics, cluster_reassign, cluster_rebalance, cluster_reconcile, cluster_register_node,
-    cluster_resize, cluster_resync, cluster_root, cluster_state, cluster_stats,
-    CAT_SHARDS_BODY_LIMIT,
+    cluster_resize, cluster_resync, cluster_root, cluster_stats, CAT_SHARDS_BODY_LIMIT,
 };
 pub(crate) use checkpoint::{cluster_checkpoint, CHECKPOINT_BODY_LIMIT};
 pub(crate) use doc::{cluster_bulk_route, cluster_delete_doc, cluster_get_doc, cluster_put_doc};
 pub(crate) use search::{cluster_mpercolate_route, cluster_search_route};
+pub(crate) use state_read::{cluster_state, CLUSTER_STATE_BODY_LIMIT};
 pub(crate) use vocab::{
     cluster_discover_aliases, cluster_discover_and_record_aliases, cluster_get_alias_feedback,
     cluster_get_aliases, cluster_get_settings, cluster_get_vocab, cluster_import_aliases,

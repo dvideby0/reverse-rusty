@@ -13,6 +13,7 @@ Replication, peer recovery, translogs, cluster state, consensus, and control-pla
 | [039](../adr-039-durable-translog-no-quiesce-recovery.md) | Durable translog + no-quiesce recovery | Streams a segment checkpoint and replays its translog tail so recovery need not pause writes. | Accepted |
 | [040](../adr-040-translog-retention-leases.md) | Translog retention leases + finalize | Pins required log tails during recovery and finalizes replicas through bounded catch-up passes. | Accepted |
 | [041](../adr-041-durable-raft-log-recovery.md) | Durable Raft restart recovery | Persists Raft log, vote, committed state, and snapshots so control nodes can restart into quorum. | Accepted |
+| [162](../adr-162-cluster-state-api-contract.md) | Cluster-state REST API contract | Makes authoritative topology reads strict, bounded, off-runtime, and explicit about their exact ES/OpenSearch subset. | Accepted |
 
 ---
 
