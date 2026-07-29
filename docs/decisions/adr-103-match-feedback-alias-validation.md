@@ -6,6 +6,8 @@
   stream, aggregated into per-candidate-pair behavioral evidence
   (`GET /_vocab/aliases/feedback`), stamped into the registry by
   `POST /_vocab/aliases/validate_and_apply` (activation stays explicit).
+- **Current outcome:** [ADR-156](adr-156-alias-feedback-read-api-contract.md) hardened the evidence
+  read with strict thresholds, bounded paging, off-runtime execution, and explicit mode behavior.
 
 - **Context:** The Tier 2 roadmap item; technique 2 of
   [`research/corpus-feature-learning.md`](../research/corpus-feature-learning.md) §2

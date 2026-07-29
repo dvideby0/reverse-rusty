@@ -149,6 +149,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   source capture and registry installation locks, success-only snapshot publication, and a
   validated fail-loud coordinator alternative
   ([ADR-155](decisions/adr-155-alias-discover-record-api-contract.md)).
+- Hardened native `GET`/`HEAD /_vocab/aliases/feedback` with strict positive evidence controls,
+  familiar bounded `from`/`size` paging, total counts, timed no-store output, shared off-runtime
+  admission, page-only evidence snapshots, and an observed fail-loud coordinator alternative
+  ([ADR-156](decisions/adr-156-alias-feedback-read-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

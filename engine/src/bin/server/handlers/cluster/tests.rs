@@ -217,6 +217,16 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 ),
         )
         .route(
+            "/_vocab/aliases/feedback",
+            get(cluster_get_alias_feedback)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::handlers::ALIAS_FEEDBACK_READ_BODY_LIMIT,
+                ))
+                .fallback(
+                    crate::handlers::alias_feedback_read_method_not_allowed::<ClusterAppState>,
+                ),
+        )
+        .route(
             "/_settings",
             get(cluster_get_settings).put(cluster_put_settings),
         )
@@ -282,6 +292,7 @@ fn seed() -> Vec<(u64, String)> {
 mod admin;
 mod alias_discover;
 mod alias_discover_record;
+mod alias_feedback_read;
 mod alias_import;
 mod alias_learn_apply;
 mod backup;

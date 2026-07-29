@@ -194,6 +194,12 @@ publish a snapshot. Matching and the vocabulary epoch remain unchanged. The resp
 the live vocabulary document was not written back to the operator's startup vocabulary file;
 coordinator mode returns the dry-run, review, and `PUT /_vocab` alternative instead of performing a
 full blue/green rebuild for review metadata.
+Feedback evidence review shares the administrative slot and accepts strict positive thresholds plus
+bounded `from`/`size` paging. A blocking worker clones only the requested evidence page under the
+capture mutex, captures an immutable engine snapshot, and releases the mutex before source
+resolution, exclusion filtering, overlap calculation, and serialization. The standalone response
+is timed and no-store; coordinator mode validates the same read contract before returning the
+single-node capture alternative.
 Embedded callers use the deliberately split `set_vocab()` then `recompile_stale_segments()` sequence
 and must not publish a snapshot between those calls. Single-node durable deployments must persist
 the same vocabulary file used on reopen; clusters checkpoint the vocabulary in coordinator state. See

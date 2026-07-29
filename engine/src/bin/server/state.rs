@@ -106,6 +106,12 @@ impl AppState {
                     Some(v) => fb.sync_tracked(v.aliases(), cfg.alias_feedback_max_pairs),
                     None => fb.reset(),
                 }
+                // Publish while the feedback mutex is still held. The feedback-read worker
+                // takes this mutex before loading `snapshot`, so it can observe either the
+                // prior pair universe + prior snapshot or the new pair universe + new
+                // snapshot, never the new evidence keys against stale query sources.
+                self.snapshot.store(snap);
+                return;
             }
         }
         self.snapshot.store(snap);
