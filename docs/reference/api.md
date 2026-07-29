@@ -216,7 +216,7 @@ The full method/path matrix is below.
 | `/_vocab/aliases/feedback/reset` | POST | Strict native measurement-window reset that preserves tracked candidates and clears their evidence atomically (ADR-103/157) |
 | `/_vocab/aliases/validate_and_apply` | POST | Strict native evidence stamping with positive thresholds, timing, idempotent no-op results, and no matching change by default; `activate=true` explicitly promotes eligible candidates through a complete fail-loud recompile (ADR-103/158) |
 | `/_settings` | GET/HEAD | Strict native no-store live settings with familiar `include_defaults` and `flat_settings`, bounded off-runtime execution, and coordinator topology/per-shard parity (ADR-022/159) |
-| `/_settings` | PUT | Update the dynamic settings subset |
+| `/_settings` | PUT | Strict native live-only dynamic update with duplicate-safe JSON, familiar bounded `timeout`/`flat_settings`, coherent no-store publication, and an explicit coordinator alternative (ADR-022/160) |
 
 ---
 
@@ -309,12 +309,13 @@ Behavior deltas from single-node mode (all deliberate, none silent):
 - **`GET`/`HEAD /_settings` works in cluster mode** — it returns the live cluster + per-shard
   configuration (`mode`, `shards`, `replication_factor`, `include_broad`, `durable`, and the
   assembled `per_shard` `EngineConfig`), plus per-shard built-in `defaults` when requested. The read
-  is strict, no-store, and bounded off the async runtime (ADR-159). Only **`PUT /_settings`** is 501
-  in cluster mode (see below).
+  is strict, no-store, and bounded off the async runtime (ADR-159). **`PUT /_settings`** validates
+  the same strict transport and patch contract before returning 501 in cluster mode (ADR-160; see
+  below).
 - **Single-node-only surfaces answer 501 naming the alternative:** `/_compact` / `/_forcemerge`
   (per-shard policy; use `POST /_checkpoint` for the durability commit), `PUT /_settings` (cluster
-  settings are fixed at assembly — restart the coordinator with the new flags), `/_cat/stats`,
-  `/_cat/segments`.
+  settings are fixed at assembly — restart the coordinator and consistently configured shard nodes
+  with the new flags), `/_cat/stats`, `/_cat/segments`.
 - **Vocabulary admin** (`PUT /_vocab`, `/_vocab/learn_and_apply`, `/_vocab/aliases/*`) maps onto the
   cluster blue/green rebuild (ADR-046); its one refusal — non-local (gRPC) shards — surfaces as a 400
   with the engine's message. The current remote transport ships dictionaries but not normalizers, so

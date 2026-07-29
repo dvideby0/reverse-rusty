@@ -92,6 +92,14 @@ pub(crate) struct AppState {
 impl AppState {
     pub(crate) fn publish_snapshot(&self) {
         let engine = self.engine.lock();
+        self.publish_snapshot_from_locked_engine(&engine);
+    }
+
+    /// Publish a snapshot derived from the already-locked state engine.
+    ///
+    /// Callers use this when a mutation and its lock-free read view must form
+    /// one coherent commit instead of dropping and reacquiring `engine`.
+    pub(crate) fn publish_snapshot_from_locked_engine(&self, engine: &Engine) {
         let snap = Arc::new(engine.snapshot());
         // Re-sync the feedback aggregator's tracked universe (ADR-103) on every publish — the
         // vocab epoch is NOT a sufficient dirty signal (the ADR-102 metadata-only install

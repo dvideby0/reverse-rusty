@@ -82,13 +82,13 @@ and does not fabricate those resource or persistence tiers.
 
 ## `PUT /_settings` — Update settings
 
-Update the **dynamic** subset at runtime. The body is a flat JSON object of setting keys to new
-values. All-or-nothing: if any key is unknown, non-dynamic, the wrong type, or would produce an
-invalid config, nothing changes and the request is rejected with an ES-style reason (every problem is
-reported at once). Changes are in-memory and not persisted across restart.
+Strict native runtime update of the **dynamic** subset (ADR-022/160). The body is one non-empty flat
+JSON object of native setting keys. All-or-nothing: if any key is duplicate, unknown, non-dynamic,
+the wrong type, or would produce an invalid config, nothing changes. Changes are live in memory and
+startup configuration becomes authoritative again after restart.
 
 ```bash
-curl -X PUT localhost:9200/_settings \
+curl -X PUT 'localhost:9200/_settings?timeout=5s&flat_settings=true' \
   -H 'Content-Type: application/json' \
   -d '{"max_segments": 16, "holes_ratio_threshold": 0.4}'
 ```
@@ -100,6 +100,27 @@ curl -X PUT localhost:9200/_settings \
   "settings": { "max_segments": 16, "holes_ratio_threshold": 0.4, "...": "full updated config" }
 }
 ```
+
+Supported query controls:
+
+- `flat_settings` (Boolean, default `false`) is representation-preserving because native setting
+  keys and the response are already flat.
+- `timeout` bounds waiting for shared administrative admission and the engine lock before commit.
+  It accepts `nanos`, `micros`, `ms`, `s`, `m`, `h`, and `d`, plus the exact value `0`; defaults to
+  30 seconds and may not exceed 30 seconds.
+
+Unknown, duplicate, and malformed controls are rejected. The route requires `application/json` or
+an `application/*+json` media type, caps the body at 64 KiB, and gives it a five-second read
+deadline. Duplicate JSON keys are rejected instead of silently taking the last value. Every
+route-reached response uses the standard JSON envelope, is `Cache-Control: no-store`, and is
+observed under the fixed `settings_put` metric label.
+
+After body validation, the server waits asynchronously for the shared administrative permit.
+Engine-lock waiting, response serialization, mutation, and snapshot publication run on a blocking
+worker. The response is serialized under a 64 KiB ceiling before state changes; the config and its
+immutable GET snapshot are then committed under the same engine guard. A timeout before commit
+changes nothing, and a successful response therefore names exactly the configuration visible to
+subsequent lock-free reads.
 
 - **Dynamic (runtime-tunable):** `max_segments`, `memtable_flush_threshold`, `max_query_length`,
   `max_query_clauses`, `max_anyof_group_size`, `max_tags`, `holes_ratio_threshold`,
@@ -123,8 +144,8 @@ curl -X PUT localhost:9200/_settings \
   already-stored entries stay matchable when toggled off, and WAL replay / the vocab recompile
   deliberately ignore it, so an acknowledged write is never dropped by a flipped knob).
 - **Static (startup only):** `data_dir`, `wal_sync_on_write`, `retain_source`.
-  `retention_lease_ttl_secs` is also read-only through this REST surface; configure it when
-  constructing a library `EngineConfig`.
+  `retention_lease_ttl_secs` is also explicitly classified as non-dynamic through this REST surface;
+  configure it when constructing a library `EngineConfig`.
 
 The query-complexity limits (`max_query_length`, `max_query_clauses`, `max_anyof_group_size`) and
 `max_tags` are enforced on every live/build ingest path; a change applies to **subsequent** ingests,
@@ -137,5 +158,21 @@ Attempting to set a static or unknown key returns `400`:
 ```json
 {"error": {"type": "settings_error", "reason": "setting [retain_source] is not dynamically updateable; set it at startup"}}
 ```
+
+Coordinator mode validates this same query, media, JSON, size, and patch contract, then returns
+`501 not_supported_in_cluster_mode` for an otherwise valid request. Per-shard configuration is fixed
+when the cluster is assembled; restart the coordinator and every consistently configured shard node
+with the new flags.
+
+This native API does not accept `settings`, `persistent`, or `transient` wrapper objects, and does
+not accept `null` reset. Elasticsearch's
+[cluster settings update](https://www.elastic.co/guide/en/elasticsearch/reference/current/cluster-update-settings.html)
+and the
+[OpenSearch Cluster Settings API](https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-settings/)
+operate on explicit persistent/transient override tiers. Elasticsearch's
+[index settings update](https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-indices-put-settings)
+targets indices or data streams. Reverse Rusty has neither resource model nor an override registry
+that could preserve precedence or reset to a recorded startup baseline, so it rejects those shapes
+instead of fabricating their semantics.
 
 ---

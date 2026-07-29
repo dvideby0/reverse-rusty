@@ -93,8 +93,9 @@ use handlers::{
     ALIAS_FEEDBACK_READ_BODY_LIMIT, ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT,
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
     CAT_SEGMENTS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT,
-    PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT,
-    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
+    PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
+    VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
+    VOCAB_WRITE_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -560,7 +561,7 @@ async fn main() {
             "/_settings",
             get(get_settings)
                 .layer(DefaultBodyLimit::max(SETTINGS_READ_BODY_LIMIT))
-                .merge(put(put_settings))
+                .merge(put(put_settings).layer(DefaultBodyLimit::max(SETTINGS_WRITE_BODY_LIMIT)))
                 .fallback(settings_method_not_allowed::<AppState>),
         )
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
