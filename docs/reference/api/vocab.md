@@ -671,11 +671,44 @@ engine snapshot, and releases the mutex before source lookup, exclusion filterin
 calculation, and serialization. Closed admission returns 503 and internal worker/serialization
 failure returns 500.
 
-`POST /_vocab/aliases/validate_and_apply` with the same thresholds stamps evidence and raises
-confidence for validated candidates without changing matching. Add `?activate=true` to explicitly
-promote eligible validated candidates through the full recompile path; rejected or mixed-kind
-entries are never resurrected by automation. The response reports `validated`, `stamped`,
-`activated`, `recompiled`, and the status `summary`.
+`POST /_vocab/aliases/validate_and_apply` accepts the same three evidence thresholds and no body.
+`min_overlap` must be finite within `[0,1]`; `min_titles` and `min_queries` must be positive.
+Defaults are `0.5`, 50, and 20. Unknown, duplicate, malformed, or out-of-range parameters fail with
+400 rather than being clamped. The default operation stamps changed evidence and raises confidence
+without changing matching:
+
+```json
+{
+  "took": 4,
+  "took_ms": 4.31,
+  "acknowledged": true,
+  "result": "updated",
+  "persisted": false,
+  "min_overlap": 0.5,
+  "min_titles": 50,
+  "min_queries": 20,
+  "activate": false,
+  "validated": 1,
+  "stamped": 1,
+  "activated": 0,
+  "recompiled": 0,
+  "summary": {"active": 0, "candidate": 1, "rejected": 0}
+}
+```
+
+An identical retry is `result: "noop"` with `stamped: 0`. Add `activate=true` to explicitly promote
+eligible validated candidates through a complete query recompile. Rejected or mixed-kind entries
+are never resurrected by automation. Activation refuses unhealthy durable state, verifies that
+every live source was recompiled with no stale segment left, and returns 503 if a coherent live
+rebuild could not be committed. `persisted: false` means the live standalone vocabulary document
+was not written back to the startup vocabulary file; save `GET /_vocab` there before restart.
+
+The bodyless request is capped at 64 KiB and 250 ms. It waits asynchronously for the shared
+administrative slot, then evidence snapshotting/reporting, source lookup, engine-lock waiting,
+metadata mutation, optional O(corpus) recompile, and publication run on a blocking worker. Every
+response is no-store and uses fixed `vocab_aliases_validate_and_apply` telemetry.
+Other methods return 405 with `Allow: POST`; invalid input is 400/408/413, closed admission is 503,
+and internal/incomplete work is 500.
 
 `POST /_vocab/aliases/feedback/reset` starts a new process-local evidence window. It accepts no
 query parameters or body; extraction is capped at 64 KiB with a 250 ms deadline. The operation
@@ -698,9 +731,10 @@ Every reset outcome is no-store and uses the fixed `vocab_aliases_feedback_reset
 label. Other methods return 405 with `Allow: POST`; invalid query/body is 400, a stalled body is
 408, oversized input is 413, closed admission is 503, and a blocking-worker failure is 500.
 
-All three feedback endpoints return 501 in cluster mode. The evidence read and reset first validate
-their shared transport contracts and return observed no-store alternatives. Run capture on a
-single-node replica of the title stream and install reviewed activations through cluster
-`PUT /_vocab`. The contracts are recorded in
+All three feedback endpoints return 501 in cluster mode after validating their shared transport
+contracts and return observed no-store alternatives. Run capture and validation on a single-node
+replica of the title stream and install reviewed activations through cluster `PUT /_vocab`. The
+contracts are recorded in
 [ADR-156](../../decisions/adr-156-alias-feedback-read-api-contract.md) and
-[ADR-157](../../decisions/adr-157-alias-feedback-reset-api-contract.md).
+[ADR-157](../../decisions/adr-157-alias-feedback-reset-api-contract.md), with application in
+[ADR-158](../../decisions/adr-158-alias-feedback-validate-apply-api-contract.md).

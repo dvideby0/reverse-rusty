@@ -396,7 +396,8 @@ impl AliasRegistry {
     /// Stamp match-feedback evidence onto an entry (ADR-103): sets
     /// [`feedback`](AliasEntry::feedback) and raises `confidence` to at least the measured
     /// overlap (finite-guarded; reconcile-by-max, like re-learning). Pure metadata — status is
-    /// untouched. Returns `false` for an unknown group.
+    /// untouched. Returns `true` only when stored metadata changes; an unknown group or an
+    /// identical retry returns `false`.
     pub fn record_feedback(&mut self, forms: &[String], evidence: FeedbackEvidence) -> bool {
         let Some(forms) = Self::canonical_forms(forms) else {
             return false;
@@ -405,9 +406,21 @@ impl AliasRegistry {
             return false;
         };
         let e = &mut self.entries[i];
-        if evidence.overlap.is_finite() {
-            e.confidence = e.confidence.max(evidence.overlap.clamp(0.0, 1.0));
+        let confidence = if evidence.overlap.is_finite() {
+            e.confidence.max(evidence.overlap.clamp(0.0, 1.0))
+        } else {
+            e.confidence
+        };
+        let feedback_unchanged = e.feedback.is_some_and(|current| {
+            current.overlap.to_bits() == evidence.overlap.to_bits()
+                && current.titles_a == evidence.titles_a
+                && current.titles_b == evidence.titles_b
+                && current.queries_sampled == evidence.queries_sampled
+        });
+        if feedback_unchanged && confidence.to_bits() == e.confidence.to_bits() {
+            return false;
         }
+        e.confidence = confidence;
         e.feedback = Some(evidence);
         true
     }

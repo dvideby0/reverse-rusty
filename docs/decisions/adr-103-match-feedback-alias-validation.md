@@ -8,7 +8,9 @@
   `POST /_vocab/aliases/validate_and_apply` (activation stays explicit).
 - **Current outcome:** [ADR-156](adr-156-alias-feedback-read-api-contract.md) hardened the evidence
   read; [ADR-157](adr-157-alias-feedback-reset-api-contract.md) made its measurement-window reset
-  strict, linearizable, bounded, and explicitly mode-aware.
+  strict, linearizable, bounded, and explicitly mode-aware; and
+  [ADR-158](adr-158-alias-feedback-validate-apply-api-contract.md) made stamping and explicit
+  activation strict, idempotent, off-runtime, durably fail-loud, and mode-aware.
 
 - **Context:** The Tier 2 roadmap item; technique 2 of
   [`research/corpus-feature-learning.md`](../research/corpus-feature-learning.md) §2

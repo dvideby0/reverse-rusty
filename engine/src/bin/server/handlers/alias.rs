@@ -20,6 +20,8 @@ mod feedback_read_tests;
 mod feedback_reset;
 #[cfg(test)]
 mod feedback_reset_tests;
+#[cfg(test)]
+mod feedback_tests;
 mod import;
 #[cfg(test)]
 mod import_tests;
@@ -39,7 +41,10 @@ pub(crate) use discover_record::{
     validate_alias_discover_record_body, AliasDiscoverRecordTransport,
     ALIAS_DISCOVER_RECORD_BODY_LIMIT,
 };
-pub(crate) use feedback::validate_and_apply_feedback;
+pub(crate) use feedback::{
+    alias_feedback_apply_method_not_allowed, finish_alias_feedback_apply_response,
+    validate_and_apply_feedback, AliasFeedbackApplyTransport, ALIAS_FEEDBACK_APPLY_BODY_LIMIT,
+};
 pub(crate) use feedback_read::{
     alias_feedback_read_method_not_allowed, finish_alias_feedback_read_response,
     get_alias_feedback, AliasFeedbackReadTransport, ALIAS_FEEDBACK_READ_BODY_LIMIT,

@@ -31,7 +31,8 @@ pub struct AliasApplyReport {
 /// Outcome of applying match-feedback validation to the registry (ADR-103).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AliasFeedbackApplyReport {
-    /// Entries stamped with [`FeedbackEvidence`](crate::vocab::FeedbackEvidence).
+    /// Entries whose stored [`FeedbackEvidence`](crate::vocab::FeedbackEvidence) changed.
+    /// An identical retry reports zero.
     pub stamped: usize,
     /// Entries promoted to `Active` (only with `activate=true`; rejected/mixed-kind refused).
     pub activated: usize,

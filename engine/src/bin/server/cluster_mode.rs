@@ -35,12 +35,13 @@ use crate::auth::AuthConfig;
 use crate::cli::Cli;
 use crate::handlers::{
     alias_discover_method_not_allowed, alias_discover_record_method_not_allowed,
-    alias_feedback_read_method_not_allowed, alias_feedback_reset_method_not_allowed,
-    alias_import_method_not_allowed, alias_learn_apply_method_not_allowed,
-    alias_read_method_not_allowed, cluster_backup, cluster_bulk_route, cluster_cancel_job,
-    cluster_cat_segments, cluster_cat_shards, cluster_cat_stats, cluster_checkpoint,
-    cluster_compact, cluster_create_job_route, cluster_delete_doc, cluster_deregister_node,
-    cluster_discover_aliases, cluster_discover_and_record_aliases, cluster_flush_route, cluster_gc,
+    alias_feedback_apply_method_not_allowed, alias_feedback_read_method_not_allowed,
+    alias_feedback_reset_method_not_allowed, alias_import_method_not_allowed,
+    alias_learn_apply_method_not_allowed, alias_read_method_not_allowed, cluster_backup,
+    cluster_bulk_route, cluster_cancel_job, cluster_cat_segments, cluster_cat_shards,
+    cluster_cat_stats, cluster_checkpoint, cluster_compact, cluster_create_job_route,
+    cluster_delete_doc, cluster_deregister_node, cluster_discover_aliases,
+    cluster_discover_and_record_aliases, cluster_flush_route, cluster_gc,
     cluster_get_alias_feedback, cluster_get_aliases, cluster_get_doc, cluster_get_job,
     cluster_get_job_stream, cluster_get_settings, cluster_get_vocab, cluster_handoff,
     cluster_health, cluster_import_aliases, cluster_learn_aliases, cluster_learn_and_apply_vocab,
@@ -50,12 +51,12 @@ use crate::handlers::{
     cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
     cluster_v2_mpercolate_route, cluster_v2_search_route, cluster_validate_and_apply_feedback,
     vocab_learn_apply_method_not_allowed, vocab_learn_method_not_allowed, vocab_method_not_allowed,
-    ALIAS_DISCOVER_BODY_LIMIT, ALIAS_DISCOVER_RECORD_BODY_LIMIT, ALIAS_FEEDBACK_READ_BODY_LIMIT,
-    ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT, ALIAS_LEARN_APPLY_BODY_LIMIT,
-    ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT, CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT,
-    EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT,
-    STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
-    VOCAB_WRITE_BODY_LIMIT,
+    ALIAS_DISCOVER_BODY_LIMIT, ALIAS_DISCOVER_RECORD_BODY_LIMIT, ALIAS_FEEDBACK_APPLY_BODY_LIMIT,
+    ALIAS_FEEDBACK_READ_BODY_LIMIT, ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT,
+    ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
+    CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT,
+    METRICS_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT,
+    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -495,7 +496,9 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         )
         .route(
             "/_vocab/aliases/validate_and_apply",
-            post(cluster_validate_and_apply_feedback),
+            post(cluster_validate_and_apply_feedback)
+                .layer(DefaultBodyLimit::max(ALIAS_FEEDBACK_APPLY_BODY_LIMIT))
+                .fallback(alias_feedback_apply_method_not_allowed::<ClusterAppState>),
         )
         .route(
             "/_settings",
