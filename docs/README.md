@@ -22,11 +22,12 @@ Four levels, each giving *just enough* to decide whether to go deeper:
   [`performance/README.md`](performance/README.md), [`research/README.md`](research/README.md), and the
   top [`../README.md`](../README.md). Each answers its domain's top question and links deeper.
 - **Level 2 — catalogs and deep dives:** the topic files below, the ADR area catalogs in
-  [`decisions/areas/`](decisions/areas/), and the per-group endpoint files in
+  [`decisions/areas/`](decisions/areas/), and the API category catalogs in
   [`reference/api/`](reference/api/). Read only when a task needs the detail.
-- **Level 3 — individual records:** the one-file-per-decision ADR records in
-  [`decisions/`](decisions/). The decision tree deliberately adds this final hop so no gateway or
-  area catalog grows back into a repository-wide wall of summaries.
+- **Level 3 — individual records and contracts:** the one-file-per-decision ADR records in
+  [`decisions/`](decisions/) and the focused endpoint contracts under each
+  [`reference/api/`](reference/api/) category. Both trees deliberately add this final hop so no
+  gateway or category catalog grows back into a repository-wide wall of summaries.
 
 ## Map — what to read when
 
@@ -59,8 +60,9 @@ Four levels, each giving *just enough* to decide whether to go deeper:
   independent multi-machine production evidence remains open).
 
 ### Reference — how to use it
-- [`reference/api.md`](reference/api.md) — the REST API index (server flags + endpoint groups + a
-  method/path matrix); per-group endpoint detail lives in [`reference/api/`](reference/api/).
+- [`reference/api.md`](reference/api.md) — the REST API **area hub**: choose a compact category
+  catalog under [`reference/api/`](reference/api/), then open the focused contract page for the
+  method and path you need.
 - [`reference/dsl.md`](reference/dsl.md) — the query DSL, normalization, and vocabulary.
 - [`reference/ranking.md`](reference/ranking.md) — the canonical ranking-profile contract: scoring,
   profile JSON, fixed feature semantics, admission bounds, startup settings, and behavior across all
@@ -153,7 +155,7 @@ never a second copy. This is what keeps the docs from drifting.
 | Architecture decisions / "why" | [`DECISIONS.md`](DECISIONS.md) hub → area catalog in [`decisions/areas/`](decisions/areas/) → one ADR in [`decisions/`](decisions/) | referenced by `ADR-NNN` (pointers, never copies). |
 | Test count | `cargo test` | docs describe the suites qualitatively; no hand-maintained integer. |
 | Testing / benchmark / CI workflow | [`testing.md`](testing.md) | agent entry points keep the commands; CI rationale in [`DECISIONS.md`](DECISIONS.md) ADR-024; benchmark numbers in `performance/`. |
-| REST API / query DSL | [`reference/api.md`](reference/api.md) index + [`reference/api/`](reference/api/) subfiles · [`reference/dsl.md`](reference/dsl.md) | `../README.md` links here instead of inlining. |
+| REST API / query DSL | [`reference/api.md`](reference/api.md) hub → category catalog in [`reference/api/`](reference/api/) → focused contract in the matching category subdirectory · [`reference/dsl.md`](reference/dsl.md) | `../README.md` links here instead of inlining. |
 | Ranking profile format, features, loading, and topology contract | [`reference/ranking.md`](reference/ranking.md) | API pages own only request/response shapes; operations own exact deploy commands; design and ADRs link for implementation and rationale. |
 
 ---
@@ -195,8 +197,10 @@ link-checker in CI — the discipline has to live here).
     [`../AGENTS.md`](../AGENTS.md). `CLAUDE.md` contains no module copy to synchronize.
   - Testing / benchmark / CI workflow → [`testing.md`](testing.md) (the gate itself is `engine/check.sh`,
     which CI runs; decision rationale → [`DECISIONS.md`](DECISIONS.md) ADR-024).
-  - User-facing API/DSL change → the matching [`reference/api/`](reference/api/) subfile (+ the
-    [`reference/api.md`](reference/api.md) index/matrix) / [`reference/dsl.md`](reference/dsl.md).
+  - User-facing API/DSL change → the focused contract under
+    [`reference/api/`](reference/api/) + one summary row in its category catalog /
+    [`reference/dsl.md`](reference/dsl.md). Add a category to the
+    [`reference/api.md`](reference/api.md) hub only when no existing catalog is coherent.
   - Prior art / research → [`research/`](research/).
 - **Numbers convention.** Summarize trends outside the performance section; keep measured
   throughputs, resident/durable sizes, and p99 latencies in `performance/results.md` and

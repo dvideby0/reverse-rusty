@@ -7,7 +7,7 @@
 > distributional discovery, and ADR-103 added feedback validation. Declared/manual multi-word aliases
 > can now be active; learned multi-word and distinct-token groups remain review candidates. See the
 > current
-> [`/_vocab/aliases` API](../reference/api/vocab.md#learned-alias-registry-adr-060061102103).
+> [`/_vocab/aliases` API](../reference/api/vocab/alias-registry.md).
 
 - **Context.** Real deployments register hundreds of equivalences (abbreviation → canonical,
   spelling variants such as `package ≡ pkg`) and want them to
