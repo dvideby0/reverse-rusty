@@ -294,13 +294,13 @@ pub(crate) struct Cli {
     /// preserving) and then resolves its shard topology from the durable document, so the quorum —
     /// not per-coordinator flags — is the topology source of truth (a coordinator can boot with
     /// only `--control-endpoint`). Requires `--control-endpoint`. Fails loud if the committed map
-    /// is not position-preserving (a non-data-moving `rebalance`) — see ADR-086.
+    /// is not position-preserving (for example, a direct map-only library rebalance) — see ADR-086.
     #[arg(long, default_value_t = false)]
     pub(crate) route_by_assignments: bool,
 
     /// Run the unattended re-point reconciler every N seconds (ADR-092): periodically reconcile the
-    /// committed shard→node map to the desired HRW placement by MOVING data (the data-moving path, not
-    /// the map-only `rebalance`), so a membership change converges routing automatically with no
+    /// committed shard→node map to the desired HRW placement by MOVING data (not the underlying
+    /// map-only library primitive), so a membership change converges routing automatically with no
     /// operator action. Idempotent — a converged map moves nothing — and every move reserves its
     /// nodes in the engine's busy-endpoint move ledger (ADR-095), shared with `/_cluster/reassign`
     /// and the autoscaler, so a pass never overlaps a CONFLICTING manual move. Requires

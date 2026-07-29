@@ -82,8 +82,8 @@ coordinator:
   # Route by the committed shard->node assignments instead of the static --shard-endpoint
   # order (ADR-086): the coordinator seeds the quorum position-preservingly, then the durable
   # document is the topology source of truth. Only takes effect with controlPlane.wireToCoordinator.
-  # To re-point routing on a populated cluster, use the data-moving path (POST /_cluster/reassign or
-  # rebalance {move:true}, ADR-090); the bare map-only HRW rebalance must NOT be used alone for that.
+  # To re-point routing on a populated cluster, use the data-moving path (POST /_cluster/reassign
+  # or bodyless POST /_cluster/rebalance, ADR-090/166); remote rebalance rejects map-only mode.
   routeByAssignments: true
   service:
     type: ClusterIP

@@ -80,7 +80,7 @@ reroute. A remote pass may therefore outlive the manager-start timeout after it 
 Disconnecting after that atomic start does not cancel or multiply it: the independently supervised
 worker finishes while retaining the single admission slot, and the idempotent endpoint can be
 inspected/retried afterward. Disconnecting before start cancels the queued gate, so a blocking-pool
-worker cannot mutate later without a live request having observed its start.
+worker cannot mutate later unless it atomically started before cancellation.
 
 Map-only rebalance still commits changed assignments as the established sequence of control
 proposals. That sequence is safe only in-process; if a proposal or the final state read fails, the
