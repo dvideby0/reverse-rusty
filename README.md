@@ -6,7 +6,7 @@
 # Reverse Rusty
 
 <p align="center">
-  <a href="https://github.com/dvideby0/reverse-rusty/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/dvideby0/reverse-rusty/actions/workflows/ci.yml/badge.svg" /></a>
+  <a href="https://github.com/rusty-ports/reverse-rusty/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/rusty-ports/reverse-rusty/actions/workflows/ci.yml/badge.svg" /></a>
 </p>
 
 Reverse Rusty is a reverse product-query matcher written in Rust. It stores Boolean product-intent
