@@ -15,6 +15,6 @@ keywords:
   - search
   - percolator
   - reverse-query
-home: https://github.com/dvideby0/reverse-rusty
+home: https://github.com/rusty-ports/reverse-rusty
 sources:
-  - https://github.com/dvideby0/reverse-rusty
+  - https://github.com/rusty-ports/reverse-rusty
