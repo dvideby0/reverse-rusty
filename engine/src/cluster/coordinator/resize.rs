@@ -49,6 +49,8 @@ use crate::vocab::Vocab;
 
 use super::{into_shard, placement_of, replica_dir, shard_dir, ClusterEngine, Target};
 
+mod control;
+
 type RebuildExtractedQuery = (
     u64,
     Extracted,
@@ -78,6 +80,11 @@ impl ClusterEngine {
                 "resize: new_num_shards must be ≥ 1".into(),
             ));
         }
+        let new_num_shards_control = u32::try_from(new_num_shards).map_err(|_| {
+            ShardError::Config(
+                "resize: new_num_shards exceeds the control-plane representation".into(),
+            )
+        })?;
         // In-process only (same correctness boundary as set_vocab): a remote shard would keep
         // its old placement while the coordinator routes under the new ring — a silent
         // cross-process false negative. Checked BEFORE the no-op short-circuit so the boundary is
@@ -98,13 +105,20 @@ impl ClusterEngine {
                     .into(),
             ));
         }
+        // A failed control proposal happens after the serving swap, so the next
+        // call must finish that exact transition before it is allowed to build
+        // another generation. Otherwise two failed, different-target resizes
+        // can advance the live generation twice while a later successful
+        // SetShardCount advances the control document only once.
+        self.finish_pending_resize_control_commit()?;
         if new_num_shards == self.ring.num_shards() {
             // The LIVE ring already has this many shards — a full rebuild would change nothing.
-            // But a PRIOR resize may have swapped the ring in RAM and then FAILED to checkpoint,
-            // leaving the durable manifest at the old count; a bare `Ok(0)` here would falsely
-            // acknowledge that un-committed resize, and a restart would roll it back. So for a
-            // durable cluster, re-ensure the commit (checkpoint is idempotent — a clean one is
-            // cheap) + re-assert the on-disk dir set, so a retry HEALS rather than masks.
+            // But a PRIOR resize may have swapped the ring in RAM and then FAILED to update the
+            // control plane or checkpoint, leaving one or both at the old count. A bare `Ok(0)`
+            // here would falsely acknowledge that partial transition. The preflight above has
+            // already repaired and attested the control count + placement generation. Re-ensure
+            // the durable commit (checkpoint is idempotent — a clean one is cheap) + on-disk dir
+            // set, so a retry HEALS rather than masks either failure seam.
             if self.data_dir.is_some() {
                 self.checkpoint()?;
                 self.remove_shard_dirs_at_or_above(new_num_shards);
@@ -138,8 +152,10 @@ impl ClusterEngine {
         // Durability rides the manifest (which `open` re-seeds the control plane from), so this
         // only needs to be live-correct.
         self.control.propose(ClusterStateChange::SetShardCount {
-            num_shards: new_num_shards as u32,
+            num_shards: new_num_shards_control,
         })?;
+        let control = self.control.cluster_state()?;
+        self.attest_resize_control_state(&control)?;
 
         // Commit the rebuild durably, THEN drop now-orphaned shard dirs (shrink only). Order
         // matters: the orphan dirs are still referenced by the OLD manifest until `checkpoint`

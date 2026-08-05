@@ -57,10 +57,11 @@ use crate::handlers::{
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
     CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT,
     CLUSTER_NODE_DEREGISTER_BODY_LIMIT, CLUSTER_NODE_REGISTER_BODY_LIMIT,
-    CLUSTER_REBALANCE_BODY_LIMIT, CLUSTER_STATE_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT,
-    HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT,
-    SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT,
-    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
+    CLUSTER_REBALANCE_BODY_LIMIT, CLUSTER_RESIZE_BODY_LIMIT, CLUSTER_STATE_BODY_LIMIT,
+    EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT,
+    SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
+    VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
+    VOCAB_WRITE_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState, ClusterRebalanceTopology};
@@ -76,14 +77,14 @@ mod remote_connect;
 #[cfg(feature = "distributed")]
 mod reconcile_loop;
 
-/// Hold the sole operator-rebalance admission slot through durability cleanup.
+/// Hold one single-slot worker admission boundary through durability cleanup.
 ///
-/// A rebalance worker owns this permit for its complete synchronous workflow,
-/// including after its HTTP request disconnects. Waiting here therefore joins
-/// the safety-sensitive portion of any detached worker before process exit,
-/// while retaining the returned guard prevents a late draining request from
-/// starting another rebalance during shutdown.
-async fn quiesce_rebalance_for_shutdown(
+/// Rebalance and corpus-administration workers own their respective permits for
+/// their complete synchronous workflows, including after an HTTP disconnect.
+/// Waiting here therefore joins the safety-sensitive portion of any detached
+/// worker before process exit, while retaining the returned guard prevents a
+/// late draining request from starting more work during shutdown.
+async fn quiesce_worker_admission_for_shutdown(
     permits: &Arc<tokio::sync::Semaphore>,
 ) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
     Arc::clone(permits).acquire_owned().await
@@ -583,7 +584,10 @@ pub(crate) async fn run(
         .route("/_cluster/reassign", post(cluster_reassign))
         .route("/_cluster/reconcile", post(cluster_reconcile))
         .route("/_cluster/gc", post(cluster_gc))
-        .route("/_cluster/resize", post(cluster_resize))
+        .route(
+            "/_cluster/resize",
+            any(cluster_resize).layer(DefaultBodyLimit::max(CLUSTER_RESIZE_BODY_LIMIT)),
+        )
         .route("/_cluster/resync", post(cluster_resync))
         .route("/_cluster/handoff", post(cluster_handoff))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
@@ -663,21 +667,32 @@ pub(crate) async fn run(
         task.abort();
     }
 
-    // A rebalance may outlive its HTTP request by design. Its worker owns the
-    // sole permit until all fencing, movement, control-state attestation, and
-    // response construction have finished. Acquire and retain that permit
-    // before durability cleanup so process exit cannot interrupt a detached
-    // handoff after fencing or a routing flip.
-    info!("connection drain complete, waiting for any active cluster rebalance");
+    // Rebalance and corpus-wide administrative workers may outlive their HTTP
+    // requests by design. Acquire and retain both single-slot admission
+    // boundaries before durability cleanup. In particular, a detached resize
+    // may be waiting for `write_serial`; quiescing only that lock would let the
+    // shutdown checkpoint win it first and the resize start after cleanup.
+    info!("connection drain complete, waiting for active cluster administration");
     let _rebalance_shutdown_guard =
-        match quiesce_rebalance_for_shutdown(&state.rebalance_permits).await {
+        match quiesce_worker_admission_for_shutdown(&state.rebalance_permits).await {
             Ok(guard) => Some(guard),
             Err(source) => {
                 error!(error = %source, "rebalance admission closed during cluster shutdown");
                 None
             }
         };
-    info!("cluster rebalance quiesced, running cluster shutdown sequence");
+    let _corpus_admin_shutdown_guard =
+        match quiesce_worker_admission_for_shutdown(&state.stats_permits).await {
+            Ok(guard) => Some(guard),
+            Err(source) => {
+                error!(
+                    error = %source,
+                    "corpus-administration admission closed during cluster shutdown"
+                );
+                None
+            }
+        };
+    info!("cluster administration quiesced, running cluster shutdown sequence");
 
     // Durability shutdown: flush + checkpoint (the manifest commit), so reopen
     // attaches segments instead of replaying a long log tail. In-memory clusters
@@ -707,27 +722,27 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn shutdown_quiescence_waits_for_and_then_retains_rebalance_admission() {
+    async fn shutdown_quiescence_waits_for_and_then_retains_worker_admission() {
         let permits = Arc::new(tokio::sync::Semaphore::new(1));
         let active = Arc::clone(&permits)
             .acquire_owned()
             .await
-            .expect("active rebalance permit");
+            .expect("active worker permit");
         let wait_permits = Arc::clone(&permits);
-        let mut shutdown = Box::pin(quiesce_rebalance_for_shutdown(&wait_permits));
+        let mut shutdown = Box::pin(quiesce_worker_admission_for_shutdown(&wait_permits));
 
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(25), &mut shutdown)
                 .await
                 .is_err(),
-            "shutdown must wait while the detached rebalance owns admission"
+            "shutdown must wait while a detached worker owns admission"
         );
 
         drop(active);
         let guard = tokio::time::timeout(std::time::Duration::from_secs(1), &mut shutdown)
             .await
             .expect("shutdown quiescence completed")
-            .expect("rebalance admission remained open");
+            .expect("worker admission remained open");
         assert_eq!(
             permits.available_permits(),
             0,

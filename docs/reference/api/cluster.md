@@ -10,7 +10,7 @@ Elasticsearch/OpenSearch semantics where the underlying control model differs.
 | [`POST /_cluster/nodes`](cluster/register-node.md) | Commit or replace a member descriptor without moving data or changing voters. | Coordinator with authoritative control plane |
 | [`DELETE /_cluster/nodes/{id}`](cluster/deregister-node.md) | Remove an unassigned, non-voter descriptor after fail-closed guards. | Coordinator with authoritative control plane |
 | [`POST /_cluster/rebalance`](cluster/rebalance.md) | Converge deterministic whole-cluster placement through the topology-safe local or remote workflow. | In-process or authoritative resolve-only coordinator |
-| [`POST /_cluster/resize`](cluster/resize.md) | Rebuild an in-process cluster under a new shard count. | In-process cluster only |
+| [`POST /_cluster/resize`](cluster/resize.md) | Strictly rebuild and atomically replace an in-process ring under a bounded new shard count. | In-process cluster only |
 | [`POST /_cluster/resync`](cluster/resync.md) | Re-drive queued partial-apply repairs. | Coordinator mode |
 | [`POST /_cluster/handoff`](cluster/handoff.md) | Move one position between explicit source and target endpoints. | Distributed build |
 | [`POST /_cluster/reassign`](cluster/reassign.md) | Resolve a target from membership, move data, then commit the assignment. | Distributed authoritative coordinator |

@@ -85,7 +85,8 @@ the fingerprint is invariant for an out-of-order corpus + a post-freeze add
 (`resize_preserves_dict_fingerprint_for_unsorted_corpus_with_post_freeze_add`; the discriminating
 test the original `build_corpus`-ordered one masked).
 
-**See also:** ADR-046 (the `set_vocab` blue/green rebuild this reuses), ADR-027 (placement +
+**See also:** ADR-167 (the later strict REST transport and timeout contract), ADR-046 (the
+`set_vocab` blue/green rebuild this reuses), ADR-027 (placement +
 the cover proof), ADR-031/032 (the durable manifest + reattach), ADR-045 (the autoscaler split
 advisory this makes real), ADR-074 (tag carry-through), ADR-065 (the program). Deferred: always-on
 auto-resize behind hysteresis; cross-process/online resize over the handoff machinery.
