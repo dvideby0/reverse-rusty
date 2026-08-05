@@ -154,7 +154,11 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
   check`** (advisories + a permissive-only license allowlist + source/ban policy over the *distributed*
   graph too) — so a vulnerable or wrongly-licensed transitive dep fails the gate, in CI on every PR.
   `deny.toml` is the policy. (Precedent: the `prometheus` protobuf feature is disabled, and a memmap2
-  RUSTSEC advisory was caught + bumped by this lane.)
+  RUSTSEC advisory was caught + bumped by this lane.) The one lockfile-only exception is
+  `RUSTSEC-2026-0235`: Cargo resolves an optional `rkyv` 0.7 edge beneath OpenRaft's byte-formatting
+  dependency, but `rkyv` is absent from the all-feature/all-target build graph. The gate ignores that
+  advisory only after a separate graph guard proves every `rkyv` version inactive; activating it
+  fails CI and forces the exception to be removed or reassessed ([ADR-168](../decisions/adr-168-inactive-rkyv-advisory.md)).
 - **Threats addressed:** a known-vulnerable crate shipping; a copyleft/unknown-source dep slipping in.
 - **Residual:** advisory-DB coverage is not exhaustive; pin + review dependency bumps (the distributed
   stack is pinned exact).
@@ -197,7 +201,7 @@ surface is covered separately by `cargo audit` + `cargo deny` in the gate (clean
 
 ```bash
 # Dependency advisories + license/source policy (also part of the full check.sh gate):
-cd engine && cargo audit && cargo deny --all-features check
+cd engine && ./check.sh --lane core
 
 # Container image scan (Trivy via its official image; needs the built image):
 docker build -f deploy/Dockerfile -t reverse-rusty:latest .

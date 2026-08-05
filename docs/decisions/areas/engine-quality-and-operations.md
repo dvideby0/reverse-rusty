@@ -37,6 +37,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [158](../adr-158-alias-feedback-validate-apply-api-contract.md) | Alias-feedback validate-and-apply REST API contract | Makes evidence stamping and explicit activation strict, idempotent, bounded, durable, and observable. | Accepted |
 | [159](../adr-159-get-settings-api-contract.md) | Settings read REST API contract | Makes live configuration reads strict, cache-safe, bounded, observable, and off-runtime. | Accepted |
 | [160](../adr-160-put-settings-api-contract.md) | Settings write REST API contract | Makes runtime configuration updates strict, duplicate-safe, bounded, observable, and coherently published off-runtime. | Accepted |
+| [168](../adr-168-inactive-rkyv-advisory.md) | Inactive `rkyv` advisory qualification | Narrows one lockfile-only RustSec exception behind an all-feature/all-target activation guard. | Accepted |
 
 ---
 

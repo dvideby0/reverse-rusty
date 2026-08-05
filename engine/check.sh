@@ -88,6 +88,20 @@ run() {
     fi
 }
 
+# cargo-audit scans every package resolved into Cargo.lock, including optional
+# dependencies that no target or feature can activate. RUSTSEC-2026-0235 is one
+# such edge today (ADR-168). Keep the exception safe by failing if *any* rkyv
+# version enters the complete all-feature/all-target graph; that forces the
+# advisory disposition to be revisited before rkyv can ship.
+assert_rkyv_inactive() {
+    local tree
+    tree=$(cargo tree --all-features --target all --prefix none) || return 1
+    if grep -q '^rkyv ' <<<"$tree"; then
+        printf 'rkyv is active in the all-feature/all-target dependency graph; remove or reassess RUSTSEC-2026-0235\n' >&2
+        return 1
+    fi
+}
+
 # Advisory (non-failing): list source files over the line threshold as refactor
 # candidates. Informational only — it never touches `failures` or the exit
 # status. Scans the crate's own src/ + tests/ (.rs); bump `threshold` to retune.
@@ -126,7 +140,8 @@ if [ "$distributed" -eq 1 ]; then
     run "tests (distributed)"  cargo test --features distributed --release
 fi
 if [ "$core" -eq 1 ] && [ "$fast" -eq 0 ]; then
-    run "cargo audit"          cargo audit
+    run "cargo audit"          cargo audit --ignore RUSTSEC-2026-0235
+    run "inactive rkyv guard"  assert_rkyv_inactive
     # --all-features so the license/ban policy covers the DISTRIBUTED dependency graph
     # (the tonic TLS stack, ADR-071) — not just the default-feature tree.
     run "cargo deny"           cargo deny --all-features check
