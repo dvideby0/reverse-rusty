@@ -15,6 +15,7 @@ Allocation, handoff, autoscaling, resize, reconciliation, and repair after parti
 | [065](../adr-065-distributed-v1-graduation.md) | Distributed v1 graduation criteria | Defines the release-candidate program; each graduation deliverable is captured in its own ADR. | Accepted |
 | [090](../adr-090-data-moving-reassignment.md) | Data-moving live reassignment | Moves shard data before committing ownership, so routing always points to a data-bearing source. | Accepted |
 | [166](../adr-166-cluster-rebalance-api-contract.md) | Cluster-rebalance REST API contract | Makes native whole-cluster rebalance strict, bounded, topology-safe by default, and explicit about its ES/OpenSearch boundary. | Accepted |
+| [167](../adr-167-cluster-resize-api-contract.md) | Cluster-resize REST API contract | Makes native in-process ring replacement strict, bounded, off-runtime, terminally attested, and explicit about its ES/OpenSearch boundary. | Accepted |
 
 ---
 

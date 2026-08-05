@@ -181,9 +181,11 @@ curl -fsS -XPOST http://127.0.0.1:9200/_cluster/resize -H "authorization: Bearer
   -H 'content-type: application/json' -d '{"num_shards": 12}'
 ```
 
-This is an in-process blue/green rebuild under a fresh ring (ADR-078) — correct and durable, but
-**in-process only**. `recommended_shard_count` (the autoscaler's load-based advisory) is a library/auto
-driver concept, not a REST knob; pick `num_shards` yourself, optionally guided by `/_stats`.
+This is a synchronous in-process blue/green rebuild under a fresh ring (ADR-078/167) — correct and
+durable, but **in-process only**. The strict request, admission, timeout, response, and retry contract
+is in the [`/_cluster/resize` API reference](../reference/api/cluster/resize.md).
+`recommended_shard_count` (the autoscaler's load-based advisory) is a library/auto driver concept,
+not a REST knob; pick `num_shards` yourself, optionally guided by `/_stats`.
 
 **The remote topology** (this compose — shards on separate nodes) has **no online resize**: changing K
 re-keys the ring, and a coordinator restarted at the new K routes on the new ring while the existing data

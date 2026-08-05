@@ -118,6 +118,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   resumable partial reports, shutdown-budget deployment controls, sanitized failures, and an
   explicit non-reroute ES/OpenSearch boundary
   ([ADR-166](decisions/adr-166-cluster-rebalance-api-contract.md)).
+- Hardened native coordinator `POST /_cluster/resize` with strict bounded transport, a fixed
+  public shard-count ceiling, one supervised off-runtime blue/green rebuild, manager-start
+  timeouts, disconnect-safe terminal completion, final control-version and shard acknowledgement,
+  fail-loud remote-topology refusal, no-store telemetry, and an explicit non-split/non-shrink
+  ES/OpenSearch boundary ([ADR-167](decisions/adr-167-cluster-resize-api-contract.md)).
 - Hardened native `GET /_stats` with a strict no-store transport, truthful physical/live/tombstone
   and resident-memory/WAL projections, familiar timing and shard metadata, single-slot blocking
   collection, fail-loud cluster aggregation, and one shard-count fan-out instead of two
