@@ -60,10 +60,12 @@ cannot safely promise that serving state, control state, and the durable manifes
   control commit, checkpoint, and version attestation. The shutdown checkpoint waits behind the
   same REST-write guard, joining any active resize before process exit.
 - Return `{acknowledged, shards_acknowledged, version, old_num_shards, num_shards, rebuilt}` only
-  after terminal success. `version` is the final observed control application version;
-  `shards_acknowledged` is exact because every local target shard is built and any required
-  checkpoint has committed before 200. Same-count retries repair a stale control shard count before
-  returning and retain ADR-078's healing durable checkpoint.
+  after terminal success. Before any new rebuild, repair only the exact one-generation predecessor
+  left by a failed post-swap resize proposal; refuse every other control/live divergence. Attest
+  both the final shard count and placement generation. `version` is the final observed control
+  application version; `shards_acknowledged` is exact because every local target shard is built and
+  any required checkpoint has committed before 200. Same-count retries repair a stale control shard
+  count before returning and retain ADR-078's healing durable checkpoint.
 - Fail loud on rebuild/control/durability/version errors with typed status and a sanitized reason
   directing the operator to health and cluster state. Detailed paths/backend endpoints remain in
   logs. Return structured `Cache-Control: no-store` responses and fixed `cluster_resize`
@@ -94,7 +96,8 @@ and checkpoints before success. Rejecting remote topologies before admission pre
 that routing and stored placement must use the same ring.
 
 Focused handler tests prove grow success plus post-resize matching, same-count acknowledgement,
-post-swap control-proposal failure repair, exact final version/shard fields, strict
+post-swap control-proposal failure repair, different-target retries cannot advance another live
+generation until that predecessor is committed, exact final version/shard fields, strict
 method/query/media/object/field/count controls, body size and absolute deadlines,
 zero/positive/closed admission, topology-lock deadline cancellation with no delayed mutation, early
 remote refusal, fixed no-store telemetry, dedicated execution independent of the shared blocking

@@ -437,11 +437,15 @@ pub(crate) async fn cluster_resize(
         let old_num_shards = cluster.num_shards();
         let result = cluster.resize(num_shards).and_then(|rebuilt| {
             let control = cluster.control_state()?;
-            if control.num_shards as usize != num_shards {
+            let placement_generation = cluster.placement_generation().0;
+            if control.num_shards as usize != num_shards
+                || control.placement_generation != placement_generation
+            {
                 return Err(ShardError::ControlPlane(format!(
-                    "resize terminal attestation failed: serving ring has {num_shards} shards but \
-                     committed control state has {}",
-                    control.num_shards
+                    "resize terminal attestation failed: serving state is generation \
+                     {placement_generation}/{num_shards} shards but committed control state is \
+                     generation {}/{} shards",
+                    control.placement_generation, control.num_shards
                 )));
             }
             Ok(ClusterResizeSuccess {

@@ -40,7 +40,8 @@ A successful response is terminal:
   unassigned or recovering.
 - `version` is the final observed `ClusterState` application version, shared with
   [`GET /_cluster/state`](../observability/cluster-state.md). It is not a Raft term/log index,
-  checkpoint epoch, feature-model version, or placement generation.
+  checkpoint epoch, feature-model version, or placement generation. Before returning it, resize
+  also attests that the committed placement generation exactly matches the serving shards.
 - `old_num_shards` and `num_shards` report the serving ring transition. `rebuilt` is the number of
   unique live logical queries rebuilt; it is zero for a same-count retry.
 
@@ -69,6 +70,11 @@ at different generations. The request waits for the exact terminal result. If th
 disconnects after start, the supervised worker retains admission and completes; graceful shutdown
 also waits behind the same REST-write guard before its final checkpoint. Inspect `/_health` and
 `/_cluster/state` after any connection loss before retrying.
+
+A failed control proposal can occur after the serving swap. The next request first repairs only
+that exact one-generation resize predecessor; it cannot advance to a different shard count until
+the prior serving/control transition is committed and attested. Any other control/live divergence
+fails loud instead of being reinterpreted as a resize retry.
 
 The familiar overall `timeout`, `wait_for_active_shards`, asynchronous task controls, and target
 index settings are rejected because their ES/OpenSearch meanings do not match this synchronous
