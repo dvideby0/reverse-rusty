@@ -95,7 +95,7 @@ run() {
 # advisory disposition to be revisited before rkyv can ship.
 assert_rkyv_inactive() {
     local tree
-    tree=$(cargo tree --all-features --target all --prefix none) || return 1
+    tree=$(cargo tree --workspace --all-features --target all --prefix none) || return 1
     if grep -q '^rkyv ' <<<"$tree"; then
         printf 'rkyv is active in the all-feature/all-target dependency graph; remove or reassess RUSTSEC-2026-0235\n' >&2
         return 1

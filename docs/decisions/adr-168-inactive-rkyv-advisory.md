@@ -10,9 +10,9 @@ unchanged lockfile began failing `cargo audit` for
 bug in `rkyv` archive validation. The lock path is `openraft -> byte-unit -> rust_decimal -> rkyv`.
 OpenRaft uses byte-unit formatting; byte-unit enables rust_decimal without rust_decimal's defaults;
 rust_decimal declares `rkyv` as a separate optional feature. Consequently Cargo resolves `rkyv`
-into `Cargo.lock`, but `cargo tree --all-features --target all` proves that no workspace target can
-activate it. Neither the service nor its build and test tools compile, link, deserialize, or process
-an `rkyv` archive.
+into `Cargo.lock`, but `cargo tree --workspace --all-features --target all` proves that no workspace
+target can activate it. Neither the service nor its build and test tools compile, link, deserialize,
+or process an `rkyv` archive.
 
 The maintained `rkyv` fix is in the incompatible 0.8 line. The upstream 0.7 declaration belongs to
 rust_decimal rather than Reverse Rusty, and patching an unused optional integration locally would
@@ -24,10 +24,10 @@ feature activation could let a later dependency change make the vulnerability re
 
 - Keep `cargo audit` as the lockfile-wide RustSec gate and ignore only `RUSTSEC-2026-0235` on its
   invocation. Do not add a general advisory allowlist or weaken `cargo deny`.
-- Immediately follow the scan with a complete `cargo tree --all-features --target all` guard. Fail
-  if any `rkyv` version appears in that active graph. This intentionally blocks even a patched
-  `rkyv`: adding the crate to a build must first remove or explicitly revisit the broad advisory
-  exception.
+- Immediately follow the scan with a complete
+  `cargo tree --workspace --all-features --target all` guard. Fail if any `rkyv` version appears in
+  that active graph. This intentionally blocks even a patched `rkyv`: adding the crate to a build
+  must first remove or explicitly revisit the broad advisory exception.
 - Keep `engine/check.sh` as the canonical command so local pre-push and CI execute the scan and
   activation proof together. Document the qualified exception in the threat model rather than
   suggesting that a bare `cargo audit` is the project gate.
