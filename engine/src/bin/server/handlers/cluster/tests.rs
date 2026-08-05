@@ -321,7 +321,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 CLUSTER_RESIZE_BODY_LIMIT,
             )),
         )
-        .route("/_cluster/resync", post(cluster_resync))
+        .route(
+            "/_cluster/resync",
+            any(cluster_resync).layer(axum::extract::DefaultBodyLimit::max(
+                CLUSTER_RESYNC_BODY_LIMIT,
+            )),
+        )
         .with_state(Arc::clone(state))
 }
 
@@ -396,6 +401,7 @@ mod pit;
 mod ranked;
 mod rebalance;
 mod resize;
+mod resync;
 mod settings_read;
 mod settings_write;
 mod state_read;

@@ -234,7 +234,10 @@ A coordinator mutation may target several positions. It is logged before fan-out
 can fail after another position applied. The coordinator reports the partial state, emits an event,
 and records the failed targets for `resync`; replay of the durable coordinator log is the backstop.
 Reads that promise exact exhaustive completion refuse while repairs are pending. The in-process RF=1
-path is infallible at that seam.
+path is infallible at that seam. The strict native REST boundary runs one independently supervised,
+admission-bounded pass and reports any still-unreachable mutations explicitly; it is not an alias for
+Elasticsearch/OpenSearch shard-allocation reroute
+([ADR-169](../decisions/adr-169-cluster-resync-api-contract.md)).
 
 ### 5.2 Query-write consistency versus topology consensus
 

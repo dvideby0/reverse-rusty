@@ -57,9 +57,9 @@ use crate::handlers::{
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
     CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT,
     CLUSTER_NODE_DEREGISTER_BODY_LIMIT, CLUSTER_NODE_REGISTER_BODY_LIMIT,
-    CLUSTER_REBALANCE_BODY_LIMIT, CLUSTER_RESIZE_BODY_LIMIT, CLUSTER_STATE_BODY_LIMIT,
-    EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT,
-    SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
+    CLUSTER_REBALANCE_BODY_LIMIT, CLUSTER_RESIZE_BODY_LIMIT, CLUSTER_RESYNC_BODY_LIMIT,
+    CLUSTER_STATE_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT,
+    PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
     VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
     VOCAB_WRITE_BODY_LIMIT,
 };
@@ -588,7 +588,10 @@ pub(crate) async fn run(
             "/_cluster/resize",
             any(cluster_resize).layer(DefaultBodyLimit::max(CLUSTER_RESIZE_BODY_LIMIT)),
         )
-        .route("/_cluster/resync", post(cluster_resync))
+        .route(
+            "/_cluster/resync",
+            any(cluster_resync).layer(DefaultBodyLimit::max(CLUSTER_RESYNC_BODY_LIMIT)),
+        )
         .route("/_cluster/handoff", post(cluster_handoff))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))

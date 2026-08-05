@@ -9,6 +9,14 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-08-05 — Cluster resync API hardening
+
+- Hardened native `POST /_cluster/resync` with strict bodyless transport, bounded
+  manager-timeout admission, independently supervised off-runtime repair, disconnect-safe terminal
+  reporting, additive acknowledgement/timing fields, fixed no-store telemetry, and an explicit
+  non-alias boundary from Elasticsearch/OpenSearch allocation reroute
+  ([ADR-169](decisions/adr-169-cluster-resync-api-contract.md)).
+
 ## 2026-08-05 — Dependency-gate qualification
 
 - Qualified `RUSTSEC-2026-0235` as an inactive optional `rkyv` lockfile edge, retained the
