@@ -66,6 +66,8 @@ pub use topology::{resolve_topology, route_topology, seed_position_preserving, S
 #[cfg(feature = "distributed")]
 mod distributed;
 #[cfg(feature = "distributed")]
+pub use distributed::handoff::HandoffOutcome;
+#[cfg(feature = "distributed")]
 mod gc;
 #[cfg(feature = "distributed")]
 mod reassign;

@@ -298,7 +298,7 @@ assert_equals_baseline "$WORK/baseline.txt" "after mid-write kill"
 echo "    $accepted acked writes; zero FN after kill+restart+resync ($resync); probes ≡ baseline"
 
 # ---------------------------------------------------------------------------
-step "leg 4 — live handoff under load (position 1: shard1 → target)"
+step "leg 4 — explicit uncommitted live handoff under load (position 1: shard1 → target)"
 writer_log="$WORK/writer.log"
 : > "$writer_log.accepted"
 (
@@ -318,9 +318,9 @@ writer_pid=$!
 sleep 1
 handoff=$(curl -s --max-time 120 -X POST "$BASE/_cluster/handoff" \
   -H 'content-type: application/json' \
-  -d '{"position":1,"source":"https://shard1:50051","target":"https://target:50051"}' \
+  -d '{"position":1,"source":"https://shard1:50051","target":"https://target:50051","allow_uncommitted":true}' \
   || echo '{"error":"handoff request timed out or failed"}')
-echo "$handoff" | jq -e '.acknowledged == true' >/dev/null \
+echo "$handoff" | jq -e '.acknowledged == true and .moved == true and .committed == false' >/dev/null \
   || fail "handoff not acknowledged: $handoff"
 wait "$writer_pid"
 accepted=$(cat "$writer_log.count")

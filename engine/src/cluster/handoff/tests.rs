@@ -215,6 +215,9 @@ impl Shard for RecordingShard {
     fn live_endpoints(&self) -> Vec<String> {
         vec!["http://recording:1".into()]
     }
+    fn live_primary_endpoint(&self) -> Option<String> {
+        Some("http://recording:1".into())
+    }
     fn num_queries(&self) -> Result<usize, ShardError> {
         Ok(42) // sentinel
     }
@@ -287,6 +290,11 @@ fn forwards_defaulted_methods_to_backing() {
         h.live_endpoints(),
         vec!["http://recording:1".to_string()],
         "live_endpoints must FORWARD to the backing, not inherit the empty default"
+    );
+    assert_eq!(
+        h.live_primary_endpoint(),
+        Some("http://recording:1".to_string()),
+        "live_primary_endpoint must preserve ownership instead of deriving it from keep-set order"
     );
 }
 

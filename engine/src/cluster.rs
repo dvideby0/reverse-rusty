@@ -83,8 +83,8 @@ pub use control_raft::{
 pub use control_server::{ControlMetricsSource, ControlServer};
 #[cfg(feature = "distributed")]
 pub use coordinator::{
-    GcReport, OrphanSlot, ReassignOutcome, RebalanceMoveReport, ReconcileConfig, ReconcileReport,
-    ShardGroup,
+    GcReport, HandoffOutcome, OrphanSlot, ReassignOutcome, RebalanceMoveReport, ReconcileConfig,
+    ReconcileReport, ShardGroup,
 };
 #[cfg(feature = "distributed")]
 pub use node_metrics::{serve_metrics, MetricsHandle};
