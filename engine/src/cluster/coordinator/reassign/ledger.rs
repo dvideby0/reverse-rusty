@@ -21,7 +21,8 @@
 //! The conflicts above are per *server process* (the fence, the slot map, the adopt handshake), and
 //! two distinct `NodeId`s may resolve to one endpoint (`reassign_and_move` tolerates that as a
 //! no-op) — a `NodeId`-keyed guard would let such aliases race. Every move already resolves its
-//! members to endpoints fail-closed before reserving, so the ledger keys on the resolved strings.
+//! members to endpoints fail-closed before reserving, so the ledger keys on normalized resolved
+//! strings (scheme/host case and trailing slashes cannot bypass conflict identity).
 //!
 //! ## Liveness
 //! [`MoveLedger::reserve`] is blocking and ALL-OR-NOTHING: a caller waits until its *whole* set is
@@ -34,6 +35,7 @@
 
 use std::collections::HashSet;
 use std::sync::{Condvar, Mutex, PoisonError};
+use std::time::Instant;
 
 /// The set of endpoints currently participating in an in-flight data move (as source, target, or
 /// group member), plus a condvar to wake reservers when a move completes. One per `ClusterEngine`.
@@ -61,7 +63,7 @@ impl MoveLedger {
         &self,
         eps: &[S],
     ) -> MoveTicket<'_> {
-        let mut want: Vec<String> = eps.iter().map(|e| e.as_ref().to_string()).collect();
+        let mut want: Vec<String> = eps.iter().map(|e| normalized(e.as_ref())).collect();
         want.sort_unstable();
         want.dedup();
         let mut busy = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
@@ -81,6 +83,49 @@ impl MoveLedger {
                 .unwrap_or_else(PoisonError::into_inner);
         }
     }
+
+    /// Reserve every endpoint before `deadline`, or return `None` without
+    /// reserving anything. A deadline that has already elapsed is still one
+    /// immediate, non-blocking attempt; this is the manager-timeout `0`
+    /// behavior used by strict operator APIs.
+    pub(in crate::cluster::coordinator) fn reserve_until<S: AsRef<str>>(
+        &self,
+        eps: &[S],
+        deadline: Instant,
+    ) -> Option<MoveTicket<'_>> {
+        let mut want: Vec<String> = eps.iter().map(|e| normalized(e.as_ref())).collect();
+        want.sort_unstable();
+        want.dedup();
+        let mut busy = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if want.iter().all(|e| !busy.contains(e)) {
+                for e in &want {
+                    busy.insert(e.clone());
+                }
+                return Some(MoveTicket {
+                    ledger: self,
+                    eps: want,
+                });
+            }
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            let waited = self.freed.wait_timeout(busy, remaining);
+            let (next, timeout) = match waited {
+                Ok(pair) => pair,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            busy = next;
+            if timeout.timed_out() && want.iter().any(|e| busy.contains(e)) {
+                return None;
+            }
+        }
+    }
+}
+
+/// Endpoint scheme/host case and one or more trailing slashes are formatting,
+/// not distinct physical servers. Every reservation uses the normalized key so
+/// spelling variants cannot bypass conflict serialization.
+fn normalized(endpoint: &str) -> String {
+    endpoint.trim_end_matches('/').to_ascii_lowercase()
 }
 
 /// An RAII reservation of a move's endpoint footprint in the [`MoveLedger`]. Dropping it (on any
@@ -158,6 +203,54 @@ mod tests {
         drop(ledger.reserve(&["http://a:1"]));
         // Would block forever if the drop had not released the endpoint.
         drop(ledger.reserve(&["http://a:1"]));
+    }
+
+    /// Deadline admission never leaves a partial reservation behind, and a
+    /// later caller can acquire the previously-conflicting endpoint normally.
+    #[test]
+    fn reserve_until_times_out_without_reserving() {
+        let ledger = MoveLedger::new();
+        let held = ledger.reserve(&["http://a:1"]);
+        assert!(
+            ledger
+                .reserve_until(
+                    &["http://a:1", "http://b:1"],
+                    Instant::now() + Duration::from_millis(20),
+                )
+                .is_none(),
+            "the overlapping reservation must respect its deadline"
+        );
+        let b = ledger
+            .reserve_until(&["http://b:1"], Instant::now())
+            .expect("the timed-out waiter never reserved its disjoint endpoint");
+        drop(b);
+        drop(held);
+    }
+
+    /// An elapsed deadline is a try-once operation rather than an automatic
+    /// refusal, matching `cluster_manager_timeout=0` when the ledger is idle.
+    #[test]
+    fn reserve_until_elapsed_deadline_still_tries_once() {
+        let ledger = MoveLedger::new();
+        let ticket = ledger
+            .reserve_until(&["http://a:1"], Instant::now())
+            .expect("an idle endpoint is admitted immediately");
+        drop(ticket);
+    }
+
+    /// Formatting variants of one physical endpoint still conflict; otherwise
+    /// a caller-controlled spelling could bypass the fence-window ledger.
+    #[test]
+    fn endpoint_identity_is_normalized() {
+        let ledger = MoveLedger::new();
+        let held = ledger.reserve(&["HTTP://NODE:50051/"]);
+        assert!(
+            ledger
+                .reserve_until(&["http://node:50051"], Instant::now())
+                .is_none(),
+            "case and trailing slash must not create a disjoint reservation"
+        );
+        drop(held);
     }
 
     /// A ticket held by a PANICKING thread is released during unwind (RAII), so a crashed move

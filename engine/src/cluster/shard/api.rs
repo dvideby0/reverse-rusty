@@ -370,6 +370,15 @@ pub(crate) trait Shard: Send + Sync {
         Vec::new()
     }
 
+    /// The primary endpoint within [`Self::live_endpoints`], when this shard is
+    /// remotely routed. Kept separate from the GC keep set because replicated
+    /// shards sort that set for deterministic deduplication; list order must
+    /// never be interpreted as primary ownership.
+    #[cfg(feature = "distributed")]
+    fn live_primary_endpoint(&self) -> Option<String> {
+        None
+    }
+
     /// The live source DSL of `logical` on this shard, if it holds a live copy — the
     /// point read behind `GET /_doc/{id}` in cluster mode (ADR-070). `Ok(None)` means
     /// "this shard genuinely does not hold it"; the default is a loud **error**, never

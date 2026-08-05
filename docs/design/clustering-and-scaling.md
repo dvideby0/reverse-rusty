@@ -368,13 +368,17 @@ so `collect_load` subtracts the replicated broad share when assessing selective 
 
 ### 9.1 Fenced handoff
 
-`execute_handoff` performs:
+Raw `execute_handoff` performs:
 
-1. peer-copy the target while the source continues serving;
-2. fence source writes (reads and recovery stay available);
-3. drain the finite residual translog to convergence;
-4. swap the runtime `HandoffShard` backing;
-5. commit the new assignment, then retire/unfence retained members as appropriate.
+1. reserve the endpoint footprint and attest that the claimed source is the position's current
+   live primary while the target is outside its live replica set;
+2. peer-copy the target while the source continues serving;
+3. fence source writes (reads and recovery stay available);
+4. drain the finite residual translog to convergence;
+5. swap the runtime `HandoffShard` backing.
+
+The higher-level reassignment path then commits the new assignment and retires/unfences retained
+members as appropriate.
 
 The public reassignment path is **move then commit**. If a crash lands after the runtime flip but
 before the control commit, the fenced old owner still serves reads and retains data, so the committed
@@ -388,7 +392,10 @@ content fingerprint can be promoted without an O(corpus) recopy.
 
 Every move reserves its full source/target endpoint set in a `MoveLedger`. Conflicting moves
 serialize; disjoint moves may execute in configured waves. Tickets are RAII and failed handoffs
-auto-unfence, preventing a forgotten fence from becoming a permanent write outage.
+auto-unfence, preventing a forgotten fence from becoming a permanent write outage. The REST raw
+handoff can apply a manager deadline to this reservation; a deadline loss is guaranteed not to
+start recovery later. The raw route changes live routing only and is explicitly uncommitted;
+restart-stable operator movement uses the move-then-commit reassignment path.
 
 After assignments converge, `gc_orphan_slots` can list remote slots and drop only those outside both
 the committed keep set and live routing. Unassigned positions fail safe (skip), and the drop path

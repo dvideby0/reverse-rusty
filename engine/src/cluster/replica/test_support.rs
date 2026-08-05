@@ -54,6 +54,8 @@ pub(super) struct FailingShard {
     /// 0 = ok, 1 = `Remote`, 2 = `DictMismatch` — applied to every read.
     read_mode: AtomicU8,
     fail_writes: AtomicBool,
+    #[cfg(feature = "distributed")]
+    endpoint: Option<String>,
 }
 
 impl FailingShard {
@@ -61,20 +63,34 @@ impl FailingShard {
         FailingShard {
             read_mode: AtomicU8::new(1),
             fail_writes: AtomicBool::new(false),
+            #[cfg(feature = "distributed")]
+            endpoint: None,
         }
     }
     pub(super) fn reads_dict_mismatch() -> Self {
         FailingShard {
             read_mode: AtomicU8::new(2),
             fail_writes: AtomicBool::new(false),
+            #[cfg(feature = "distributed")]
+            endpoint: None,
         }
     }
     pub(super) fn writes_fail() -> Self {
         FailingShard {
             read_mode: AtomicU8::new(0),
             fail_writes: AtomicBool::new(false),
+            #[cfg(feature = "distributed")]
+            endpoint: None,
         }
         .with_failing_writes()
+    }
+    #[cfg(feature = "distributed")]
+    pub(super) fn named(endpoint: &str) -> Self {
+        FailingShard {
+            read_mode: AtomicU8::new(0),
+            fail_writes: AtomicBool::new(false),
+            endpoint: Some(endpoint.to_string()),
+        }
     }
     fn with_failing_writes(self) -> Self {
         self.fail_writes.store(true, Ordering::Release);
@@ -159,6 +175,14 @@ impl Shard for FailingShard {
     }
     fn translog_tail(&self, _from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
         Ok(Vec::new())
+    }
+    #[cfg(feature = "distributed")]
+    fn live_endpoints(&self) -> Vec<String> {
+        self.endpoint.iter().cloned().collect()
+    }
+    #[cfg(feature = "distributed")]
+    fn live_primary_endpoint(&self) -> Option<String> {
+        self.endpoint.clone()
     }
 }
 

@@ -56,6 +56,9 @@ fn state_from_cluster_with_rebalance_topology(
         rebalance_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_REBALANCES,
         )),
+        handoff_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_CLUSTER_HANDOFFS,
+        )),
         rebalance_topology,
         health_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
@@ -327,6 +330,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 CLUSTER_RESYNC_BODY_LIMIT,
             )),
         )
+        .route(
+            "/_cluster/handoff",
+            any(cluster_handoff).layer(axum::extract::DefaultBodyLimit::max(
+                CLUSTER_HANDOFF_BODY_LIMIT,
+            )),
+        )
         .with_state(Arc::clone(state))
 }
 
@@ -392,6 +401,7 @@ mod cat_shards;
 mod checkpoint;
 mod crud;
 mod flush;
+mod handoff;
 mod health;
 mod jobs;
 mod metrics;

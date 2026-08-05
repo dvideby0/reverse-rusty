@@ -56,12 +56,12 @@ use crate::handlers::{
     ALIAS_FEEDBACK_READ_BODY_LIMIT, ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT,
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
     CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT,
-    CLUSTER_NODE_DEREGISTER_BODY_LIMIT, CLUSTER_NODE_REGISTER_BODY_LIMIT,
-    CLUSTER_REBALANCE_BODY_LIMIT, CLUSTER_RESIZE_BODY_LIMIT, CLUSTER_RESYNC_BODY_LIMIT,
-    CLUSTER_STATE_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT,
-    PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
-    VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
-    VOCAB_WRITE_BODY_LIMIT,
+    CLUSTER_HANDOFF_BODY_LIMIT, CLUSTER_NODE_DEREGISTER_BODY_LIMIT,
+    CLUSTER_NODE_REGISTER_BODY_LIMIT, CLUSTER_REBALANCE_BODY_LIMIT, CLUSTER_RESIZE_BODY_LIMIT,
+    CLUSTER_RESYNC_BODY_LIMIT, CLUSTER_STATE_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT,
+    HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT,
+    SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT, VOCAB_LEARN_APPLY_BODY_LIMIT,
+    VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT, VOCAB_WRITE_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState, ClusterRebalanceTopology};
@@ -375,6 +375,9 @@ pub(crate) async fn run(
         rebalance_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_REBALANCES,
         )),
+        handoff_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_CLUSTER_HANDOFFS,
+        )),
         rebalance_topology: if in_process {
             ClusterRebalanceTopology::InProcess
         } else if resolve_only {
@@ -592,7 +595,10 @@ pub(crate) async fn run(
             "/_cluster/resync",
             any(cluster_resync).layer(DefaultBodyLimit::max(CLUSTER_RESYNC_BODY_LIMIT)),
         )
-        .route("/_cluster/handoff", post(cluster_handoff))
+        .route(
+            "/_cluster/handoff",
+            any(cluster_handoff).layer(DefaultBodyLimit::max(CLUSTER_HANDOFF_BODY_LIMIT)),
+        )
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
         // Auth outside the limiter, exactly as in single-node mode (ADR-062).
@@ -670,9 +676,9 @@ pub(crate) async fn run(
         task.abort();
     }
 
-    // Rebalance and corpus-wide administrative workers may outlive their HTTP
-    // requests by design. Acquire and retain both single-slot admission
-    // boundaries before durability cleanup. In particular, a detached resize
+    // Rebalance, raw handoff, and corpus-wide administrative workers may outlive
+    // their HTTP requests by design. Acquire and retain their single-slot
+    // admission boundaries before durability cleanup. In particular, a detached resize
     // may be waiting for `write_serial`; quiescing only that lock would let the
     // shutdown checkpoint win it first and the resize start after cleanup.
     info!("connection drain complete, waiting for active cluster administration");
@@ -681,6 +687,14 @@ pub(crate) async fn run(
             Ok(guard) => Some(guard),
             Err(source) => {
                 error!(error = %source, "rebalance admission closed during cluster shutdown");
+                None
+            }
+        };
+    let _handoff_shutdown_guard =
+        match quiesce_worker_admission_for_shutdown(&state.handoff_permits).await {
+            Ok(guard) => Some(guard),
+            Err(source) => {
+                error!(error = %source, "handoff admission closed during cluster shutdown");
                 None
             }
         };

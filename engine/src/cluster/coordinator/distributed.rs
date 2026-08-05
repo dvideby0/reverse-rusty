@@ -17,7 +17,7 @@ use crate::cluster::transport_metrics::TransportMetrics;
 
 use super::{ClusterConfig, ClusterDurable, ClusterEngine, ShardGroup};
 
-mod handoff;
+pub(super) mod handoff;
 mod recovery;
 mod remote;
 mod replicated;

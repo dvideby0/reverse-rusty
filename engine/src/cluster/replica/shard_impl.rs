@@ -268,6 +268,14 @@ impl Shard for ReplicatedShard {
         eps
     }
 
+    #[cfg(feature = "distributed")]
+    fn live_primary_endpoint(&self) -> Option<String> {
+        // `live_endpoints` is a sorted GC keep set, so its first item is not
+        // necessarily the primary. Preserve the composite's explicit primary
+        // role through the underlying shard instead.
+        self.primary.live_primary_endpoint()
+    }
+
     fn source_of(&self, logical: u64) -> Result<Option<String>, ShardError> {
         // Set-equal copies ⇒ any in-sync copy answers; same failover as the other reads.
         self.read(|s| s.source_of(logical))

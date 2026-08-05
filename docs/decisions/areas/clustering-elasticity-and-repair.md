@@ -17,6 +17,7 @@ Allocation, handoff, autoscaling, resize, reconciliation, and repair after parti
 | [166](../adr-166-cluster-rebalance-api-contract.md) | Cluster-rebalance REST API contract | Makes native whole-cluster rebalance strict, bounded, topology-safe by default, and explicit about its ES/OpenSearch boundary. | Accepted |
 | [167](../adr-167-cluster-resize-api-contract.md) | Cluster-resize REST API contract | Makes native in-process ring replacement strict, bounded, off-runtime, terminally attested, and explicit about its ES/OpenSearch boundary. | Accepted |
 | [169](../adr-169-cluster-resync-api-contract.md) | Cluster-resync REST API contract | Makes native partial-apply repair strict, admission-bounded, off-runtime, disconnect-safe, and explicit about its ES/OpenSearch boundary. | Accepted |
+| [170](../adr-170-cluster-handoff-api-contract.md) | Cluster-handoff REST API contract | Attests the live source, requires explicit uncommitted intent, bounds start admission, and supervises terminal handoff completion. | Accepted |
 
 ---
 

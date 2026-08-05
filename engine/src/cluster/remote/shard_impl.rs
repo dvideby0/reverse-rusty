@@ -757,6 +757,10 @@ impl Shard for RemoteShard {
         vec![self.endpoint.clone()]
     }
 
+    fn live_primary_endpoint(&self) -> Option<String> {
+        Some(self.endpoint.clone())
+    }
+
     fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         let client = self.client.clone();
         let shard_id = self.shard_id;

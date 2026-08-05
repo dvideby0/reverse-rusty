@@ -331,6 +331,10 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().live_endpoints()
     }
 
+    fn live_primary_endpoint(&self) -> Option<String> {
+        self.current.load().live_primary_endpoint()
+    }
+
     fn source_of(&self, logical: u64) -> Result<Option<String>, ShardError> {
         self.current.load().source_of(logical)
     }

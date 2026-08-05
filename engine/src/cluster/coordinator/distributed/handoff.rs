@@ -1,4 +1,30 @@
+use std::time::Instant;
+
 use super::{Arc, ClusterEngine, DurabilityOp, EngineEvent, LogPos, Shard, ShardError};
+
+/// Terminal result of one raw live-routing handoff request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandoffOutcome {
+    /// The requested target already owns live routing. This makes an exact
+    /// retry after a lost HTTP response safe and observable.
+    NoChange { generation: u64 },
+    /// Recovery, fencing, convergence, and the routing flip completed.
+    Moved { generation: u64 },
+}
+
+impl HandoffOutcome {
+    /// Fence/routing generation serving after the request.
+    pub fn generation(self) -> u64 {
+        match self {
+            Self::NoChange { generation } | Self::Moved { generation } => generation,
+        }
+    }
+
+    /// Whether this invocation performed the routing flip.
+    pub fn moved(self) -> bool {
+        matches!(self, Self::Moved { .. })
+    }
+}
 
 impl ClusterEngine {
     /// Live data-moving handoff (ADR-044, clustering step 6b): move shard `position` from its
@@ -17,9 +43,9 @@ impl ClusterEngine {
     /// ending the quiesce). Returns the new fence/handoff generation. Requires a handoff-capable
     /// cluster (built via [`Self::connect_remote`]/[`Self::connect_replicated`]); errors fail-closed —
     /// a write briefly rejected in the fence→flip window is the caller's to retry (it never silently
-    /// vanishes), and a source that fails to converge aborts the flip (leaving the source fenced)
-    /// rather than dropping a write. "Drop the old owner" = drop it from ROUTING, not teardown (its
-    /// server keeps running; tearing it down is a separate ops step).
+    /// vanishes), and a source that fails to converge aborts the flip and is auto-unfenced rather
+    /// than dropping a write. "Drop the old owner" = drop it from ROUTING, not teardown (its server
+    /// keeps running; tearing it down is a separate ops step).
     ///
     /// Reserves `{source, target}` in the busy-endpoint move ledger for the whole move (ADR-095), so
     /// a raw handoff — the REST `POST /_cluster/handoff` path — serializes against every concurrent
@@ -38,7 +64,89 @@ impl ClusterEngine {
         let _ticket = self
             .move_ledger
             .reserve(&[source_endpoint, target_endpoint]);
-        self.execute_handoff_inner(position, source_endpoint, target_endpoint, handle)
+        match self.validate_handoff_route(position, source_endpoint, target_endpoint)? {
+            HandoffRoute::AlreadyAtTarget { generation } => Ok(generation),
+            HandoffRoute::Move => {
+                self.execute_handoff_inner(position, source_endpoint, target_endpoint, handle)
+            }
+        }
+    }
+
+    /// Deadline-aware raw handoff admission for an operator boundary.
+    ///
+    /// The endpoint footprint is reserved before `try_start` is invoked. The
+    /// callback must atomically decide whether the request may begin (for
+    /// example, by winning a queued-vs-cancelled gate) and may report a start
+    /// signal. `None` means no movement began: either the ledger deadline
+    /// elapsed or the callback refused the start. Once the callback returns
+    /// true, the move is safety-sensitive and runs to a terminal result.
+    pub fn execute_handoff_until<F>(
+        &self,
+        position: usize,
+        source_endpoint: &str,
+        target_endpoint: &str,
+        handle: &tokio::runtime::Handle,
+        deadline: Instant,
+        try_start: F,
+    ) -> Result<Option<HandoffOutcome>, ShardError>
+    where
+        F: FnOnce() -> bool,
+    {
+        let Some(_ticket) = self
+            .move_ledger
+            .reserve_until(&[source_endpoint, target_endpoint], deadline)
+        else {
+            return Ok(None);
+        };
+        let route = self.validate_handoff_route(position, source_endpoint, target_endpoint)?;
+        if !try_start() {
+            return Ok(None);
+        }
+        match route {
+            HandoffRoute::AlreadyAtTarget { generation } => {
+                Ok(Some(HandoffOutcome::NoChange { generation }))
+            }
+            HandoffRoute::Move => self
+                .execute_handoff_inner(position, source_endpoint, target_endpoint, handle)
+                .map(|generation| Some(HandoffOutcome::Moved { generation })),
+        }
+    }
+
+    /// Prove that recovery will seed from the position's current primary, not
+    /// an arbitrary same-dictionary slot. This check runs while the endpoint
+    /// move-ledger reservation is held, so the live backing cannot change
+    /// between attestation and the first recovery RPC.
+    fn validate_handoff_route(
+        &self,
+        position: usize,
+        source_endpoint: &str,
+        target_endpoint: &str,
+    ) -> Result<HandoffRoute, ShardError> {
+        let handoff = self.handoffs.get(position).ok_or_else(|| {
+            ShardError::Config(format!(
+                "execute_handoff: shard position {position} is not handoff-capable (the cluster \
+                 was not built via connect_remote/connect_replicated)"
+            ))
+        })?;
+        let Some(primary) = handoff.live_primary_endpoint() else {
+            return Err(ShardError::Config(format!(
+                "execute_handoff: shard position {position} has no live remote primary"
+            )));
+        };
+        let primary_identity = normalized_endpoint(&primary);
+        let replicas: Vec<String> = handoff
+            .live_endpoints()
+            .into_iter()
+            .filter(|endpoint| normalized_endpoint(endpoint) != primary_identity)
+            .collect();
+        classify_handoff_route(
+            position,
+            source_endpoint,
+            target_endpoint,
+            &primary,
+            &replicas,
+            handoff.generation(),
+        )
     }
 
     /// [`execute_handoff`](Self::execute_handoff) minus the ledger reservation — for callers already
@@ -217,5 +325,99 @@ impl ClusterEngine {
             });
         }
         out
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandoffRoute {
+    AlreadyAtTarget { generation: u64 },
+    Move,
+}
+
+fn classify_handoff_route(
+    position: usize,
+    source_endpoint: &str,
+    target_endpoint: &str,
+    primary_endpoint: &str,
+    replica_endpoints: &[String],
+    generation: u64,
+) -> Result<HandoffRoute, ShardError> {
+    let source = normalized_endpoint(source_endpoint);
+    let target = normalized_endpoint(target_endpoint);
+    let primary = normalized_endpoint(primary_endpoint);
+    if target == primary {
+        return Ok(HandoffRoute::AlreadyAtTarget { generation });
+    }
+    if source != primary {
+        return Err(ShardError::Config(format!(
+            "execute_handoff: source endpoint {source_endpoint} is not the current live \
+             primary for shard position {position}"
+        )));
+    }
+    if replica_endpoints
+        .iter()
+        .any(|endpoint| normalized_endpoint(endpoint) == target)
+    {
+        return Err(ShardError::Config(format!(
+            "execute_handoff: target endpoint {target_endpoint} already serves shard \
+             position {position}; raw handoff targets must be outside the live replica set"
+        )));
+    }
+    Ok(HandoffRoute::Move)
+}
+
+fn normalized_endpoint(endpoint: &str) -> String {
+    endpoint.trim_end_matches('/').to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_must_be_the_current_live_primary() {
+        let error = classify_handoff_route(
+            3,
+            "https://stale:50051",
+            "https://target:50051",
+            "https://source:50051",
+            &[],
+            7,
+        )
+        .expect_err("a stale source must not seed recovery");
+        assert!(
+            error.to_string().contains("not the current live primary"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn target_cannot_be_an_existing_replica() {
+        let error = classify_handoff_route(
+            3,
+            "https://source:50051",
+            "HTTPS://REPLICA:50051/",
+            "https://source:50051/",
+            &["https://replica:50051".to_string()],
+            7,
+        )
+        .expect_err("an existing replica is not a fresh raw-handoff target");
+        assert!(error.to_string().contains("live replica set"), "{error}");
+    }
+
+    #[test]
+    fn exact_retry_is_an_idempotent_no_change() {
+        assert_eq!(
+            classify_handoff_route(
+                3,
+                "https://old-source:50051",
+                "HTTPS://TARGET:50051/",
+                "https://target:50051",
+                &[],
+                11,
+            )
+            .expect("the requested target already owns routing"),
+            HandoffRoute::AlreadyAtTarget { generation: 11 }
+        );
     }
 }

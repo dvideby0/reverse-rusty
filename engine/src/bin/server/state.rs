@@ -41,6 +41,11 @@ pub(crate) const MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS: usize = 1;
 /// launch competing whole-cluster plans. Conflict-aware parallelism within one
 /// data-moving pass remains controlled by its `max_parallel` request field.
 pub(crate) const MAX_CONCURRENT_CLUSTER_REBALANCES: usize = 1;
+/// Raw handoff is a long-running operator workflow. Admit one request at a
+/// time so duplicate HTTP calls cannot accumulate dedicated workers; the
+/// engine's endpoint ledger still coordinates it with automatic/reassign
+/// movement outside this REST boundary.
+pub(crate) const MAX_CONCURRENT_CLUSTER_HANDOFFS: usize = 1;
 /// The health route stays open even when read auth is enabled. Bound all of
 /// its requests independently before their bodies are buffered.
 pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
@@ -183,6 +188,10 @@ pub(crate) struct ClusterAppState {
     /// held by the off-runtime worker through final control-state attestation,
     /// including after an HTTP disconnect.
     pub(crate) rebalance_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// One operator-triggered raw handoff at a time. The admitted worker owns
+    /// the permit through its terminal routing result, including after an HTTP
+    /// disconnect, and shutdown quiesces it before durability cleanup.
+    pub(crate) handoff_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Whether rebalance may commit an advisory map, move from the committed
     /// map, or must refuse because live routing has another authority.
     pub(crate) rebalance_topology: ClusterRebalanceTopology,

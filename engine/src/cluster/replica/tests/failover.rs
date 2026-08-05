@@ -8,6 +8,29 @@ use crate::exact::TagPredicate;
 use super::super::test_support::*;
 use super::super::*;
 
+#[cfg(feature = "distributed")]
+#[test]
+fn primary_endpoint_is_not_inferred_from_sorted_keep_set() {
+    let replicated = ReplicatedShard::new(
+        Box::new(FailingShard::named("https://z-primary:50051")) as Box<dyn Shard>,
+        vec![Box::new(FailingShard::named("https://a-replica:50051")) as Box<dyn Shard>],
+    );
+
+    assert_eq!(
+        replicated.live_endpoints(),
+        vec![
+            "https://a-replica:50051".to_string(),
+            "https://z-primary:50051".to_string()
+        ],
+        "the deterministic GC keep set is sorted independently of ownership"
+    );
+    assert_eq!(
+        replicated.live_primary_endpoint(),
+        Some("https://z-primary:50051".to_string()),
+        "handoff attestation must preserve the explicit primary role"
+    );
+}
+
 #[test]
 fn read_fails_over_to_in_sync_replica() {
     let (norm, dict, tag_dict, corpus) =

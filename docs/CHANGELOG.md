@@ -9,6 +9,15 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-08-05 — Cluster handoff API hardening
+
+- Hardened native `POST /_cluster/handoff` with strict bounded JSON, explicit uncommitted-routing
+  acknowledgement, current-live-primary and fresh-target attestation under the move ledger,
+  manager-bounded start admission, idempotent retry, independently supervised disconnect-safe
+  completion, shutdown quiescence, terminal timing/status fields, fixed no-store telemetry, and an
+  honest non-alias boundary from Elasticsearch/OpenSearch allocation reroute
+  ([ADR-170](decisions/adr-170-cluster-handoff-api-contract.md)).
+
 ## 2026-08-05 — Cluster resync API hardening
 
 - Hardened native `POST /_cluster/resync` with strict bodyless transport, bounded
