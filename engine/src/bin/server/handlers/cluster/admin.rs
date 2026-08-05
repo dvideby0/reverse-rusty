@@ -3,9 +3,9 @@
 //! single-node-only `_cat`/compact stubs. The strict `POST /_checkpoint`
 //! boundary lives in the sibling `checkpoint` module.
 //!
-//! The remaining `_cluster/*` topology operations (handoff, reassign, and resync)
-//! live in the [`ops`] submodule. The strict rebalance and resize boundaries live
-//! in [`rebalance`] and [`resize`]. Strict cluster-state reads and node-descriptor
+//! The remaining `_cluster/*` topology operations (handoff and reassign) live in
+//! the [`ops`] submodule. The strict rebalance, resync, and resize boundaries live
+//! in their named modules. Strict cluster-state reads and node-descriptor
 //! mutations live in sibling modules; orphan-slot GC lives in [`gc`] (ADR-096).
 
 mod cat_shards;
@@ -15,18 +15,22 @@ mod metrics;
 mod ops;
 mod rebalance;
 mod resize;
+mod resync;
 
 pub(crate) use cat_shards::{cluster_cat_shards, CAT_SHARDS_BODY_LIMIT};
 pub(crate) use gc::cluster_gc;
 pub(crate) use health::cluster_health;
 pub(crate) use metrics::cluster_metrics;
-pub(crate) use ops::{cluster_handoff, cluster_reassign, cluster_reconcile, cluster_resync};
+pub(crate) use ops::{cluster_handoff, cluster_reassign, cluster_reconcile};
 #[cfg(test)]
 pub(crate) use rebalance::CLUSTER_REBALANCE_BODY_TIMEOUT;
 pub(crate) use rebalance::{cluster_rebalance, CLUSTER_REBALANCE_BODY_LIMIT};
 #[cfg(test)]
 pub(crate) use resize::CLUSTER_RESIZE_BODY_TIMEOUT;
 pub(crate) use resize::{cluster_resize, CLUSTER_RESIZE_BODY_LIMIT};
+#[cfg(test)]
+pub(crate) use resync::CLUSTER_RESYNC_BODY_TIMEOUT;
+pub(crate) use resync::{cluster_resync, CLUSTER_RESYNC_BODY_LIMIT};
 
 use std::sync::Arc;
 use std::time::Instant;

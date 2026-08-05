@@ -275,7 +275,9 @@ wait "$kw_pid" # the writer finishes its loop across the kill + restart
 # once shard0 is reachable again (its re-driven writes land).
 converged=0 resync=""
 for _ in $(seq 1 60); do
-  resync=$(rqcurl -X POST "$BASE/_cluster/resync" -H 'content-type: application/json' -d '{}')
+  # ADR-169 makes resync a bodyless native operation; keep this production
+  # exercise on the same strict transport contract as documented clients.
+  resync=$(rqcurl -X POST "$BASE/_cluster/resync")
   echo "$resync" | jq -e '.still_pending == 0' >/dev/null 2>&1 && { converged=1; break; }
   sleep 1
 done

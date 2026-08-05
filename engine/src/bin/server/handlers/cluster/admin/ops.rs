@@ -1,22 +1,19 @@
 //! Cluster-mode `_cluster/*` topology operations (ADR-070): live handoff, data-moving
-//! reassignment, reconcile, and resync. The strict rebalance and resize boundaries
+//! reassignment and reconcile. The strict rebalance, resync, and resize boundaries
 //! live in sibling modules. Strict committed-state reads and node descriptor mutations
 //! live in sibling modules.
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    response::{IntoResponse, Response},
-    Json,
-};
+use axum::{extract::State, response::Response, Json};
 use serde::Deserialize;
-use tracing::{info, instrument};
 
 #[cfg(feature = "distributed")]
 use axum::http::StatusCode;
 #[cfg(feature = "distributed")]
-use tracing::error;
+use axum::response::IntoResponse;
+#[cfg(feature = "distributed")]
+use tracing::{error, info, instrument};
 
 #[cfg(feature = "distributed")]
 use reverse_rusty::cluster::NodeId;
@@ -322,28 +319,4 @@ pub(crate) async fn cluster_reconcile(State(_state): State<Arc<ClusterAppState>>
         "the unattended reconciler needs the gRPC transport — rebuild the server with \
          --features distributed",
     )
-}
-
-/// POST /_cluster/resync — re-drive queued partial-apply repairs (ADR-047). Holds
-/// the writer-serialization mutex so a resync pass cannot interleave with REST
-/// writes for the same ids (the drain → re-drive window; the library-level race
-/// with non-REST writers is the documented ADR-047 last-writer-wins scope, healed
-/// authoritatively by log replay on reopen).
-#[instrument(skip_all)]
-pub(crate) async fn cluster_resync(State(state): State<Arc<ClusterAppState>>) -> Response {
-    let report = {
-        let _w = state.write_serial.lock();
-        let cluster = state.cluster.read();
-        cluster.resync()
-    };
-    info!(
-        repaired = report.repaired,
-        still_pending = report.still_pending,
-        "resync pass complete"
-    );
-    Json(serde_json::json!({
-        "repaired": report.repaired,
-        "still_pending": report.still_pending,
-    }))
-    .into_response()
 }
