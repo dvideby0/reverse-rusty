@@ -9,6 +9,16 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-08-05 — Cluster reassign API hardening
+
+- Hardened native `POST /_cluster/reassign` with strict bounded transport, truthful no-op and
+  reconciliation outcomes, checked position identity, current-live-primary authority under the
+  move ledger, commit-only recovery from a prior uncommitted flip, resolve-only topology safety,
+  manager-bounded start admission, independently supervised disconnect-safe completion, shutdown
+  quiescence, sanitized failures, terminal timing/telemetry, and an explicit non-reroute
+  Elasticsearch/OpenSearch boundary
+  ([ADR-171](decisions/adr-171-cluster-reassign-api-contract.md)).
+
 ## 2026-08-05 — Cluster handoff API hardening
 
 - Hardened native `POST /_cluster/handoff` with strict bounded JSON, explicit uncommitted-routing

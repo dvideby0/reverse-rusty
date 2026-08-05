@@ -9,32 +9,8 @@ use std::collections::BTreeSet;
 use crate::cluster::allocator;
 use crate::cluster::control::{ClusterState, NodeId, NodeRole, ShardAssignment};
 use crate::cluster::remote::RemoteShard;
-use crate::cluster::shard::ShardError;
 
 use super::super::ledger::MoveTicket;
-
-/// Clear a STALE fence on a member (re-)entering a group (codex P1 on this ADR): serve-then-drop
-/// deliberately leaves a dropped PRIMARY's slot fenced forever, and `RecoverFrom` preserves the
-/// slot's fence — so a later move that brings the same node back would commit a member that
-/// rejects every write (a fenced new primary write-breaks the position; a fenced new replica
-/// silently desyncs on its first fan-out). The server fence is a monotonic `fetch_max`, so
-/// `fence(0)` is a pure PROBE reporting the current generation; `unfence(probe)` then CAS-clears
-/// exactly that generation. Safe under the documented single-active-coordinator topology (there is
-/// no other orchestrator whose live fence this could trample); fails loud if the CAS loses a race.
-pub(super) fn clear_stale_fence(member: &RemoteShard, ctx: &str) -> Result<(), ShardError> {
-    let stale = member.fence(0)?;
-    if stale == 0 {
-        return Ok(());
-    }
-    let now = member.unfence(stale)?;
-    if now != 0 {
-        return Err(ShardError::Remote(format!(
-            "{ctx}: clearing a stale fence (generation {stale}) on a group member failed — the \
-             slot is still fenced at generation {now} (a concurrent handoff?)"
-        )));
-    }
-    Ok(())
-}
 
 /// Set-equality of two replica lists. Replica ORDER is composite failover try-order — an artifact
 /// of how the group was seeded/planned — never placement, so a target computation that compared

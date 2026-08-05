@@ -46,6 +46,11 @@ pub(crate) const MAX_CONCURRENT_CLUSTER_REBALANCES: usize = 1;
 /// engine's endpoint ledger still coordinates it with automatic/reassign
 /// movement outside this REST boundary.
 pub(crate) const MAX_CONCURRENT_CLUSTER_HANDOFFS: usize = 1;
+/// A single-position reassignment is independently long-running and may wait
+/// on the endpoint move ledger. Admit one operator request per coordinator so
+/// duplicate calls cannot accumulate detached workers; automatic reconcile
+/// and rebalance retain their own conflict-aware engine scheduling.
+pub(crate) const MAX_CONCURRENT_CLUSTER_REASSIGNS: usize = 1;
 /// The health route stays open even when read auth is enabled. Bound all of
 /// its requests independently before their bodies are buffered.
 pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
@@ -192,6 +197,10 @@ pub(crate) struct ClusterAppState {
     /// the permit through its terminal routing result, including after an HTTP
     /// disconnect, and shutdown quiesces it before durability cleanup.
     pub(crate) handoff_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// One operator-triggered move-and-commit reassignment at a time. The
+    /// worker owns admission through its terminal durable outcome, including
+    /// after an HTTP disconnect, and shutdown joins it before cleanup.
+    pub(crate) reassign_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Whether rebalance may commit an advisory map, move from the committed
     /// map, or must refuse because live routing has another authority.
     pub(crate) rebalance_topology: ClusterRebalanceTopology,

@@ -59,6 +59,9 @@ fn state_from_cluster_with_rebalance_topology(
         handoff_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_HANDOFFS,
         )),
+        reassign_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_CLUSTER_REASSIGNS,
+        )),
         rebalance_topology,
         health_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
@@ -336,6 +339,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 CLUSTER_HANDOFF_BODY_LIMIT,
             )),
         )
+        .route(
+            "/_cluster/reassign",
+            any(cluster_reassign).layer(axum::extract::DefaultBodyLimit::max(
+                CLUSTER_REASSIGN_BODY_LIMIT,
+            )),
+        )
         .with_state(Arc::clone(state))
 }
 
@@ -409,6 +418,7 @@ mod node_deregister;
 mod node_register;
 mod pit;
 mod ranked;
+mod reassign;
 mod rebalance;
 mod resize;
 mod resync;

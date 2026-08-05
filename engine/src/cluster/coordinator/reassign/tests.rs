@@ -189,3 +189,39 @@ fn rebalance_and_move_rf2_dispatches_group_moves() {
         "stop-on-first: the failed position is not also listed as not-attempted"
     );
 }
+
+/// The public single and group APIs accept `usize` for historical callers but
+/// the control and wire position is `u32`. Reject instead of truncating an
+/// oversized value onto an unrelated real shard.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn reassign_rejects_position_above_u32_without_narrowing() {
+    use crate::cluster::coordinator::{ClusterConfig, ClusterEngine};
+    use crate::normalize::Normalizer;
+
+    let cluster = ClusterEngine::build(
+        Normalizer::default_vocab().expect("vocab"),
+        &ClusterConfig::default(),
+        &[],
+    )
+    .expect("cluster");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let position = usize::try_from(u64::from(u32::MAX) + 1).expect("64-bit usize");
+    let error = cluster
+        .reassign_and_move(position, NodeId(1), runtime.handle())
+        .expect_err("oversized position must fail before endpoint or network access");
+    assert!(error.to_string().contains("exceeds the u32"), "{error}");
+
+    let error = cluster
+        .reassign_group_and_move(
+            position,
+            &ShardAssignment {
+                position: 0,
+                primary: NodeId(1),
+                replicas: vec![NodeId(2)],
+            },
+            runtime.handle(),
+        )
+        .expect_err("oversized group position must fail before endpoint or network access");
+    assert!(error.to_string().contains("exceeds the u32"), "{error}");
+}

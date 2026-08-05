@@ -15,13 +15,14 @@
 //! composes the two into ONE operation that keeps committed-map ⟺ live-routing ⟺
 //! physical-data-location consistent.
 //!
-//! ## Move-then-commit (the zero-FN ordering)
+//! ## Move-then-commit
 //! [`reassign_and_move`](ClusterEngine::reassign_and_move) runs `execute_handoff` FIRST (peer-recover
 //! target → fence source → drain to convergence → flip routing), THEN commits
 //! `AssignShard{position, primary: to}`. The order is load-bearing for crash safety: in the window
-//! after the flip but before the commit, the committed map still names `from`, which still holds the
-//! data and still SERVES READS (the source fence is write-only). So a coordinator crash → restart
-//! resolving the committed map lands on a reads-serving, data-holding node — zero false negatives.
+//! after the flip but before the commit, the committed map still names `from`, which holds the
+//! move-time snapshot and still SERVES READS (the source fence is write-only). This avoids ever
+//! committing an empty target. It does not make an uncommitted flip restart-safe indefinitely:
+//! later writes reach only `to`, so the stale map must be reconciled before a coordinator restart.
 //! The opposite order (commit-then-move) is unsafe: a crash after the commit but before the move
 //! points routing at an empty `to` — a silent false negative.
 //!
@@ -45,12 +46,15 @@
 //! The whole module is `distributed`-gated; the in-process/default path never compiles it and is
 //! byte-identical.
 
+use std::time::Instant;
+
 use tokio::runtime::Handle;
 
 use crate::cluster::control::{NodeId, ShardAssignment};
-use crate::cluster::shard::ShardError;
+use crate::cluster::shard::{Shard, ShardError};
 use crate::events::{DurabilityOp, EngineEvent};
 
+use super::distributed::handoff::{normalized_endpoint, HandoffRoute};
 use super::ClusterEngine;
 
 /// Group-aware (RF>1) data-moving reassignment — `rebalance_group_targets` +
@@ -85,9 +89,9 @@ const PLAN_ATTEMPTS: usize = 4;
 /// Outcome of a [`ClusterEngine::reassign_and_move`] (ADR-090).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReassignOutcome {
-    /// The position already lives on `to` (or `from`/`to` resolve to one endpoint): nothing moved,
-    /// nothing committed. The idempotent no-op — e.g. re-running a completed reassign.
-    NoChange { position: u32 },
+    /// The live and committed authorities already agree on `to`: nothing moved and no new control
+    /// proposal was necessary. The requested assignment is already committed.
+    NoChange { position: u32, generation: u64 },
     /// The data moved to `to` AND the committed map now names it — fully consistent. `generation` is
     /// the position's new handoff/fence generation (the value
     /// [`handoff_generations`](super::ClusterEngine::handoff_generations) reports).
@@ -97,28 +101,42 @@ pub enum ReassignOutcome {
         to: NodeId,
         generation: u64,
     },
-    /// The data moved to `to` and live routing flipped, but committing the new owner FAILED (a
-    /// control-plane error, or a concurrent change moved the position under us). **Zero-FN safe** —
-    /// the committed map still names `from`, which holds the data and serves reads — but the durable
-    /// map is stale: a [`DurabilityFailure`](EngineEvent::DurabilityFailure) event was emitted and
-    /// the caller should RETRY. Re-running `reassign_and_move` is idempotent (a fenced source still
-    /// serves the read-only recovery RPCs, so the retry re-converges the already-populated target and
-    /// re-commits).
-    MovedButNotCommitted {
+    /// Live routing already reached `to` because an earlier raw handoff or a
+    /// prior move completed without committing. This invocation performed no
+    /// second data copy; it reconciled the durable assignment to the attested
+    /// live primary.
+    Reconciled {
         position: u32,
         from: NodeId,
         to: NodeId,
         generation: u64,
     },
+    /// Live routing reaches `to`, but committing the new owner FAILED (a control-plane error or a
+    /// concurrent durable change). The live path remains exact, but the durable map is stale and a
+    /// restart can resolve back to the old owner after newer writes reached `to`. A loud
+    /// [`DurabilityFailure`](EngineEvent::DurabilityFailure) is emitted and the caller should retry
+    /// promptly. On the single-target path, the retry attests `to` as the current live primary and
+    /// commits it without copying again from the potentially stale committed owner. A durable
+    /// intent protocol that generalizes this recovery across group moves is tracked separately.
+    MovedButNotCommitted {
+        position: u32,
+        from: NodeId,
+        to: NodeId,
+        generation: u64,
+        /// Whether this invocation performed the physical routing flip. `false`
+        /// means it was retrying a pre-existing uncommitted live move.
+        moved: bool,
+    },
 }
 
-/// Outcome of a [`ClusterEngine::rebalance_and_move`] (ADR-090): which positions moved + committed,
-/// the first failure (if any — the sweep stops there, fail-forward / resume), and the changed
-/// positions not yet attempted. Each already-moved position is individually consistent, so a partial
-/// rebalance is a valid (resumable) state, never a false negative.
+/// Outcome of a [`ClusterEngine::rebalance_and_move`] (ADR-090): which positions converged to their
+/// committed targets, the first failure (if any — the sweep stops there, fail-forward / resume), and
+/// the changed positions not yet attempted. A converged position may have moved physically or may
+/// have reconciled a target that was already live.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RebalanceMoveReport {
-    /// Positions whose primary moved AND committed this pass.
+    /// Positions whose desired primary committed this pass, including commit-only reconciliation
+    /// when that target was already the attested live primary.
     pub moved: Vec<u32>,
     /// The lowest-position failure (with the error message); the sweep stopped at its wave (at the
     /// default `max_parallel_moves = 1` this is exactly "the first position that failed").
@@ -129,6 +147,15 @@ pub struct RebalanceMoveReport {
     pub not_attempted: Vec<u32>,
 }
 
+struct PlannedReassign<'a> {
+    committed_from: NodeId,
+    committed_from_endpoint: String,
+    live_from_endpoint: String,
+    target_endpoint: String,
+    route: HandoffRoute,
+    _ticket: ledger::MoveTicket<'a>,
+}
+
 impl ClusterEngine {
     /// Move shard `position`'s data to node `to` AND commit the new owner — the data-moving analogue
     /// of [`reassign_shard`](Self::reassign_shard) (ADR-090). Resolves `from` (the current committed
@@ -137,15 +164,14 @@ impl ClusterEngine {
     /// routing) and only on success commit `AssignShard{position, primary: to}` (bare — the replica
     /// guard below rejects a replicated position, so the entry this replaces is replica-free).
     ///
-    /// Fail-closed and zero-FN at every step (see the module docs for the crash-window argument):
+    /// Fail-closed before a live flip and exact on the running coordinator after it:
     /// - a failed move propagates `Err` and commits nothing (the source auto-unfenced, routing + the
     ///   committed map untouched — a consistent rollback);
     /// - the commit is bounded-retried (a transient quorum blip self-heals; the in-memory control
     ///   plane commits first try); on persistent failure it returns
-    ///   [`ReassignOutcome::MovedButNotCommitted`] (not `Err` — the data did move) and emits a loud
-    ///   durability event, keeping live routing on the authoritative target (no acked write is lost on
-    ///   the live path) while the committed map still names the reads-serving source — so a re-run
-    ///   reconciles the durable map (idempotent).
+    ///   [`ReassignOutcome::MovedButNotCommitted`] and emits a loud durability event, keeping live
+    ///   routing on the authoritative target. The durable map is then stale and restart-unsafe after
+    ///   newer writes; a prompt re-run attests the live target and commits it without stale recopy.
     ///
     /// **Supported topology: a single active coordinator** (the v1 deployment). The busy-endpoint
     /// ledger (ADR-095) serializes this coordinator's CONFLICTING moves (any shared node — see the
@@ -163,14 +189,56 @@ impl ClusterEngine {
         to: NodeId,
         handle: &Handle,
     ) -> Result<ReassignOutcome, ShardError> {
-        let pos = position as u32;
+        match self.reassign_and_move_with_start(position, to, handle, None, || true)? {
+            Some(outcome) => Ok(outcome),
+            None => Err(ShardError::DeadlineExceeded),
+        }
+    }
+
+    /// Deadline-aware start admission for one data-moving reassignment.
+    ///
+    /// The complete committed/live/target endpoint footprint is reserved and
+    /// revalidated before `try_start` is called. `None` guarantees that neither
+    /// data movement nor a control-state commit began. Once `try_start` returns
+    /// true, the operation runs to its exact terminal move-and-commit outcome.
+    pub fn reassign_and_move_until<F>(
+        &self,
+        position: usize,
+        to: NodeId,
+        handle: &Handle,
+        deadline: Instant,
+        try_start: F,
+    ) -> Result<Option<ReassignOutcome>, ShardError>
+    where
+        F: FnOnce() -> bool,
+    {
+        self.reassign_and_move_with_start(position, to, handle, Some(deadline), try_start)
+    }
+
+    fn reassign_and_move_with_start<F>(
+        &self,
+        position: usize,
+        to: NodeId,
+        handle: &Handle,
+        deadline: Option<Instant>,
+        try_start: F,
+    ) -> Result<Option<ReassignOutcome>, ShardError>
+    where
+        F: FnOnce() -> bool,
+    {
+        let pos = u32::try_from(position).map_err(|_| {
+            ShardError::Config(format!(
+                "reassign_and_move: shard position {position} exceeds the u32 wire/control limit"
+            ))
+        })?;
         // Plan → reserve → revalidate (ADR-095): resolve the move's endpoint footprint from a
         // committed read, reserve it in the busy-endpoint ledger — blocking until every
         // CONFLICTING in-flight move completes (the ADR-090 serialization, now per-node) — then
-        // confirm the position's committed entry did not change while we waited (the conflicting
-        // move may have committed this very position). A change re-plans from the fresh state
-        // (bounded); the pre-commit CAS below stays the final backstop.
-        let mut planned: Option<(NodeId, String, String, ledger::MoveTicket<'_>)> = None;
+        // confirm the committed entry, endpoint resolution, AND current live primary did not change
+        // while we waited. The live-primary check is essential after a raw handoff or an earlier
+        // move whose commit failed: recovery must seed from the authoritative live owner, never the
+        // potentially stale owner still named by the committed map.
+        let mut planned: Option<PlannedReassign<'_>> = None;
         for _ in 0..PLAN_ATTEMPTS {
             let state = self.control_state()?;
             let assignment = state
@@ -217,22 +285,33 @@ impl ClusterEngine {
             };
             let from_ep = addr_of(from)?;
             let tgt_ep = addr_of(to)?;
+            let handoff = self.handoffs.get(position).ok_or_else(|| {
+                ShardError::Config(format!(
+                    "reassign_and_move: shard position {position} is not handoff-capable (the \
+                     cluster was not built via connect_remote/connect_replicated)"
+                ))
+            })?;
+            let live_ep = handoff.live_primary_endpoint().ok_or_else(|| {
+                ShardError::Config(format!(
+                    "reassign_and_move: shard position {position} has no live remote primary"
+                ))
+            })?;
 
-            // Already in place (same node), or two ids resolving to one endpoint: nothing to move
-            // or commit (the idempotent no-op, e.g. re-running a completed reassign).
-            if from == to || from_ep == tgt_ep {
-                return Ok(ReassignOutcome::NoChange { position: pos });
-            }
+            // Include the committed endpoint even when it differs from the live primary. Two
+            // retries of the same uncommitted move then still share a ledger key, and GC/reassign
+            // operations cannot reason about the stale durable owner concurrently.
+            let footprint = [from_ep.as_str(), live_ep.as_str(), tgt_ep.as_str()];
+            let ticket = match deadline {
+                Some(deadline) => self.move_ledger.reserve_until(&footprint, deadline),
+                None => Some(self.move_ledger.reserve(&footprint)),
+            };
+            let Some(ticket) = ticket else {
+                return Ok(None);
+            };
 
-            let ticket = self
-                .move_ledger
-                .reserve(&[from_ep.as_str(), tgt_ep.as_str()]);
-            // Revalidate BOTH the committed entry AND the endpoint resolution (codex P2 on this
-            // ADR): while we waited on the ledger, a concurrent op may have re-committed this
-            // position, or re-registered a member with a NEW addr (`register_node` replaces by
-            // id). Moving over a stale endpoint and then committing the NodeId would leave a
-            // route-by-assignments restart resolving that id to a server that never received the
-            // data — a restart false negative.
+            // Revalidate the committed entry, both membership resolutions, and live routing while
+            // the normalized endpoint reservation is held. Moving over a stale endpoint and then
+            // committing the NodeId would make the next assignment-routed restart unsafe.
             let now = self.control_state()?;
             let addr_now = |id: NodeId| {
                 now.nodes
@@ -245,56 +324,109 @@ impl ClusterEngine {
                 .iter()
                 .find(|a| a.position == pos)
                 .is_some_and(|a| a.primary == from && a.replicas.is_empty());
+            let endpoint_is = |actual: Option<&str>, planned: &str| {
+                actual.is_some_and(|actual| {
+                    normalized_endpoint(actual) == normalized_endpoint(planned)
+                })
+            };
             let eps_unchanged =
-                addr_now(from) == Some(from_ep.as_str()) && addr_now(to) == Some(tgt_ep.as_str());
-            if entry_unchanged && eps_unchanged {
-                planned = Some((from, from_ep, tgt_ep, ticket));
+                endpoint_is(addr_now(from), &from_ep) && endpoint_is(addr_now(to), &tgt_ep);
+            let live_now = handoff.live_primary_endpoint().ok_or_else(|| {
+                ShardError::Config(format!(
+                    "reassign_and_move: shard position {position} lost its live remote primary"
+                ))
+            })?;
+            let live_unchanged = normalized_endpoint(&live_now) == normalized_endpoint(&live_ep);
+            if entry_unchanged && eps_unchanged && live_unchanged {
+                let route = self.validate_handoff_route(position, &live_ep, &tgt_ep)?;
+                planned = Some(PlannedReassign {
+                    committed_from: from,
+                    committed_from_endpoint: from_ep,
+                    live_from_endpoint: live_ep,
+                    target_endpoint: tgt_ep,
+                    route,
+                    _ticket: ticket,
+                });
                 break;
             }
-            // The entry (or a member's endpoint) changed while we waited on the ledger: the
-            // ticket drops here and the next iteration re-plans from the fresh committed state.
+            // Durable or live routing changed while waiting: the ticket drops here and the next
+            // iteration re-plans from the fresh state.
         }
-        let Some((from, from_ep, tgt_ep, _ticket)) = planned else {
+        let Some(PlannedReassign {
+            committed_from: from,
+            committed_from_endpoint: from_ep,
+            live_from_endpoint: live_ep,
+            target_endpoint: tgt_ep,
+            route,
+            _ticket,
+        }) = planned
+        else {
             return Err(ShardError::ControlPlane(format!(
-                "reassign_and_move: the committed assignment for shard position {position} kept \
-                 changing while planning the move ({PLAN_ATTEMPTS} attempts); retry once the map \
-                 stops churning"
+                "reassign_and_move: the committed assignment or live primary for shard position \
+                 {position} kept changing while planning ({PLAN_ATTEMPTS} attempts); retry once \
+                 routing stops churning"
             )));
         };
+        if !try_start() {
+            return Ok(None);
+        }
 
-        // MOVE first. On failure this auto-unfences the source and leaves routing + the committed map
-        // untouched (consistent rollback) — propagate it; nothing was committed. The `_inner` variant
-        // skips the ledger re-reservation (our ticket already covers {from, to}).
-        let generation = self.execute_handoff_inner(position, &from_ep, &tgt_ep, handle)?;
-
-        // The move already flipped LIVE routing to `to`. COMPARE-AND-SET before committing: confirm
-        // the committed primary is still `from`. If a concurrent op moved this position under us
-        // (only possible across coordinators — the guard serializes this one), do NOT overwrite its
-        // commit. Either way the data is on `to` and routing serves it; the durable map just isn't
-        // ours to claim.
+        let (generation, moved) = match route {
+            HandoffRoute::AlreadyAtTarget { generation } => (generation, false),
+            HandoffRoute::Move => (
+                self.execute_handoff_inner(position, &live_ep, &tgt_ep, handle)?,
+                true,
+            ),
+        };
+        // Live routing now reaches `to` (either before this invocation or after its move).
+        // COMPARE-AND-SET before committing: confirm the durable primary is still `from`.
         let now = self.control_state()?;
         let still_from = now
             .assignments
             .iter()
             .find(|a| a.position == pos)
-            .is_some_and(|a| a.primary == from);
+            .is_some_and(|a| a.primary == from && a.replicas.is_empty());
         if !still_from {
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::ReplicaDesync,
                 detail: format!(
-                    "reassign_and_move moved shard {position} to node {} and flipped routing, but the \
-                     committed primary changed under it (a concurrent reassign); not overwriting the \
-                     committed map. Re-run to reconcile.",
+                    "reassign_and_move made shard {position} live on node {} but the committed \
+                     primary changed under it (a concurrent reassign); not overwriting the map. \
+                     Re-run to reconcile.",
                     to.0
                 ),
-                error: "committed assignment changed during a data-moving reassign".into(),
+                error: "committed assignment changed during reassign".into(),
             });
-            return Ok(ReassignOutcome::MovedButNotCommitted {
+            return Ok(Some(ReassignOutcome::MovedButNotCommitted {
                 position: pos,
                 from,
                 to,
                 generation,
-            });
+                moved,
+            }));
+        }
+
+        // A committed target still needs a physical repair when raw handoff left live routing
+        // elsewhere, but it does not need another control proposal afterward. This return comes
+        // only after the durable-primary recheck above, so a second coordinator cannot change the
+        // assignment during the move and still receive an acknowledged result. A different NodeId
+        // aliasing the same live endpoint DOES need a commit so the requested identity becomes
+        // durable.
+        if from == to && normalized_endpoint(&from_ep) == normalized_endpoint(&tgt_ep) {
+            let outcome = if moved {
+                ReassignOutcome::Moved {
+                    position: pos,
+                    from,
+                    to,
+                    generation,
+                }
+            } else {
+                ReassignOutcome::NoChange {
+                    position: pos,
+                    generation,
+                }
+            };
+            return Ok(Some(outcome));
         }
 
         // COMMIT (move-then-commit): name the new owner. The entry's replica set is provably empty
@@ -311,12 +443,22 @@ impl ClusterEngine {
                 replicas: Vec::new(),
             }) {
                 Ok(()) => {
-                    return Ok(ReassignOutcome::Moved {
-                        position: pos,
-                        from,
-                        to,
-                        generation,
-                    })
+                    let outcome = if moved {
+                        ReassignOutcome::Moved {
+                            position: pos,
+                            from,
+                            to,
+                            generation,
+                        }
+                    } else {
+                        ReassignOutcome::Reconciled {
+                            position: pos,
+                            from,
+                            to,
+                            generation,
+                        }
+                    };
+                    return Ok(Some(outcome));
                 }
                 Err(e) => {
                     last_err = Some(e);
@@ -326,33 +468,31 @@ impl ClusterEngine {
                 }
             }
         }
-        // Persistent commit failure (only reachable with a real quorum that has lost majority — a
-        // cluster-down condition; the in-memory backend never gets here). The move already succeeded,
-        // so `to` is authoritative: KEEP live routing on it (so no acked write is lost on the live
-        // path — routing on `to`, which holds every acked write, is never a false negative), and
-        // surface a loud event. The committed map still names the reads-serving source, so the v1
-        // single-coordinator deployment stays zero-FN; the operator (or the autoscaler's next tick)
-        // re-runs to reconcile the durable map (idempotent — a fenced source still serves the
-        // read-only recovery RPCs). The narrow residual — a coordinator restart while the quorum is
-        // still down, before that reconcile — is the boundary a durable move intent or
-        // conditional-propose / two-phase-commit primitive would close.
+        // Persistent commit failure (only reachable with a real quorum that cannot accept the
+        // proposal; the in-memory backend never gets here). The move already succeeded, so `to` is
+        // authoritative: KEEP live routing on it and surface a loud event. The durable map remains
+        // stale. After any newer write reaches `to`, restarting an assignment-routed coordinator
+        // before reconciliation can return to a stale source. A retry therefore attests the current
+        // live primary and commits it without copying from the old durable owner. A durable move
+        // intent / conditional-propose protocol is the remaining way to close this restart window.
         self.emit(EngineEvent::DurabilityFailure {
             op: DurabilityOp::ReplicaDesync,
             detail: format!(
-                "reassign_and_move moved shard {position} to node {} and flipped routing, but \
-                 committing the new owner failed after {COMMIT_ATTEMPTS} attempts; live routing stays \
-                 on node {} (which holds every acked write) and the committed map still names the \
-                 reads-serving source node {} — re-run to reconcile the durable map (idempotent).",
+                "reassign_and_move made shard {position} live on node {} but committing the new \
+                 owner failed after {COMMIT_ATTEMPTS} attempts; live routing stays on node {} and \
+                 the committed map still names node {}. Re-run promptly to reconcile before a \
+                 coordinator restart.",
                 to.0, to.0, from.0
             ),
             error: last_err.map(|e| e.to_string()).unwrap_or_default(),
         });
-        Ok(ReassignOutcome::MovedButNotCommitted {
+        Ok(Some(ReassignOutcome::MovedButNotCommitted {
             position: pos,
             from,
             to,
             generation,
-        })
+            moved,
+        }))
     }
 
     /// Data-moving analogue of [`rebalance`](Self::rebalance) (ADR-090/094): recompute the desired
@@ -408,7 +548,9 @@ impl ClusterEngine {
             let mut wave_failed = false;
             for (pos, outcome) in self.execute_move_wave(&state, &targets, wave, handle) {
                 match outcome {
-                    Ok(ReassignOutcome::Moved { .. }) => report.moved.push(pos),
+                    Ok(ReassignOutcome::Moved { .. } | ReassignOutcome::Reconciled { .. }) => {
+                        report.moved.push(pos);
+                    }
                     // Resolved equal under us (a concurrent move already placed it): not a failure.
                     Ok(ReassignOutcome::NoChange { .. }) => {}
                     Ok(ReassignOutcome::MovedButNotCommitted { .. }) => {

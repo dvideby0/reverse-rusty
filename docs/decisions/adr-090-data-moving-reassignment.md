@@ -7,7 +7,10 @@
 **Current outcome.** ADR-092 added unattended reconciliation, ADR-094 added RF&gt;1 group movement,
 and ADR-095 replaced whole-sweep serialization with conflict-free parallel move waves. The
 single-active-coordinator boundary remains: the control plane still lacks an atomic conditional
-`AssignShard` proposal.
+`AssignShard` proposal. [ADR-171](adr-171-cluster-reassign-api-contract.md) additionally requires
+live-primary attestation, makes an uncommitted retry a safe commit-only reconciliation, and corrects
+the failure boundary: the old owner is a complete move-time snapshot, but after newer writes reach
+the live target, restarting from the stale durable map is unsafe until that retry commits.
 
 **Context.** ADR-086 shipped the *boot-time* half of "route by the committed shard→node map": a
 coordinator can resolve its topology from the durable quorum (`--route-by-assignments`,

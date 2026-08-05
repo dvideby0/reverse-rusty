@@ -4,13 +4,20 @@
 //! property: `reassign_and_move` commits the new owner WITH the move, so the committed map names the
 //! target and a resolve-only restart routes there (the ADR-086 boot guard previously forbade this).
 //!
-//! Three proofs:
+//! Principal proofs:
 //!  - `grpc_reassign_and_move_commits_map_and_restart_routes_zero_fn` — the primary proof: move under
 //!    a concurrent writer, the committed map now names the target, and a FRESH coordinator resolving
 //!    from that map lands on the new owner with zero false negatives.
-//!  - `grpc_handoff_flip_without_commit_still_serves_from_source_zero_fn` — the crash-window proof:
-//!    flip WITHOUT committing (simulating a crash in the move-then-commit gap); a coordinator
-//!    resolving the still-old map routes to the fenced source, which still SERVES READS — zero FN.
+//!  - `grpc_handoff_flip_without_commit_preserves_move_time_snapshot` — immediately after a flip
+//!    without commit, both endpoints retain the complete move-time corpus. This deliberately makes
+//!    no restart-safety claim after later writes advance only the live target.
+//!  - `grpc_reassign_reconciles_an_existing_live_move_without_stale_recopy` — after an uncommitted
+//!    raw flip and a newer write on the live target, reassign attests that target and commits it
+//!    without copying again from the now-stale committed source.
+//!  - `grpc_reassign_repairs_live_routing_without_recommitting_existing_target` — a committed
+//!    target with divergent live routing is physically repaired without a redundant proposal.
+//!  - `grpc_reassign_repair_clears_a_demoted_targets_stale_fence` — repairing back onto a previously
+//!    demoted target clears its preserved slot fence before acknowledging a writable live primary.
 //!  - `grpc_reassign_and_move_aborts_clean_and_does_not_commit` — fail-closed: a forced abort moves
 //!    nothing, commits nothing, and auto-unfences the source.
 
@@ -224,13 +231,11 @@ fn grpc_reassign_and_move_commits_map_and_restart_routes_zero_fn() {
     let _ = std::fs::remove_dir_all(&nodes.tgt_dir);
 }
 
-/// The crash-window proof: simulate a crash in the move-then-commit gap by FLIPPING (a direct
-/// `execute_handoff`) WITHOUT committing. The committed map still names the source; a coordinator
-/// resolving it routes to the source, which is fenced (writes only) but STILL SERVES READS and holds
-/// the data — zero false negatives. And the target also holds the moved data, so neither side of the
-/// window is a false negative.
+/// Immediately after a direct live flip without commit, both the fenced source and live target
+/// retain the complete move-time snapshot. This is the narrow property move-then-commit preserves;
+/// after a later write reaches only the target, the stale durable map is not restart-safe.
 #[test]
-fn grpc_handoff_flip_without_commit_still_serves_from_source_zero_fn() {
+fn grpc_handoff_flip_without_commit_preserves_move_time_snapshot() {
     let (queries, titles) = build_corpus();
     let oracle = build_oracle(&queries, &titles);
 
@@ -284,8 +289,9 @@ fn grpc_handoff_flip_without_commit_still_serves_from_source_zero_fn() {
         "resolving the committed map still yields the SOURCE endpoint"
     );
 
-    // A coordinator resolving the still-old committed map routes to the SOURCE. The source is fenced
-    // (writes rejected) but still serves reads and holds the data → zero false negatives.
+    // A coordinator resolving the still-old committed map routes to the SOURCE. At this exact
+    // move-time boundary, before any later write, the fenced source still serves the complete
+    // snapshot. The next test covers the later-write divergence and safe reconciliation.
     let coord_src = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
@@ -326,6 +332,285 @@ fn grpc_handoff_flip_without_commit_still_serves_from_source_zero_fn() {
         assert_eq!(
             got, oracle[i],
             "the target holds the moved data on {title:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&nodes.src_dir);
+    let _ = std::fs::remove_dir_all(&nodes.tgt_dir);
+}
+
+/// A retry after an uncommitted live flip must treat LIVE routing as the data authority. The old
+/// committed owner is fenced and becomes stale as soon as a later write reaches the target; copying
+/// from it again could erase or omit that write. Reassign therefore recognizes an already-live
+/// target, commits it without another handoff, and a resolve-only restart preserves the late write.
+#[test]
+fn grpc_reassign_reconciles_an_existing_live_move_without_stale_recopy() {
+    let (queries, titles) = build_corpus();
+    let next_id = queries.iter().map(|(id, _)| *id).max().unwrap_or(0) + 1;
+    let addition = (next_id, queries[0].1.clone());
+    let final_live: Vec<(u64, String)> = queries
+        .iter()
+        .cloned()
+        .chain(std::iter::once(addition.clone()))
+        .collect();
+    let oracle = build_oracle(&final_live, &titles);
+
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let nodes = spin_two_servers(&rt, &norm, "reassign_reconcile_live");
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        empty_tag_dict(),
+        &cfg,
+        std::slice::from_ref(&nodes.src_ep),
+        rt.handle(),
+    )
+    .expect("connect source cluster");
+    cluster.ingest(&queries).expect("ingest corpus");
+    seed_committed_map(&cluster, &nodes.src_ep, &nodes.tgt_ep);
+
+    cluster
+        .execute_handoff(0, &nodes.src_ep, &nodes.tgt_ep, rt.handle())
+        .expect("raw live flip");
+    cluster
+        .add_query(addition.0, &addition.1)
+        .expect("post-flip write reaches the live target");
+
+    let outcome = cluster
+        .reassign_and_move(0, NodeId(2), rt.handle())
+        .expect("commit the already-live target");
+    assert!(
+        matches!(
+            outcome,
+            ReassignOutcome::Reconciled {
+                position: 0,
+                from: NodeId(1),
+                to: NodeId(2),
+                generation: 1,
+            }
+        ),
+        "the retry must commit without a second physical move: {outcome:?}"
+    );
+    assert_eq!(
+        cluster.handoff_generations(),
+        vec![1],
+        "commit-only reconciliation does not advance the handoff generation"
+    );
+    let state = cluster.control_state().expect("committed state");
+    assert_eq!(
+        state
+            .assignments
+            .iter()
+            .find(|assignment| assignment.position == 0)
+            .map(|assignment| assignment.primary),
+        Some(NodeId(2)),
+        "the durable assignment now names the attested live target"
+    );
+
+    let retry = cluster
+        .reassign_and_move(0, NodeId(2), rt.handle())
+        .expect("exact retry");
+    assert!(
+        matches!(
+            retry,
+            ReassignOutcome::NoChange {
+                position: 0,
+                generation: 1,
+            }
+        ),
+        "the fully converged retry is an honest committed no-op: {retry:?}"
+    );
+
+    let resolved = primary_endpoints(&state);
+    let restarted = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        empty_tag_dict(),
+        &cfg,
+        &resolved,
+        rt.handle(),
+    )
+    .expect("restart over committed target");
+    for (index, title) in titles.iter().enumerate() {
+        let got: HashSet<u64> = restarted
+            .percolate(title)
+            .expect("percolate after commit-only reconciliation")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            got, oracle[index],
+            "restart preserved late write on {title:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&nodes.src_dir);
+    let _ = std::fs::remove_dir_all(&nodes.tgt_dir);
+}
+
+/// A pre-existing committed target does not make live divergence a no-op. Reassignment repairs the
+/// live backing, then recognizes that the durable owner already agrees instead of issuing a second
+/// assignment proposal or reporting the result uncommitted if that redundant proposal failed.
+#[test]
+fn grpc_reassign_repairs_live_routing_without_recommitting_existing_target() {
+    let (queries, titles) = build_corpus();
+    let oracle = build_oracle(&queries, &titles);
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let nodes = spin_two_servers(&rt, &norm, "reassign_repair_live");
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        empty_tag_dict(),
+        &cfg,
+        std::slice::from_ref(&nodes.src_ep),
+        rt.handle(),
+    )
+    .expect("connect source cluster");
+    cluster.ingest(&queries).expect("ingest corpus");
+    seed_committed_map(&cluster, &nodes.src_ep, &nodes.tgt_ep);
+    cluster
+        .reassign_shard(reverse_rusty::cluster::ShardAssignment {
+            position: 0,
+            primary: NodeId(2),
+            replicas: Vec::new(),
+        })
+        .expect("craft committed-target/live-source divergence");
+    let before = cluster.control_state().expect("state before repair").epoch;
+
+    let outcome = cluster
+        .reassign_and_move(0, NodeId(2), rt.handle())
+        .expect("repair live routing to the already-committed target");
+    assert!(
+        matches!(
+            outcome,
+            ReassignOutcome::Moved {
+                position: 0,
+                from: NodeId(2),
+                to: NodeId(2),
+                generation: 1,
+            }
+        ),
+        "live routing must move without a redundant durable proposal: {outcome:?}"
+    );
+    assert_eq!(
+        cluster.control_state().expect("state after repair").epoch,
+        before,
+        "an already-committed target must not receive a redundant proposal"
+    );
+    for (index, title) in titles.iter().enumerate() {
+        let got: HashSet<u64> = cluster
+            .percolate(title)
+            .expect("percolate after live repair")
+            .into_iter()
+            .collect();
+        assert_eq!(got, oracle[index], "live repair stayed exact on {title:?}");
+    }
+
+    let _ = std::fs::remove_dir_all(&nodes.src_dir);
+    let _ = std::fs::remove_dir_all(&nodes.tgt_dir);
+}
+
+/// A raw A -> B handoff leaves demoted A fenced. Reassigning back to the still-committed A recovers
+/// its data from live B, but `RecoverFrom` preserves A's slot fence. The repair must clear and
+/// attest that stale fence before swapping routing, or it would acknowledge a primary that rejects
+/// every subsequent write.
+#[test]
+fn grpc_reassign_repair_clears_a_demoted_targets_stale_fence() {
+    let (queries, titles) = build_corpus();
+    let next_id = queries.iter().map(|(id, _)| *id).max().unwrap_or(0) + 1;
+    let live_target_addition = (next_id, queries[0].1.clone());
+    let repaired_target_addition = (next_id + 1, queries[1].1.clone());
+    let final_live: Vec<(u64, String)> = queries
+        .iter()
+        .cloned()
+        .chain([
+            live_target_addition.clone(),
+            repaired_target_addition.clone(),
+        ])
+        .collect();
+    let oracle = build_oracle(&final_live, &titles);
+
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let nodes = spin_two_servers(&rt, &norm, "reassign_clear_stale_target_fence");
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        empty_tag_dict(),
+        &cfg,
+        std::slice::from_ref(&nodes.src_ep),
+        rt.handle(),
+    )
+    .expect("connect source cluster");
+    cluster.ingest(&queries).expect("ingest corpus");
+    seed_committed_map(&cluster, &nodes.src_ep, &nodes.tgt_ep);
+
+    cluster
+        .execute_handoff(0, &nodes.src_ep, &nodes.tgt_ep, rt.handle())
+        .expect("raw A to B handoff");
+    cluster
+        .add_query(live_target_addition.0, &live_target_addition.1)
+        .expect("write reaches live B after A was demoted and fenced");
+
+    let outcome = cluster
+        .reassign_and_move(0, NodeId(1), rt.handle())
+        .expect("repair routing back to committed A");
+    assert!(
+        matches!(
+            outcome,
+            ReassignOutcome::Moved {
+                position: 0,
+                from: NodeId(1),
+                to: NodeId(1),
+                generation: 2,
+            }
+        ),
+        "repair must recover and swap back without a redundant commit: {outcome:?}"
+    );
+    cluster
+        .add_query(repaired_target_addition.0, &repaired_target_addition.1)
+        .expect("the repaired target was unfenced before acknowledgement");
+
+    let state = cluster
+        .control_state()
+        .expect("committed state after repair");
+    assert_eq!(
+        state
+            .assignments
+            .iter()
+            .find(|assignment| assignment.position == 0)
+            .map(|assignment| assignment.primary),
+        Some(NodeId(1)),
+        "the already-committed target remains durable authority"
+    );
+    for (index, title) in titles.iter().enumerate() {
+        let got: HashSet<u64> = cluster
+            .percolate(title)
+            .expect("percolate after stale-fence repair")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            got, oracle[index],
+            "stale-fence repair preserved every write on {title:?}"
         );
     }
 

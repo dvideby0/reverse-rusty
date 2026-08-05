@@ -228,17 +228,23 @@ curl -fsS -XPOST http://127.0.0.1:9200/_cluster/reassign -H "authorization: Bear
   -H 'content-type: application/json' -d '{"position": 0, "node": 2}'
 ```
 
-This peer-recovers the target, fences + drains the source, flips routing, then commits the new owner
-(**move-then-commit**) — so a coordinator restarted **resolve-only** (`--route-by-assignments` +
-`--control-endpoint`, `--shards 3`, and no `--shard-endpoint`) routes to the new owner. To move every
-reassigned position at once, call bodyless `POST /_cluster/rebalance` (or explicitly send
-`{"move":true}`); resolve-only remote mode chooses the data-moving workflow by default and rejects
-`move:false`. CLI-seeded and static endpoint-order coordinators reject rebalance before admission.
-Fail-closed: a failed move commits nothing and auto-unfences the source; a
-`committed:false` reply means the data moved but the durable-map commit failed — re-run to
-reconcile (still zero-FN).
+This attests the current live primary, peer-recovers the target when needed, fences + drains the
+source, flips routing, then commits the new owner (**move-then-commit**) — so a coordinator restarted
+**resolve-only** (`--route-by-assignments` + `--control-endpoint`, `--shards 3`, and no
+`--shard-endpoint`) routes to the new owner. `shard`/`to_node` are request aliases, and
+`cluster_manager_timeout`/`master_timeout` bounds only pre-start admission; the full contract is in
+the [reassign API reference](../reference/api/cluster/reassign.md).
 
-A started rebalance cannot be safely cancelled. Compose's
+To move every reassigned position at once, call bodyless `POST /_cluster/rebalance` (or explicitly
+send `{"move":true}`); resolve-only remote mode chooses the data-moving workflow by default and
+rejects `move:false`. CLI-seeded and static endpoint-order coordinators reject both rebalance and
+reassign before admission. Fail-closed: a failure before the live flip commits nothing and
+auto-unfences the source. A `committed:false` reply means live routing reached the target but the
+durable-map commit failed. The running coordinator remains exact, but the old owner becomes stale
+after newer writes; restore control-plane writes and repeat the same request promptly **before any
+coordinator restart**. The retry attests the live target and commits it without stale recopy.
+
+A started reassign or rebalance cannot be safely cancelled. Compose's
 `RR_COORDINATOR_STOP_GRACE_PERIOD` defaults to 3630 seconds: the 30-second HTTP drain plus a
 one-hour move allowance. Size it above the largest measured `O(corpus)` handoff; Docker sends
 `SIGKILL` when that outer budget expires.
@@ -377,7 +383,7 @@ control-plane↔coordinator wiring with multi-endpoint failover + committed-assi
 the resolve-only restart + move-then-commit in [§5](#5-scaling), the bootstrap `--advertise-url`
 rule in [§3](#3-bootstrap--startup-ordering)); **data-moving reassignment** (ADR-090):
 `POST /_cluster/reassign {position, node}` (or bodyless resolve-only remote `rebalance`) moves the
-data via live handoff THEN commits the new owner; the REST rebalance boundary rejects remote
-map-only mode, CLI-seeded restart-unsafe routing, and static routing. Also shipped: the
+data via live handoff THEN commits the new owner; both REST boundaries reject CLI-seeded
+restart-unsafe routing and static routing, and rebalance also rejects remote map-only mode. Also shipped: the
 **Kubernetes / Helm chart**
 (ADR-084, [`kubernetes-deployment.md`](kubernetes-deployment.md)).

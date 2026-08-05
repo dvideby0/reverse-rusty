@@ -60,10 +60,11 @@ Complete in-process response:
 ```
 
 Complete resolve-only remote response uses `moved_data:true`; `reassigned` is the number of
-positions physically moved and `moved` lists their numeric positions. `version` is a final
-linearizable observation of the committed `ClusterState` application version after the complete or
-resumable workflow. It is not a Raft term/log index, checkpoint epoch, feature-model version, or
-placement generation.
+positions newly converged and `moved` lists their numeric positions. A listed RF=1 position may be a
+commit-only reconciliation when an earlier uncommitted flip already placed its target live; no stale
+source recopy occurs. `version` is a final linearizable observation of the committed `ClusterState`
+application version after the complete or resumable workflow. It is not a Raft term/log index,
+checkpoint epoch, feature-model version, or placement generation.
 
 A per-position remote failure remains a resumable HTTP 200:
 

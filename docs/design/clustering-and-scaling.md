@@ -377,12 +377,18 @@ Raw `execute_handoff` performs:
 4. drain the finite residual translog to convergence;
 5. swap the runtime `HandoffShard` backing.
 
-The higher-level reassignment path then commits the new assignment and retires/unfences retained
-members as appropriate.
+The higher-level single-target reassignment path resolves membership but treats the current live
+primary as data authority. Under the same ledger ticket it attests the committed owner, live owner,
+and target. It then moves from the live owner when necessary and commits the new assignment. If an
+earlier raw move or failed commit already put the target live, it commits that attested authority
+without recopying from the potentially stale durable owner.
 
-The public reassignment path is **move then commit**. If a crash lands after the runtime flip but
-before the control commit, the fenced old owner still serves reads and retains data, so the committed
-map still resolves to a data-holding endpoint. `reconcile` can finish the transition.
+The public reassignment path is **move then commit**. This ordering never commits an empty target,
+but a runtime flip followed by a failed control proposal leaves a restart window: the old committed
+owner is a complete move-time snapshot, then becomes stale after newer writes reach the live target.
+The running coordinator remains exact. The operator must restore control-plane writes and retry the
+idempotent reassignment before restart; the retry reconciles the durable map without stale recopy.
+A durable move intent / atomic conditional transition is unfinished work tracked in the roadmap.
 
 RF>1 group moves fence the committed primary once, establish every target member from the frozen
 source, swap the composite, and CAS-commit the complete group. A retained member with an identical
@@ -394,8 +400,9 @@ Every move reserves its full source/target endpoint set in a `MoveLedger`. Confl
 serialize; disjoint moves may execute in configured waves. Tickets are RAII and failed handoffs
 auto-unfence, preventing a forgotten fence from becoming a permanent write outage. The REST raw
 handoff can apply a manager deadline to this reservation; a deadline loss is guaranteed not to
-start recovery later. The raw route changes live routing only and is explicitly uncommitted;
-restart-stable operator movement uses the move-then-commit reassignment path.
+start recovery later. The raw route changes live routing only and is explicitly uncommitted.
+Restart-stable operator movement uses the move-then-commit reassignment path on an authoritative
+resolve-only remote coordinator; static and CLI-seeded remote topologies are refused before admission.
 
 After assignments converge, `gc_orphan_slots` can list remote slots and drop only those outside both
 the committed keep set and live routing. Unassigned positions fail safe (skip), and the drop path
