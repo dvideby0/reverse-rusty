@@ -68,8 +68,9 @@ Once all exclusive guards are held and the rebuild starts, the manager timeout d
 arbitrary cancellation could strand a swapped in-memory ring, control state, and durable manifest
 at different generations. The request waits for the exact terminal result. If the client
 disconnects after start, the supervised worker retains admission and completes; graceful shutdown
-also waits behind the same REST-write guard before its final checkpoint. Inspect `/_health` and
-`/_cluster/state` after any connection loss before retrying.
+acquires and retains the shared corpus-administration admission slot before its final checkpoint,
+so an admitted worker cannot start after cleanup. Inspect `/_health` and `/_cluster/state` after any
+connection loss before retrying.
 
 A failed control proposal can occur after the serving swap. The next request first repairs only
 that exact one-generation resize predecessor; it cannot advance to a different shard count until

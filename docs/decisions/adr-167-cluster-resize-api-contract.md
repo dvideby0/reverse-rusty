@@ -57,8 +57,9 @@ cannot safely promise that serving state, control state, and the durable manifes
   gate opens. Deadline/disconnect before start cancels queued work so it cannot mutate later.
 - Once started, wait for the exact result rather than pretending to cancel. A disconnect drops only
   the response; the worker retains admission and every exclusive guard through rebuild, swap,
-  control commit, checkpoint, and version attestation. The shutdown checkpoint waits behind the
-  same REST-write guard, joining any active resize before process exit.
+  control commit, checkpoint, and version attestation. Shutdown acquires and retains the shared
+  corpus-administration admission slot before its final checkpoint, joining both active and
+  admitted-but-not-started resize workers before process exit.
 - Return `{acknowledged, shards_acknowledged, version, old_num_shards, num_shards, rebuilt}` only
   after terminal success. Before any new rebuild, repair only the exact one-generation predecessor
   left by a failed post-swap resize proposal; refuse every other control/live divergence. Attest
