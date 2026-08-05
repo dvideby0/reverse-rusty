@@ -15,10 +15,10 @@ curl -X POST \
 ```
 
 The required `num_shards` is an integer from 1 through 1024. It may grow or shrink the ring by an
-arbitrary amount; it need not be a factor or multiple of the current count. Repeating the current
-count is an acknowledged no-op in memory. On a durable cluster it also re-checkpoints and repairs
-the on-disk shard-directory set, so retrying the target count can heal a prior post-swap commit
-failure.
+arbitrary amount; it need not be a factor or multiple of the current count. Repeating an already
+attested current count is an acknowledged no-op in memory. A same-count retry repairs a prior
+post-swap control-count failure before acknowledgement; on a durable cluster it also re-checkpoints
+and repairs the on-disk shard-directory set.
 
 A successful response is terminal:
 

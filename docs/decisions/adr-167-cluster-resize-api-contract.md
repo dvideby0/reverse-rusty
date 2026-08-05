@@ -62,7 +62,8 @@ cannot safely promise that serving state, control state, and the durable manifes
 - Return `{acknowledged, shards_acknowledged, version, old_num_shards, num_shards, rebuilt}` only
   after terminal success. `version` is the final observed control application version;
   `shards_acknowledged` is exact because every local target shard is built and any required
-  checkpoint has committed before 200. Same-count durable retries keep ADR-078's healing checkpoint.
+  checkpoint has committed before 200. Same-count retries repair a stale control shard count before
+  returning and retain ADR-078's healing durable checkpoint.
 - Fail loud on rebuild/control/durability/version errors with typed status and a sanitized reason
   directing the operator to health and cluster state. Detailed paths/backend endpoints remain in
   logs. Return structured `Cache-Control: no-store` responses and fixed `cluster_resize`
@@ -93,10 +94,11 @@ and checkpoints before success. Rejecting remote topologies before admission pre
 that routing and stored placement must use the same ring.
 
 Focused handler tests prove grow success plus post-resize matching, same-count acknowledgement,
-exact final version/shard fields, strict method/query/media/object/field/count controls, body size
-and absolute deadlines, zero/positive/closed admission, topology-lock deadline cancellation with no
-delayed mutation, early remote refusal, fixed no-store telemetry, dedicated execution independent
-of the shared blocking pool, post-start manager-timeout semantics, and disconnect-retained
-completion/admission. Existing cluster oracle and durability resize suites continue to prove grow,
-shrink, repeated transitions, broad and tagged queries, dictionary identity, reopen, directory
-cleanup, mutation replay, and stale-data non-resurrection.
+post-swap control-proposal failure repair, exact final version/shard fields, strict
+method/query/media/object/field/count controls, body size and absolute deadlines,
+zero/positive/closed admission, topology-lock deadline cancellation with no delayed mutation, early
+remote refusal, fixed no-store telemetry, dedicated execution independent of the shared blocking
+pool, post-start manager-timeout semantics, and disconnect-retained completion/admission. Existing
+cluster oracle and durability resize suites continue to prove grow, shrink, repeated transitions,
+broad and tagged queries, dictionary identity, reopen, directory cleanup, mutation replay, and
+stale-data non-resurrection.

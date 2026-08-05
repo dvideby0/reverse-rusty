@@ -100,11 +100,17 @@ impl ClusterEngine {
         }
         if new_num_shards == self.ring.num_shards() {
             // The LIVE ring already has this many shards — a full rebuild would change nothing.
-            // But a PRIOR resize may have swapped the ring in RAM and then FAILED to checkpoint,
-            // leaving the durable manifest at the old count; a bare `Ok(0)` here would falsely
-            // acknowledge that un-committed resize, and a restart would roll it back. So for a
-            // durable cluster, re-ensure the commit (checkpoint is idempotent — a clean one is
-            // cheap) + re-assert the on-disk dir set, so a retry HEALS rather than masks.
+            // But a PRIOR resize may have swapped the ring in RAM and then FAILED to update the
+            // control plane or checkpoint, leaving one or both at the old count. A bare `Ok(0)`
+            // here would falsely acknowledge that partial transition. Re-attest the control count
+            // first, then re-ensure the durable commit (checkpoint is idempotent — a clean one is
+            // cheap) + on-disk dir set, so a retry HEALS rather than masks either failure seam.
+            let control = self.control.cluster_state()?;
+            if control.num_shards as usize != new_num_shards {
+                self.control.propose(ClusterStateChange::SetShardCount {
+                    num_shards: new_num_shards as u32,
+                })?;
+            }
             if self.data_dir.is_some() {
                 self.checkpoint()?;
                 self.remove_shard_dirs_at_or_above(new_num_shards);

@@ -13,6 +13,8 @@ use reverse_rusty::cluster::{
 
 use super::*;
 
+mod retry;
+
 fn resize_request(uri: &str, body: impl Into<Body>) -> Request<Body> {
     Request::builder()
         .method("POST")

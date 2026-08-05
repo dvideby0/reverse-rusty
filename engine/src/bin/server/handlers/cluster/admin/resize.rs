@@ -436,12 +436,19 @@ pub(crate) async fn cluster_resize(
         let _ = started_sender.send(());
         let old_num_shards = cluster.num_shards();
         let result = cluster.resize(num_shards).and_then(|rebuilt| {
-            let version = cluster.control_version()?;
+            let control = cluster.control_state()?;
+            if control.num_shards as usize != num_shards {
+                return Err(ShardError::ControlPlane(format!(
+                    "resize terminal attestation failed: serving ring has {num_shards} shards but \
+                     committed control state has {}",
+                    control.num_shards
+                )));
+            }
             Ok(ClusterResizeSuccess {
                 old_num_shards,
                 num_shards,
                 rebuilt,
-                version: version.0,
+                version: control.epoch,
             })
         });
         ClusterResizeWorkerOutcome::Finished(result)
