@@ -10,6 +10,7 @@ use super::*;
 
 struct LateReadyBodyStream {
     delivered: bool,
+    bytes: Bytes,
 }
 
 impl tokio_stream::Stream for LateReadyBodyStream {
@@ -23,7 +24,7 @@ impl tokio_stream::Stream for LateReadyBodyStream {
         std::thread::sleep(
             super::super::admin::CLUSTER_RESYNC_BODY_TIMEOUT + Duration::from_millis(25),
         );
-        Poll::Ready(Some(Ok(Bytes::new())))
+        Poll::Ready(Some(Ok(self.bytes.clone())))
     }
 }
 
@@ -148,9 +149,31 @@ async fn resync_transport_is_strict_and_bounded() {
     let late = Request::builder()
         .method("POST")
         .uri("/_cluster/resync")
-        .body(Body::from_stream(LateReadyBodyStream { delivered: false }))
+        .body(Body::from_stream(LateReadyBodyStream {
+            delivered: false,
+            bytes: Bytes::new(),
+        }))
         .expect("request");
     let (status, _, bytes) = send_raw(&state, late).await;
+    assert_error(
+        status,
+        &bytes,
+        StatusCode::REQUEST_TIMEOUT,
+        "request_timeout",
+    );
+
+    let late_oversized = Request::builder()
+        .method("POST")
+        .uri("/_cluster/resync")
+        .body(Body::from_stream(LateReadyBodyStream {
+            delivered: false,
+            bytes: Bytes::from(vec![
+                b' ';
+                super::super::admin::CLUSTER_RESYNC_BODY_LIMIT + 1
+            ]),
+        }))
+        .expect("request");
+    let (status, _, bytes) = send_raw(&state, late_oversized).await;
     assert_error(
         status,
         &bytes,

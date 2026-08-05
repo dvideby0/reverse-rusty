@@ -151,8 +151,19 @@ impl FromRequest<Arc<ClusterAppState>> for ClusterResyncTransport {
                 "request_timeout",
                 "resync request body did not complete within 250ms",
             )
-        })?
-        .map_err(|source| {
+        })?;
+        // Tokio polls a ready body before its timeout timer. Enforce the
+        // absolute boundary before mapping even a ready extraction failure,
+        // such as an oversized body observed after executor starvation.
+        if Instant::now() >= body_deadline {
+            return Err(cluster_resync_rejection(
+                &state.prom,
+                StatusCode::REQUEST_TIMEOUT,
+                "request_timeout",
+                "resync request body did not complete within 250ms",
+            ));
+        }
+        let body = body.map_err(|source| {
             let status = source.status();
             let error_type = if status == StatusCode::PAYLOAD_TOO_LARGE {
                 "payload_too_large"
@@ -166,16 +177,6 @@ impl FromRequest<Arc<ClusterAppState>> for ClusterResyncTransport {
                 format!("invalid resync body: {source}"),
             )
         })?;
-        // Tokio polls a ready body before its timeout timer. Enforce the
-        // absolute boundary too when this task was starved past the deadline.
-        if Instant::now() >= body_deadline {
-            return Err(cluster_resync_rejection(
-                &state.prom,
-                StatusCode::REQUEST_TIMEOUT,
-                "request_timeout",
-                "resync request body did not complete within 250ms",
-            ));
-        }
         if !body.is_empty() {
             return Err(cluster_resync_rejection(
                 &state.prom,
