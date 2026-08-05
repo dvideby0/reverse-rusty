@@ -9,6 +9,13 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-08-05 — Dependency-gate qualification
+
+- Qualified `RUSTSEC-2026-0235` as an inactive optional `rkyv` lockfile edge, retained the
+  lockfile-wide RustSec scan, and added an all-feature/all-target graph guard that fails before any
+  `rkyv` version can enter a shipped build under the exception
+  ([ADR-168](decisions/adr-168-inactive-rkyv-advisory.md)).
+
 ## 2026-07-26 to 2026-07-29 — Documentation, module boundaries, and API parity
 
 - Replaced the monolithic ADR index with an area hub, nine compact catalogs, and one canonical

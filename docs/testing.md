@@ -20,7 +20,7 @@ hardware-scoped performance blocker stays on the pinned core runner. Why these b
 
 ```
 cd engine && export CARGO_TARGET_DIR=/tmp/reverse-rusty-target   # or just ./engine/check.sh from the root
-./check.sh          # full gate: fmt + clippy + test + audit + deny
+./check.sh          # full gate: fmt + clippy + test + audit/graph guard + deny
 ./check.sh --fast   # quick gate: fmt + clippy only (what the pre-commit hook runs)
 ./check.sh --lane core         # default/lean checks + policy + crash injection
 ./check.sh --lane distributed  # distributed-feature clippy + tests

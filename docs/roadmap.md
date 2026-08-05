@@ -382,6 +382,25 @@ trusted-network mode as an explicit deployment profile.
 is exercised in the real-cluster drill, and security controls fail closed without breaking health
 or recovery traffic.
 
+### Remove the inactive `rkyv` 0.7 lockfile edge
+
+**Problem.** OpenRaft's formatting dependency currently resolves an optional rust_decimal
+integration on `rkyv` 0.7 into `Cargo.lock`. No Reverse Rusty feature or target activates that
+integration, so [ADR-168](decisions/adr-168-inactive-rkyv-advisory.md) qualifies
+`RUSTSEC-2026-0235` behind a fail-closed active-graph guard. The exception is deliberately temporary:
+a bare lockfile scan remains noisy, and an advisory-specific policy should disappear when the
+stable dependency chain can do so without a local fork.
+
+**Direction.** Track stable OpenRaft, byte-unit, and rust_decimal releases. Prefer a compatible
+upgrade that removes `rkyv` 0.7 from the resolved lockfile; a stable OpenRaft release that makes its
+Clap/byte-unit formatting path optional is also acceptable if the control-plane migration is
+independently justified and fully tested. Do not adopt an alpha control-plane release, vendor an
+unused serialization stack, or weaken the activation guard solely to silence the scanner.
+
+**Completion.** `cargo audit` passes without `--ignore RUSTSEC-2026-0235`, no affected `rkyv`
+release remains in `Cargo.lock`, the temporary guard and documented exception are removed, and the
+full default/distributed gates plus control-plane durability and recovery oracles remain green.
+
 ## Later improvements
 
 These are valid but lower-leverage than the items above. Each entry states the problem, intended
