@@ -186,8 +186,9 @@ lossless through persistence and reopen.
 **Problem.** Move-then-commit guarantees that the control plane never names an empty target, but a
 successful live-routing flip followed by a failed assignment proposal leaves two authorities. The
 running coordinator is exact on the target; the durable map still names a complete move-time source
-that becomes stale after newer writes. The shipped API detects this state and safely reconciles it
-on retry, but an operator must restore quorum and retry before coordinator restart. The local
+that becomes stale after newer writes. The shipped reassignment and reconcile APIs detect this
+state and safely reconcile RF=1 on retry, but an operator must restore quorum and retry before
+coordinator restart. The local
 move-ledger check is also not a cross-coordinator compare-and-set.
 
 **Direction.** Design one durable, resumable transition protocol rather than disguising the window:

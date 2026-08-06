@@ -41,6 +41,10 @@ pub(crate) const MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS: usize = 1;
 /// launch competing whole-cluster plans. Conflict-aware parallelism within one
 /// data-moving pass remains controlled by its `max_parallel` request field.
 pub(crate) const MAX_CONCURRENT_CLUSTER_REBALANCES: usize = 1;
+/// Reconcile is a corpus-wide data-moving pass. Manual requests and the
+/// unattended loop share this single slot so only one whole-cluster plan can
+/// run at a time, and so shutdown can join a detached in-flight pass.
+pub(crate) const MAX_CONCURRENT_CLUSTER_RECONCILES: usize = 1;
 /// Raw handoff is a long-running operator workflow. Admit one request at a
 /// time so duplicate HTTP calls cannot accumulate dedicated workers; the
 /// engine's endpoint ledger still coordinates it with automatic/reassign
@@ -193,6 +197,10 @@ pub(crate) struct ClusterAppState {
     /// held by the off-runtime worker through final control-state attestation,
     /// including after an HTTP disconnect.
     pub(crate) rebalance_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Shared admission for manual and unattended reconcile passes. The
+    /// admitted worker owns the permit through its terminal report, including
+    /// after an HTTP disconnect, and shutdown joins it before cleanup.
+    pub(crate) reconcile_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// One operator-triggered raw handoff at a time. The admitted worker owns
     /// the permit through its terminal routing result, including after an HTTP
     /// disconnect, and shutdown quiesces it before durability cleanup.

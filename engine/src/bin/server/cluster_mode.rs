@@ -58,9 +58,9 @@ use crate::handlers::{
     CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT,
     CLUSTER_HANDOFF_BODY_LIMIT, CLUSTER_NODE_DEREGISTER_BODY_LIMIT,
     CLUSTER_NODE_REGISTER_BODY_LIMIT, CLUSTER_REASSIGN_BODY_LIMIT, CLUSTER_REBALANCE_BODY_LIMIT,
-    CLUSTER_RESIZE_BODY_LIMIT, CLUSTER_RESYNC_BODY_LIMIT, CLUSTER_STATE_BODY_LIMIT,
-    EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT, PIT_BODY_LIMIT,
-    SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
+    CLUSTER_RECONCILE_BODY_LIMIT, CLUSTER_RESIZE_BODY_LIMIT, CLUSTER_RESYNC_BODY_LIMIT,
+    CLUSTER_STATE_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, HEALTH_BODY_LIMIT, METRICS_BODY_LIMIT,
+    PIT_BODY_LIMIT, SETTINGS_READ_BODY_LIMIT, SETTINGS_WRITE_BODY_LIMIT, STATS_BODY_LIMIT,
     VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
     VOCAB_WRITE_BODY_LIMIT,
 };
@@ -194,12 +194,14 @@ pub(crate) async fn run(
     // --reconcile-interval-secs runs the unattended reconciler (ADR-092), which re-points routing by
     // MOVING data to the committed map's owner. It is only safe + meaningful when the coordinator
     // actually ROUTES by that committed map — otherwise a converged map would not change routing.
-    // Require --route-by-assignments (which itself requires --control-endpoint), so a misconfiguration
-    // refuses startup rather than running a loop that moves data the coordinator then ignores.
-    if cli.reconcile_interval_secs.is_some() && !cli.route_by_assignments {
+    // Require resolve-only routing. A CLI-seeded assignment coordinator follows
+    // the committed map live, but changing that map makes its next guarded
+    // restart fail against the stale position-preserving endpoint list.
+    if cli.reconcile_interval_secs.is_some() && !resolve_only {
         error!(
-            "--reconcile-interval-secs requires --route-by-assignments: the reconciler converges the \
-             committed shard→node map the coordinator routes by (ADR-092/086)"
+            "--reconcile-interval-secs requires resolve-only assignment routing: use \
+             --route-by-assignments, --control-endpoint, the committed --shards count, and no \
+             --shard-endpoint (ADR-092/086)"
         );
         std::process::exit(1);
     }
@@ -375,6 +377,9 @@ pub(crate) async fn run(
         )),
         rebalance_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_REBALANCES,
+        )),
+        reconcile_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_CLUSTER_RECONCILES,
         )),
         handoff_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_HANDOFFS,
@@ -592,7 +597,10 @@ pub(crate) async fn run(
             "/_cluster/reassign",
             any(cluster_reassign).layer(DefaultBodyLimit::max(CLUSTER_REASSIGN_BODY_LIMIT)),
         )
-        .route("/_cluster/reconcile", post(cluster_reconcile))
+        .route(
+            "/_cluster/reconcile",
+            any(cluster_reconcile).layer(DefaultBodyLimit::max(CLUSTER_RECONCILE_BODY_LIMIT)),
+        )
         .route("/_cluster/gc", post(cluster_gc))
         .route(
             "/_cluster/resize",
@@ -683,7 +691,7 @@ pub(crate) async fn run(
         task.abort();
     }
 
-    // Rebalance, raw handoff, move-and-commit reassignment, and corpus-wide
+    // Rebalance, reconcile, raw handoff, move-and-commit reassignment, and corpus-wide
     // administrative workers may outlive their HTTP requests by design. Acquire
     // and retain their single-slot
     // admission boundaries before durability cleanup. In particular, a detached resize
@@ -695,6 +703,14 @@ pub(crate) async fn run(
             Ok(guard) => Some(guard),
             Err(source) => {
                 error!(error = %source, "rebalance admission closed during cluster shutdown");
+                None
+            }
+        };
+    let _reconcile_shutdown_guard =
+        match quiesce_worker_admission_for_shutdown(&state.reconcile_permits).await {
+            Ok(guard) => Some(guard),
+            Err(source) => {
+                error!(error = %source, "reconcile admission closed during cluster shutdown");
                 None
             }
         };

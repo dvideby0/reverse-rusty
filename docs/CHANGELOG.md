@@ -9,6 +9,15 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-08-05 — Cluster reconcile API hardening
+
+- Hardened native `POST /_cluster/reconcile` with strict bounded transport, a resolve-only topology
+  contract for both manual and unattended passes, shared single admission, manager-bounded atomic
+  start, independently supervised disconnect-safe completion, shutdown joining through optional GC,
+  final control-version/timing attestation, truthful commit-only and uncommitted semantics, sanitized
+  partial failures, fixed no-store telemetry, and an explicit non-reroute Elasticsearch/OpenSearch
+  boundary ([ADR-172](decisions/adr-172-cluster-reconcile-api-contract.md)).
+
 ## 2026-08-05 — Cluster reassign API hardening
 
 - Hardened native `POST /_cluster/reassign` with strict bounded transport, truthful no-op and

@@ -349,7 +349,7 @@ The cluster exposes powerful primitives, but “self-tuning” is not the curren
 | Skew handoff | autoscaler can drive a fenced data-moving handoff when no conflicting rebalance ran |
 | Corpus split pressure | `RecommendSplit` is advisory; targeted online splitting is not built |
 | Scale-out recommendation | advisory; provisioning nodes is external |
-| Reconcile loop | opt-in, idempotent convergence of committed HRW placement using physical moves |
+| Reconcile loop | opt-in only on a resolve-only coordinator; idempotent, singly admitted convergence of committed HRW placement using physical moves |
 | Parallel movement | opt-in conflict-free waves; shared endpoints serialize through the move ledger |
 | Orphan-slot GC | opt-in guarded sweep using committed placement plus live-routing keep sets |
 

@@ -13,7 +13,10 @@ landed unchanged on that foundation, with the oracle extended to the packed K&gt
 “re-drive the whole move” retry below for the single-target path. That path now attests the current
 live primary under the move ledger; when the desired target is already live, it commits that
 authority without copying again from the stale durable owner. RF&gt;1 durable transition recovery
-remains in the roadmap.
+remains in the roadmap. [ADR-172](adr-172-cluster-reconcile-api-contract.md) supersedes the original
+thin REST/loop boundary: manual and unattended passes now share single admission, require
+resolve-only routing, retain in-flight work across disconnect/shutdown, and report a final durable
+version with current live-authority semantics.
 
 **Context.** [ADR-090](adr-090-data-moving-reassignment.md) shipped data-moving reassignment
 (`reassign_and_move` / `rebalance_and_move`, move-then-commit, zero-FN), but it must be **manually
@@ -79,7 +82,7 @@ move is `O(corpus)`, so a membership-flap storm must not re-move on every edge; 
 `min_interval` (default 30s) between passes. This wall-clock state lives ONLY in the loop — never in the
 engine.
 
-**`MovedButNotCommitted` is an idempotent re-drive, not a commit-only fast-path.** Both ADR-090 trigger
+**Historical `MovedButNotCommitted` retry model (superseded for RF=1 by ADR-171).** Both ADR-090 trigger
 sites (a CAS loss to a concurrent move; a persistent commit failure under a down quorum) self-heal on the
 next pass: `rebalance_targets` either no longer lists the position (already converged) or still lists it,
 and re-running `reassign_and_move` re-converges the already-populated target (the fenced source still

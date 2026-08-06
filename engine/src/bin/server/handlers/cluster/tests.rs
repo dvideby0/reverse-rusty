@@ -56,6 +56,9 @@ fn state_from_cluster_with_rebalance_topology(
         rebalance_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_REBALANCES,
         )),
+        reconcile_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_CLUSTER_RECONCILES,
+        )),
         handoff_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_HANDOFFS,
         )),
@@ -345,6 +348,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 CLUSTER_REASSIGN_BODY_LIMIT,
             )),
         )
+        .route(
+            "/_cluster/reconcile",
+            any(cluster_reconcile).layer(axum::extract::DefaultBodyLimit::max(
+                CLUSTER_RECONCILE_BODY_LIMIT,
+            )),
+        )
         .with_state(Arc::clone(state))
 }
 
@@ -420,6 +429,7 @@ mod pit;
 mod ranked;
 mod reassign;
 mod rebalance;
+mod reconcile;
 mod resize;
 mod resync;
 mod settings_read;

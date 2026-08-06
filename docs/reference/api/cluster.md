@@ -14,7 +14,7 @@ Elasticsearch/OpenSearch semantics where the underlying control model differs.
 | [`POST /_cluster/resync`](cluster/resync.md) | Strictly re-drive queued partial-apply mutations against only their failed positions. | Coordinator mode |
 | [`POST /_cluster/handoff`](cluster/handoff.md) | Explicitly uncommitted, raw-endpoint live-routing handoff for low-level deployment tests. | Distributed build |
 | [`POST /_cluster/reassign`](cluster/reassign.md) | Attest the live owner, move one position when needed, then commit or reconcile the assignment. | Distributed resolve-only authoritative coordinator |
-| [`POST /_cluster/reconcile`](cluster/reconcile.md) | Run one resumable desired-placement reconciliation pass. | Distributed authoritative coordinator |
+| [`POST /_cluster/reconcile`](cluster/reconcile.md) | Run one resumable desired-placement reconciliation pass. | Distributed resolve-only authoritative coordinator |
 | [`POST /_cluster/gc`](cluster/gc.md) | Reclaim fenced, unrouted orphan slots without dropping live or unassigned data. | Distributed authoritative coordinator |
 
 Read-only control state is documented under
