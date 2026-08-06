@@ -43,14 +43,17 @@ use super::ClusterEngine;
 /// retries the `uncommitted` + `failed` positions on its next pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileReport {
-    /// Positions whose primary moved AND committed this pass.
+    /// Positions whose desired placement committed this pass. This includes a
+    /// physical move and a commit-only recovery when the desired target was
+    /// already the attested live authority.
     pub reconciled: Vec<u32>,
     /// Positions already in place (resolved equal under us — the idempotent no-op).
     pub skipped: Vec<u32>,
-    /// Positions whose data moved but whose commit did not land — **zero-FN: the source still serves
-    /// reads** (the write-only fence — see ADR-090's crash-window table). Recorded for observability;
-    /// re-driven next pass (re-running `reassign_and_move` re-converges the already-populated target and
-    /// re-commits). `(position, from, to)`.
+    /// Positions whose live routing reaches the desired target but whose
+    /// durable assignment did not commit. Exact reads remain on the live
+    /// authority, but a restart can resolve the stale durable owner; retry
+    /// promptly. The RF=1 retry attests and commits the live target without a
+    /// stale recopy. `(position, from, to)`.
     pub uncommitted: Vec<(u32, NodeId, NodeId)>,
     /// Positions whose move failed and rolled back cleanly (routing + committed map unchanged);
     /// retried next pass. `(position, error-message)`.
@@ -64,9 +67,16 @@ impl ReconcileReport {
         self.uncommitted.is_empty() && self.failed.is_empty()
     }
 
-    /// How many positions moved AND committed this pass.
-    pub fn moved_count(&self) -> usize {
+    /// How many desired positions committed this pass, including commit-only
+    /// recovery.
+    pub fn reconciled_count(&self) -> usize {
         self.reconciled.len()
+    }
+
+    /// How many desired positions committed this pass, including commit-only
+    /// recovery. Retained under its original name for API compatibility.
+    pub fn moved_count(&self) -> usize {
+        self.reconciled_count()
     }
 }
 
@@ -137,8 +147,8 @@ impl ClusterEngine {
     /// `reconcile` adds only sequencing + continue-past-failure over `reassign_and_move`; it holds NO
     /// lock across moves (each move reserves its own ledger footprint) and never touches the hot path. A
     /// failed move leaves that position's routing + committed map untouched (a clean rollback); an
-    /// uncommitted move leaves the source serving reads (the write-only fence). Re-running absorbs both
-    /// (the next pass re-targets the still-diverged position and re-drives the idempotent move).
+    /// uncommitted result leaves exact live routing on the target while the durable map is stale.
+    /// Re-running absorbs both; the RF=1 path commits an already-live target without copying again.
     ///
     /// Returns an empty report (a clean no-op) for an in-process / genesis cluster — no addr'd data
     /// nodes to place on, so [`rebalance_group_targets`] is empty. Fails closed only on a
@@ -181,8 +191,8 @@ impl ClusterEngine {
                     // Resolved equal under us (a concurrent move already placed it) — not a
                     // failure.
                     Ok(ReassignOutcome::NoChange { .. }) => report.skipped.push(pos),
-                    // Data moved, commit pending — zero-FN (source serves reads); retried next
-                    // pass.
+                    // Live routing reached the desired target, but durable
+                    // commit is pending; retry next pass.
                     Ok(ReassignOutcome::MovedButNotCommitted { from, to, .. }) => {
                         report.uncommitted.push((pos, from, to));
                     }
@@ -229,6 +239,7 @@ mod tests {
             r.is_converged(),
             "an empty pass is a converged steady state"
         );
+        assert_eq!(r.reconciled_count(), 0);
         assert_eq!(r.moved_count(), 0);
     }
 
@@ -243,7 +254,8 @@ mod tests {
             r.is_converged(),
             "only reconciled/skipped positions ⇒ converged"
         );
-        assert_eq!(r.moved_count(), 2);
+        assert_eq!(r.reconciled_count(), 2);
+        assert_eq!(r.moved_count(), 2, "compatibility helper");
 
         r.uncommitted.push((3, NodeId(1), NodeId(2)));
         assert!(!r.is_converged(), "an uncommitted position ⇒ not converged");

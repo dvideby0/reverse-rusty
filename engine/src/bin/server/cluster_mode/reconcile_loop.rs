@@ -9,9 +9,8 @@
 //! `O(corpus)`) and the runtime, while the engine method is a pure, idempotent state transition.
 //!
 //! Lifecycle: spawned before the server starts serving, and `abort`ed by `cluster_mode::run` at the
-//! start of the shutdown sequence (before the durability flush, so a pass never starts racing the
-//! checkpoint). A pass already in flight on the blocking pool finishes its current move-then-commit
-//! safely (the handoff is designed to run under concurrent flushes, ADR-044) and is not interrupted.
+//! start of shutdown. Manual and unattended passes share one admission permit; an in-flight blocking
+//! pass retains that permit after task abort, and shutdown acquires it before durability cleanup.
 
 use std::sync::Arc;
 
@@ -72,6 +71,17 @@ pub(crate) fn spawn_reconcile_loop(
                 continue; // nothing committed since the last fully-converged pass
             }
 
+            // Share one whole-cluster admission boundary with the manual REST
+            // trigger. Wrapping the owned permit in an Arc lets an in-flight
+            // blocking worker retain it if shutdown aborts this async loop.
+            let admission = match Arc::clone(&state.reconcile_permits).acquire_owned().await {
+                Ok(permit) => Arc::new(permit),
+                Err(e) => {
+                    warn!(error = %e, "reconcile admission closed; stopping loop");
+                    return;
+                }
+            };
+
             // Run the pass OFF the async worker: `execute_handoff` does `block_on` internally, which
             // must not nest on a runtime worker thread. Holds the cluster READ guard for the pass
             // (excludes a concurrent vocab rebuild / resize `&mut self`, exactly like the manual
@@ -79,7 +89,9 @@ pub(crate) fn spawn_reconcile_loop(
             // the rest of the concurrency safety.
             let handle = tokio::runtime::Handle::current();
             let st = Arc::clone(&state);
+            let worker_admission = Arc::clone(&admission);
             let result = tokio::task::spawn_blocking(move || {
+                let _admission = worker_admission;
                 let _topology = st.topology_guard.read();
                 let cluster = st.cluster.read();
                 cluster.reconcile_with(rf, max_parallel_moves, &handle)
@@ -88,9 +100,9 @@ pub(crate) fn spawn_reconcile_loop(
 
             match result {
                 Ok(Ok(report)) => {
-                    if report.moved_count() > 0 || !report.is_converged() {
+                    if report.reconciled_count() > 0 || !report.is_converged() {
                         info!(
-                            reconciled = report.moved_count(),
+                            reconciled = report.reconciled_count(),
                             skipped = report.skipped.len(),
                             uncommitted = report.uncommitted.len(),
                             failed = report.failed.len(),
@@ -109,7 +121,9 @@ pub(crate) fn spawn_reconcile_loop(
                     if gc_orphans && report.is_converged() {
                         let handle = tokio::runtime::Handle::current();
                         let st = Arc::clone(&state);
+                        let worker_admission = Arc::clone(&admission);
                         match tokio::task::spawn_blocking(move || {
+                            let _admission = worker_admission;
                             let cluster = st.cluster.read();
                             cluster.gc_orphan_slots(&handle)
                         })

@@ -49,6 +49,13 @@ from the same `--load-file`, so the fingerprint handshake holds. Its new boot ID
 until the 30-second renewable owner lease expires, then wait for any response bodies/streams
 admitted under the prior owner to drain before taking over a node.
 
+Topology-changing data movement requires a resolve-only coordinator after the initial seeded boot:
+`--route-by-assignments`, `--control-endpoint`, the committed `--shards` count, and no
+`--shard-endpoint`. `--reconcile-interval-secs` is accepted only in this mode; its optional
+`--reconcile-max-parallel` width and `--reconcile-gc-orphans` epilogue share one admission slot with
+manual `POST /_cluster/reconcile`. See the [reconcile API](../cluster/reconcile.md) for safety and
+shutdown semantics.
+
 Behavior deltas from single-node mode (all deliberate, none silent):
 
 - **`PUT /_doc/{id}` is a cluster-atomic upsert** — one coordinator log frame replaces every prior

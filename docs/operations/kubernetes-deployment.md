@@ -194,10 +194,12 @@ the committed quorum. Leave `resolveOnly=true` after the map changes. Before tha
 bodyless `POST /_cluster/rebalance` returns `409 rebalance_resolve_only_required`; afterward it
 drives the data-moving workflow and rejects remote `move:false` (ADR-090/166). Static endpoint-order
 routing remains rejected because the committed map cannot identify authoritative live sources.
+Manual `POST /_cluster/reconcile` and the optional reconcile loop use this same resolve-only
+contract and share one whole-cluster admission slot.
 
 `coordinator.terminationGracePeriodSeconds` defaults to 3630: the 30-second HTTP drain plus a
-one-hour rebalance allowance. Size it above the largest measured `O(corpus)` handoff. Kubernetes
-SIGKILLs the pod when this total budget expires, so a smaller value defeats safe rebalance
+one-hour topology-movement allowance. Size it above the largest measured `O(corpus)` pass.
+Kubernetes SIGKILLs the pod when this total budget expires, so a smaller value defeats safe movement
 quiescence.
 
 Set `controlPlane.enabled=false` for the stateless-coordinator topology (placement re-derived from
