@@ -42,9 +42,9 @@ pub(crate) use admin::{
     cluster_backup, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats, cluster_compact,
     cluster_flush_route, cluster_gc, cluster_handoff, cluster_health, cluster_metrics,
     cluster_reassign, cluster_rebalance, cluster_reconcile, cluster_resize, cluster_resync,
-    cluster_root, cluster_stats, CAT_SHARDS_BODY_LIMIT, CLUSTER_HANDOFF_BODY_LIMIT,
-    CLUSTER_REASSIGN_BODY_LIMIT, CLUSTER_REBALANCE_BODY_LIMIT, CLUSTER_RECONCILE_BODY_LIMIT,
-    CLUSTER_RESIZE_BODY_LIMIT, CLUSTER_RESYNC_BODY_LIMIT,
+    cluster_root, cluster_stats, CAT_SHARDS_BODY_LIMIT, CLUSTER_GC_BODY_LIMIT,
+    CLUSTER_HANDOFF_BODY_LIMIT, CLUSTER_REASSIGN_BODY_LIMIT, CLUSTER_REBALANCE_BODY_LIMIT,
+    CLUSTER_RECONCILE_BODY_LIMIT, CLUSTER_RESIZE_BODY_LIMIT, CLUSTER_RESYNC_BODY_LIMIT,
 };
 pub(crate) use checkpoint::{cluster_checkpoint, CHECKPOINT_BODY_LIMIT};
 pub(crate) use doc::{cluster_bulk_route, cluster_delete_doc, cluster_get_doc, cluster_put_doc};

@@ -50,7 +50,7 @@ pub(crate) use cluster::{
     cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback, cluster_resize,
     cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
     cluster_validate_and_apply_feedback, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT,
-    CLUSTER_HANDOFF_BODY_LIMIT, CLUSTER_NODE_DEREGISTER_BODY_LIMIT,
+    CLUSTER_GC_BODY_LIMIT, CLUSTER_HANDOFF_BODY_LIMIT, CLUSTER_NODE_DEREGISTER_BODY_LIMIT,
     CLUSTER_NODE_REGISTER_BODY_LIMIT, CLUSTER_REASSIGN_BODY_LIMIT, CLUSTER_REBALANCE_BODY_LIMIT,
     CLUSTER_RECONCILE_BODY_LIMIT, CLUSTER_RESIZE_BODY_LIMIT, CLUSTER_RESYNC_BODY_LIMIT,
     CLUSTER_STATE_BODY_LIMIT,

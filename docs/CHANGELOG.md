@@ -9,6 +9,15 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-08-05 — Cluster GC API hardening
+
+- Hardened native `POST /_cluster/gc` with strict bodyless transport, assignment-routed topology
+  safety, shared reconcile/GC admission, manager-bounded atomic start, independently supervised
+  disconnect-safe and shutdown-joined completion, truthful skipped-node/slot and pending-disk
+  semantics, final control-version/timing attestation, sanitized partial failures, no-store
+  telemetry, and an explicit non-dangling-index Elasticsearch/OpenSearch boundary
+  ([ADR-173](decisions/adr-173-cluster-gc-api-contract.md)).
+
 ## 2026-08-05 — Cluster reconcile API hardening
 
 - Hardened native `POST /_cluster/reconcile` with strict bounded transport, a resolve-only topology

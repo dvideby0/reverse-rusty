@@ -246,7 +246,14 @@ durable-map commit failed. The running coordinator remains exact, but the old ow
 after newer writes; restore control-plane writes and repeat the same request promptly **before any
 coordinator restart**. The retry attests the live target and commits it without stale recopy.
 
-A started reassign, rebalance, or reconcile cannot be safely cancelled. Compose's
+After placement converges, bodyless `POST /_cluster/gc` reclaims slots outside both the committed
+and live-routing keep sets. It requires assignment routing but may run on the initial CLI-seeded or
+later resolve-only coordinator. Manual GC shares the reconcile/GC maintenance slot with the loop;
+`acknowledged:false` identifies skipped nodes/positions, failed drops, or deferred physical trash
+deletion that needs correction and another pass (or node restart for pending trash). See the
+[GC API contract](../reference/api/cluster/gc.md).
+
+A started reassign, rebalance, reconcile, or GC sweep cannot be safely cancelled. Compose's
 `RR_COORDINATOR_STOP_GRACE_PERIOD` defaults to 3630 seconds: the 30-second HTTP drain plus a
 one-hour move allowance. Size it above the largest measured `O(corpus)` handoff; Docker sends
 `SIGKILL` when that outer budget expires.

@@ -406,7 +406,9 @@ resolve-only remote coordinator; static and CLI-seeded remote topologies are ref
 
 After assignments converge, `gc_orphan_slots` can list remote slots and drop only those outside both
 the committed keep set and live routing. Unassigned positions fail safe (skip), and the drop path
-fence-probes immediately before a rename-to-trash deletion.
+fence-probes immediately before a rename-to-trash deletion. The public sweep is available only
+with an authoritative assignment-routed node directory; skipped nodes, unassigned slots, failed
+drops, and deferred trash deletion all make its terminal report incomplete (ADR-173).
 
 ### 9.3 Failure boundaries
 

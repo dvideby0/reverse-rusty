@@ -89,3 +89,9 @@ end-to-end drop (dir + trash gone, idempotent re-run), the boot trash sweep. Coo
 the four classification classes + the in-process clean-no-op (epoch invariant). Plus the
 `live_endpoints` forwards regression (HandoffShard) and the `gc_orphans` default-off config test.
 Full 51-test distributed oracle green.
+
+**Current outcome.** ADR-173 later hardened the public one-shot boundary with strict bodyless
+transport, assignment-routed topology validation, shared reconcile/GC admission, independently
+supervised completion, final state/timing attestation, sanitized failures, and a stronger completion
+predicate that includes skipped nodes/positions and deferred trash deletion. The keep-set and
+drop-guard decision above is unchanged.

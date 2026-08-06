@@ -113,54 +113,105 @@ pub(super) fn parse_shard_subdir(name: &OsStr) -> Option<u32> {
 /// A trash-renamed slot dir left by a [`DropShard`] whose final delete was interrupted (ADR-096):
 /// `shard_<NNN>.dropped.<nanos>`. Structurally invisible to [`parse_shard_subdir`] (the suffix
 /// does not parse as a `u32`), so a restart never re-attaches it; the boot sweep reclaims it.
+#[cfg(test)]
 pub(super) fn is_dropped_trash(name: &OsStr) -> bool {
-    name.to_str()
-        .is_some_and(|s| s.starts_with("shard_") && s.contains(".dropped."))
+    parse_dropped_trash_shard(name).is_some()
+}
+
+/// Parse the slot id from `shard_<NNN>.dropped.<nanos>`. Requiring both numeric components keeps
+/// unrelated operator files out of the cleanup inventory.
+fn parse_dropped_trash_shard(name: &OsStr) -> Option<u32> {
+    let (shard, nonce) = name
+        .to_str()?
+        .strip_prefix("shard_")?
+        .split_once(".dropped.")?;
+    let shard_id = shard.parse().ok()?;
+    nonce.parse::<u128>().ok()?;
+    Some(shard_id)
 }
 
 /// Best-effort boot sweep of trash-renamed dropped-slot dirs (ADR-096). Never fails boot: a
-/// missing/unreadable dir or a failed delete just leaves the trash for the next boot (it is
-/// structurally invisible to the slot scan either way).
+/// missing/unreadable dir or a failed delete just leaves the trash for the next inventory or boot
+/// (it is structurally invisible to the slot scan either way).
 pub(super) fn sweep_dropped_trash(data_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(data_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if is_dropped_trash(&entry.file_name()) {
-            // A failed delete leaves the trash for the next boot — never fails the sweep.
-            std::fs::remove_dir_all(entry.path()).ok();
-        }
-    }
+    // A failed scan/delete leaves the trash for the next boot or ListShards probe. Boot remains
+    // fail-open because trash is structurally invisible to slot restore either way.
+    retry_pending_dropped_trash(data_dir).ok();
 }
 
-/// Reclaim a dropped slot's `shard_<id>/` dir (ADR-096): rename it to the trash name FIRST — one
-/// atomic step that makes it invisible to a restart's [`restore_durable_slots`] scan (an in-place
-/// `remove_dir_all` interrupted mid-delete would leave a live-named dir whose checkpoint sidecar
-/// lists already-deleted segments, and the restart's reopen fails LOUD — bricking the node) —
-/// then best-effort delete the trash. Returns `true` when the dir is fully gone; `false` when the
-/// rename succeeded but the delete did not (the boot sweep finishes the job). A missing dir (an
-/// in-memory slot, or an already-reclaimed re-run) is vacuously `true`.
-pub(super) fn reclaim_slot_dir(root: &Path, shard_id: u32) -> bool {
+/// Atomically move a dropped slot's live directory out of the restart-visible namespace. The
+/// caller performs only this rename while it still owns the slot-map write guard; an error therefore
+/// leaves the slot hosted and restores its fence for an idempotent retry. `Ok(None)` means no
+/// durable dir. Parent-directory synchronization happens after the caller releases the map guard.
+pub(super) fn quarantine_slot_dir(
+    root: &Path,
+    shard_id: u32,
+) -> std::io::Result<Option<std::path::PathBuf>> {
     let live = shard_dir(root, shard_id as usize);
-    if !live.exists() {
-        return true;
+    // Unlike `Path::exists`, propagate an unreadable metadata result. Treating it as absence could
+    // remove the in-memory slot while a restart-visible directory still exists.
+    if !live.try_exists()? {
+        return Ok(None);
     }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let trash = root.join(format!("shard_{shard_id:03}.dropped.{nanos}"));
-    if std::fs::rename(&live, &trash).is_err() {
-        // Rename failed: the live-named dir remains and a restart re-attaches it (the slot
-        // resurrects as an orphan and a later sweep re-drops it) — safe, just not reclaimed.
-        return false;
-    }
-    // Make the rename durable against power loss (fsync the parent dir); best-effort — a torn
-    // rename after a crash leaves either name, both safe (live ⇒ re-attach + re-drop; trash ⇒
-    // swept at boot).
+    std::fs::rename(&live, &trash)?;
+    Ok(Some(trash))
+}
+
+/// Best-effort parent synchronization for a completed quarantine rename. This deliberately runs
+/// after slot-map removal releases its write guard: filesystem sync may stall under I/O pressure,
+/// and must not block serving unrelated co-located shards. A torn rename still leaves either safe
+/// name (live ⇒ re-attach + re-drop; trash ⇒ retry on later inventory or boot).
+pub(super) fn sync_slot_quarantine_parent(root: &Path) {
     if let Ok(dir) = std::fs::File::open(root) {
         dir.sync_all().ok();
     }
-    std::fs::remove_dir_all(&trash).is_ok()
+}
+
+/// Retry every trash deletion and return the deduplicated slot ids that still remain. This is both
+/// the boot cleanup and the durable `ListShards` inventory: a later GC pass cannot acknowledge
+/// completion while an earlier pass's physical cleanup is still unresolved.
+pub(super) fn retry_pending_dropped_trash(data_dir: &Path) -> std::io::Result<Vec<u32>> {
+    retry_pending_dropped_trash_with(data_dir, |path| std::fs::remove_dir_all(path))
+}
+
+fn retry_pending_dropped_trash_with(
+    data_dir: &Path,
+    remove: impl FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<Vec<u32>> {
+    retry_pending_dropped_trash_with_probes(data_dir, remove, Path::try_exists)
+}
+
+fn retry_pending_dropped_trash_with_probes(
+    data_dir: &Path,
+    mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+    mut try_exists: impl FnMut(&Path) -> std::io::Result<bool>,
+) -> std::io::Result<Vec<u32>> {
+    let entries = match std::fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(source),
+    };
+    let mut pending = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let Some(shard_id) = parse_dropped_trash_shard(&entry.file_name()) else {
+            continue;
+        };
+        let path = entry.path();
+        // Fail closed after a delete error: only a positively confirmed absence clears the
+        // inventory. `Path::exists()` would collapse a metadata error to false and could let GC
+        // attest completion while the trash remains inaccessible rather than absent.
+        if remove(&path).is_err() && !matches!(try_exists(&path), Ok(false)) {
+            pending.push(shard_id);
+        }
+    }
+    pending.sort_unstable();
+    pending.dedup();
+    Ok(pending)
 }
 
 /// Restore every durable slot a node previously hosted (ADR-093): scan `data_dir` for `shard_<NNN>/`
@@ -254,5 +305,42 @@ mod tests {
             "got: {error}"
         );
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn pending_trash_remains_reported_until_a_retry_deletes_it() {
+        let root = dir("pending_trash");
+        std::fs::create_dir_all(&root).expect("temporary root");
+        let trash = root.join("shard_007.dropped.12345");
+        std::fs::create_dir_all(&trash).expect("plant pending trash");
+        std::fs::write(trash.join("leftover.seg"), b"pending").expect("plant file");
+
+        let pending = retry_pending_dropped_trash_with_probes(
+            &root,
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected delete failure",
+                ))
+            },
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected metadata failure",
+                ))
+            },
+        )
+        .expect("scan remains available");
+        assert_eq!(
+            pending,
+            vec![7],
+            "delete plus metadata failure remains observable"
+        );
+        assert!(trash.exists(), "failed deletion keeps the trash");
+
+        let pending = retry_pending_dropped_trash(&root).expect("retry scan");
+        assert!(pending.is_empty(), "successful retry clears the inventory");
+        assert!(!trash.exists(), "successful retry removes the trash");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

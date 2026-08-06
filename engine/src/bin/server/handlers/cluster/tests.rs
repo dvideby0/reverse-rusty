@@ -354,6 +354,10 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 CLUSTER_RECONCILE_BODY_LIMIT,
             )),
         )
+        .route(
+            "/_cluster/gc",
+            any(cluster_gc).layer(axum::extract::DefaultBodyLimit::max(CLUSTER_GC_BODY_LIMIT)),
+        )
         .with_state(Arc::clone(state))
 }
 
@@ -419,6 +423,7 @@ mod cat_shards;
 mod checkpoint;
 mod crud;
 mod flush;
+mod gc;
 mod handoff;
 mod health;
 mod jobs;

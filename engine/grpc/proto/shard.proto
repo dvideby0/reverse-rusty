@@ -689,6 +689,14 @@ message ListShardsReply {
   // (never GC against a divergent feature space).
   uint64 dict_fingerprint = 2;
   uint64 tag_dict_fingerprint = 3;
+  // Trash-renamed slot directories whose best-effort deletion still fails. ListShards retries
+  // deletion before returning this durable inventory, so an empty list means no known trash is
+  // pending on this node at this observation.
+  repeated uint32 pending_disk_cleanup_shards = 4;
+  // Version 2 distinguishes a failed live-dir rename (the slot stays hosted and DropShard errors)
+  // from a successful trash rename whose final deletion remains pending. A v2 coordinator refuses
+  // to classify an older reply because its `dir_removed = false` meaning was ambiguous.
+  uint32 gc_protocol_version = 5;
 }
 
 message DropShardRequest {
@@ -705,8 +713,9 @@ message DropShardRequest {
 message DropShardReply {
   bool dropped = 1;      // false = the slot was absent (an idempotent re-run)
   uint64 num_queries = 2; // the dropped slot's live count (report/observability)
-  // false = the dir was renamed-to-trash but the delete failed/was skipped (the boot-time trash
-  // sweep reclaims it); in-memory slots report true (nothing on disk to remove).
+  // In GC protocol v2, false unambiguously means the live dir was successfully renamed to trash
+  // but its final deletion is pending. A rename failure returns an RPC error and leaves the fenced
+  // slot hosted for an idempotent retry. In-memory slots report true (nothing on disk to remove).
   bool dir_removed = 3;
 }
 

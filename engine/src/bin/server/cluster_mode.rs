@@ -55,7 +55,7 @@ use crate::handlers::{
     ALIAS_DISCOVER_RECORD_BODY_LIMIT, ALIAS_FEEDBACK_APPLY_BODY_LIMIT,
     ALIAS_FEEDBACK_READ_BODY_LIMIT, ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT,
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
-    CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT,
+    CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT, CLUSTER_GC_BODY_LIMIT,
     CLUSTER_HANDOFF_BODY_LIMIT, CLUSTER_NODE_DEREGISTER_BODY_LIMIT,
     CLUSTER_NODE_REGISTER_BODY_LIMIT, CLUSTER_REASSIGN_BODY_LIMIT, CLUSTER_REBALANCE_BODY_LIMIT,
     CLUSTER_RECONCILE_BODY_LIMIT, CLUSTER_RESIZE_BODY_LIMIT, CLUSTER_RESYNC_BODY_LIMIT,
@@ -601,7 +601,10 @@ pub(crate) async fn run(
             "/_cluster/reconcile",
             any(cluster_reconcile).layer(DefaultBodyLimit::max(CLUSTER_RECONCILE_BODY_LIMIT)),
         )
-        .route("/_cluster/gc", post(cluster_gc))
+        .route(
+            "/_cluster/gc",
+            any(cluster_gc).layer(DefaultBodyLimit::max(CLUSTER_GC_BODY_LIMIT)),
+        )
         .route(
             "/_cluster/resize",
             any(cluster_resize).layer(DefaultBodyLimit::max(CLUSTER_RESIZE_BODY_LIMIT)),
@@ -691,7 +694,7 @@ pub(crate) async fn run(
         task.abort();
     }
 
-    // Rebalance, reconcile, raw handoff, move-and-commit reassignment, and corpus-wide
+    // Rebalance, reconcile/GC, raw handoff, move-and-commit reassignment, and corpus-wide
     // administrative workers may outlive their HTTP requests by design. Acquire
     // and retain their single-slot
     // admission boundaries before durability cleanup. In particular, a detached resize

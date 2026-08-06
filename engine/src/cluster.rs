@@ -59,6 +59,11 @@ mod security;
 #[cfg(feature = "distributed")]
 mod server;
 
+/// Orphan-slot GC wire contract. Version 2 makes rename failure transactional and exposes
+/// durable trash that remains after a prior sweep; coordinators refuse older ambiguous replies.
+#[cfg(feature = "distributed")]
+pub(crate) const GC_PROTOCOL_VERSION: u32 = 2;
+
 pub use autoscale::{evaluate, AutoscaleConfig, AutoscaleDecision, LoadSnapshot, ScalingAction};
 pub use control::{
     ClusterState, ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane,
