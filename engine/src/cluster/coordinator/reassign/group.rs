@@ -93,13 +93,14 @@ use crate::cluster::replica::{catch_up_replica, ReplicatedShard};
 use crate::cluster::shard::{Shard, ShardError};
 use crate::events::{DurabilityOp, EngineEvent};
 
+use super::super::distributed::handoff::clear_stale_fence;
 use super::{ClusterEngine, ReassignOutcome, COMMIT_ATTEMPTS, PLAN_ATTEMPTS};
 
 /// The pure planning layer: target computation, group equality, the stale-fence clear, and the
 /// validated plan type (split for the <650-line budget).
 mod plan;
-use plan::{clear_stale_fence, retained_member_is_complete, PlannedGroupMove};
 pub(in crate::cluster::coordinator) use plan::{groups_equal, rebalance_group_targets};
+use plan::{retained_member_is_complete, PlannedGroupMove};
 
 impl ClusterEngine {
     /// Move a position's whole replica GROUP to `desired` (ADR-094) — data first, commit second.
@@ -116,7 +117,12 @@ impl ClusterEngine {
         desired: &ShardAssignment,
         handle: &Handle,
     ) -> Result<ReassignOutcome, ShardError> {
-        let pos = position as u32;
+        let pos = u32::try_from(position).map_err(|_| {
+            ShardError::Config(format!(
+                "reassign_group_and_move: shard position {position} exceeds the u32 wire/control \
+                 limit"
+            ))
+        })?;
         if desired.position != pos {
             return Err(ShardError::Config(format!(
                 "reassign_group_and_move: desired assignment names position {} but the move is \
@@ -148,7 +154,20 @@ impl ClusterEngine {
 
             // The idempotent no-op: the committed group already IS the desired placement.
             if groups_equal(&committed, desired) {
-                return Ok(ReassignOutcome::NoChange { position: pos });
+                let generation = self
+                    .handoffs
+                    .get(position)
+                    .ok_or_else(|| {
+                        ShardError::Config(format!(
+                            "reassign_group_and_move: shard position {position} is not \
+                             handoff-capable"
+                        ))
+                    })?
+                    .generation();
+                return Ok(ReassignOutcome::NoChange {
+                    position: pos,
+                    generation,
+                });
             }
 
             // Fail-closed endpoint resolution (never silently skip an unroutable member — that
@@ -605,6 +624,7 @@ impl ClusterEngine {
                 from: cp,
                 to: desired.primary,
                 generation,
+                moved: true,
             });
         }
         let mut last_err: Option<ShardError> = None;
@@ -646,6 +666,7 @@ impl ClusterEngine {
             from: cp,
             to: desired.primary,
             generation,
+            moved: true,
         })
     }
 }

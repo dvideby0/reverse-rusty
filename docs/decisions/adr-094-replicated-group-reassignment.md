@@ -4,6 +4,12 @@
 
 **Status:** Accepted (2026-07-01)
 
+**Current outcome.** [ADR-171](adr-171-cluster-reassign-api-contract.md) corrects the historical
+crash-window claim below: an old committed group is complete at the live-swap boundary but becomes
+stale after newer writes reach the new live group. ADR-171 adds safe commit-only reconciliation for
+the single-target path. Generalizing durable, restart-recoverable intent and conditional cutover to
+RF&gt;1 groups remains in the roadmap.
+
 **Context.** Every data-moving sweep was RF=1-only. [`execute_handoff`](../../engine/src/cluster/coordinator/distributed.rs)
 (ADR-044) swaps a position's backing to a **single** `RemoteShard` for the target, so a replicated
 position's move would **de-replicate** it — the live group collapses to one copy while the committed

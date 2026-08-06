@@ -181,6 +181,40 @@ lossless through persistence and reopen.
 
 ## Priority 3 — distributed lifecycle and ranked-path efficiency
 
+### Durable reassignment intent and conditional cutover
+
+**Problem.** Move-then-commit guarantees that the control plane never names an empty target, but a
+successful live-routing flip followed by a failed assignment proposal leaves two authorities. The
+running coordinator is exact on the target; the durable map still names a complete move-time source
+that becomes stale after newer writes. The shipped API detects this state and safely reconciles it
+on retry, but an operator must restore quorum and retry before coordinator restart. The local
+move-ledger check is also not a cross-coordinator compare-and-set.
+
+**Direction.** Design one durable, resumable transition protocol rather than disguising the window:
+
+- persist a versioned per-position move intent with expected assignment generation, normalized
+  source/target membership identities, live generation, and target recovery evidence before the
+  irreversible cutover;
+- add a conditional control-plane proposal so a second coordinator cannot overwrite an assignment
+  that changed after planning;
+- make startup inspect unresolved intents before serving the position, attest both endpoints, and
+  deterministically resume, commit, or fail closed instead of routing from a stale bare assignment;
+- extend the protocol to complete RF&gt;1 groups and retained-member promotion without weakening
+  fencing, fingerprint, or placement-generation checks;
+- keep intent cleanup idempotent and backward-compatible across rolling upgrades, snapshots, and
+  control-plane failover.
+
+Evaluate whether the safest cutover is intent → recover/fence/drain → conditional assignment commit
+→ live swap, or a control-state-driven live swap after the target proves complete. In either shape,
+crash recovery must never infer authority from endpoint reachability alone, and query writes must not
+resume on two primaries.
+
+**Completion.** Crash injection at every intent, recovery, fence, drain, commit, live-swap, and
+cleanup boundary converges after restart with every acknowledged query matchable; a failed quorum
+can recover without a manual pre-restart retry; two coordinators racing the same or overlapping
+positions cannot invert live versus durable authority; unresolved ambiguity fails reads and writes
+loudly; and old binaries reject the new transition state rather than silently ignoring it.
+
 ### Automatic and remote cluster resize
 
 **Problem.** In-process resize is a manual blue/green rebuild. The autoscaler can recommend a split

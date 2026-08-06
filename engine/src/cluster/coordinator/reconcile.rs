@@ -175,7 +175,9 @@ impl ClusterEngine {
         for wave in &waves {
             for (pos, outcome) in self.execute_move_wave(&state, &targets, wave, handle) {
                 match outcome {
-                    Ok(ReassignOutcome::Moved { .. }) => report.reconciled.push(pos),
+                    Ok(ReassignOutcome::Moved { .. } | ReassignOutcome::Reconciled { .. }) => {
+                        report.reconciled.push(pos);
+                    }
                     // Resolved equal under us (a concurrent move already placed it) — not a
                     // failure.
                     Ok(ReassignOutcome::NoChange { .. }) => report.skipped.push(pos),

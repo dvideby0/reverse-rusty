@@ -9,6 +9,12 @@ state, so the second co-located move silently clobbered the first. ADR-093 Stage
 slots, per-shard fence/recovery/`shard_<id>/` storage) made that structurally impossible; this ADR
 landed unchanged on that foundation, with the oracle extended to the packed K&gt;N topology (see Proven).
 
+**Current outcome.** [ADR-171](adr-171-cluster-reassign-api-contract.md) supersedes the historical
+“re-drive the whole move” retry below for the single-target path. That path now attests the current
+live primary under the move ledger; when the desired target is already live, it commits that
+authority without copying again from the stale durable owner. RF&gt;1 durable transition recovery
+remains in the roadmap.
+
 **Context.** [ADR-090](adr-090-data-moving-reassignment.md) shipped data-moving reassignment
 (`reassign_and_move` / `rebalance_and_move`, move-then-commit, zero-FN), but it must be **manually
 triggered** — an operator `POST /_cluster/reassign|rebalance{move:true}`, or the autoscaler's

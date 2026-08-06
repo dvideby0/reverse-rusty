@@ -1,6 +1,33 @@
 use std::time::Instant;
 
+use crate::cluster::remote::RemoteShard;
+
 use super::{Arc, ClusterEngine, DurabilityOp, EngineEvent, LogPos, Shard, ShardError};
+
+/// Clear a stale fence before a recovered target becomes live again.
+///
+/// Serve-then-drop deliberately leaves a demoted primary fenced, and `RecoverFrom` preserves that
+/// slot fence. Reusing such a node as a later handoff target without clearing it would install a
+/// write-rejecting live primary. `fence(0)` is a pure probe because the server fence is monotonic;
+/// `unfence(observed)` then CAS-clears exactly the observed generation. The move ledger and the
+/// documented single-active-coordinator topology exclude a competing local orchestrator.
+pub(in crate::cluster::coordinator) fn clear_stale_fence(
+    target: &RemoteShard,
+    context: &str,
+) -> Result<(), ShardError> {
+    let stale = target.fence(0)?;
+    if stale == 0 {
+        return Ok(());
+    }
+    let current = target.unfence(stale)?;
+    if current != 0 {
+        return Err(ShardError::Remote(format!(
+            "{context}: clearing stale target fence generation {stale} failed; the slot remains \
+             fenced at generation {current} (a concurrent handoff?)"
+        )));
+    }
+    Ok(())
+}
 
 /// Terminal result of one raw live-routing handoff request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,7 +143,7 @@ impl ClusterEngine {
     /// an arbitrary same-dictionary slot. This check runs while the endpoint
     /// move-ledger reservation is held, so the live backing cannot change
     /// between attestation and the first recovery RPC.
-    fn validate_handoff_route(
+    pub(in crate::cluster::coordinator) fn validate_handoff_route(
         &self,
         position: usize,
         source_endpoint: &str,
@@ -218,6 +245,10 @@ impl ClusterEngine {
             )?
             .with_metrics(Arc::clone(&self.transport_metrics));
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
+            // `RecoverFrom` replaces data but intentionally preserves the slot fence. A target that
+            // was a previously demoted primary must be proven writable before it can become live
+            // again; otherwise the move could acknowledge a primary that rejects every later write.
+            clear_stale_fence(&target, "execute_handoff: recovered target")?;
             // Drain the tail (writes that landed during the copy), renewing the lease each pass.
             let mut hwm = LogPos(p);
             for _ in 0..drain_passes {
@@ -329,7 +360,7 @@ impl ClusterEngine {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HandoffRoute {
+pub(in crate::cluster::coordinator) enum HandoffRoute {
     AlreadyAtTarget { generation: u64 },
     Move,
 }
@@ -366,7 +397,7 @@ fn classify_handoff_route(
     Ok(HandoffRoute::Move)
 }
 
-fn normalized_endpoint(endpoint: &str) -> String {
+pub(in crate::cluster::coordinator) fn normalized_endpoint(endpoint: &str) -> String {
     endpoint.trim_end_matches('/').to_ascii_lowercase()
 }
 
