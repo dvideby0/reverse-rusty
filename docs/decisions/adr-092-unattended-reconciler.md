@@ -16,7 +16,9 @@ authority without copying again from the stale durable owner. RF&gt;1 durable tr
 remains in the roadmap. [ADR-172](adr-172-cluster-reconcile-api-contract.md) supersedes the original
 thin REST/loop boundary: manual and unattended passes now share single admission, require
 resolve-only routing, retain in-flight work across disconnect/shutdown, and report a final durable
-version with current live-authority semantics.
+version with current live-authority semantics. [ADR-173](adr-173-cluster-gc-api-contract.md) extends
+that admission/shutdown boundary to manual GC and makes the optional GC epilogue's incomplete disk
+and node outcomes explicit.
 
 **Context.** [ADR-090](adr-090-data-moving-reassignment.md) shipped data-moving reassignment
 (`reassign_and_move` / `rebalance_and_move`, move-then-commit, zero-FN), but it must be **manually

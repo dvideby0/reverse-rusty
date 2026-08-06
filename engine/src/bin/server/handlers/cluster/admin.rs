@@ -20,7 +20,9 @@ mod resize;
 mod resync;
 
 pub(crate) use cat_shards::{cluster_cat_shards, CAT_SHARDS_BODY_LIMIT};
-pub(crate) use gc::cluster_gc;
+#[cfg(test)]
+pub(crate) use gc::CLUSTER_GC_BODY_TIMEOUT;
+pub(crate) use gc::{cluster_gc, CLUSTER_GC_BODY_LIMIT};
 #[cfg(test)]
 pub(crate) use handoff::CLUSTER_HANDOFF_BODY_TIMEOUT;
 pub(crate) use handoff::{cluster_handoff, CLUSTER_HANDOFF_BODY_LIMIT};

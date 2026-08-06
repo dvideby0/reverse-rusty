@@ -123,10 +123,11 @@ deadline. A disconnect after start drops only the response; the independently su
 retains admission and completes. A disconnect before start cancels the queued gate. The familiar
 ES/OS overall `timeout` parameter is rejected.
 
-Manual requests and the opt-in `--reconcile-interval-secs` loop share one reconcile admission slot,
-so duplicate whole-cluster passes cannot accumulate. The loop itself is accepted only in the same
-resolve-only topology. Graceful shutdown first aborts the loop, then acquires and retains the shared
-slot before durability cleanup; an already-running pass or optional GC epilogue therefore finishes.
+Manual reconcile, manual `POST /_cluster/gc`, and the opt-in `--reconcile-interval-secs` loop share
+one maintenance admission slot, so duplicate whole-cluster passes cannot accumulate. The loop
+itself is accepted only in the same resolve-only topology. Graceful shutdown first aborts the loop,
+then acquires and retains the shared slot before durability cleanup; an already-running reconcile
+pass or GC sweep therefore finishes.
 The orchestrator termination budget remains an outer hard limit and must cover the HTTP drain plus
 the largest expected `O(corpus)` pass.
 

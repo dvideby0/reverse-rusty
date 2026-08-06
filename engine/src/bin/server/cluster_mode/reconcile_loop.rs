@@ -124,15 +124,17 @@ pub(crate) fn spawn_reconcile_loop(
                         let worker_admission = Arc::clone(&admission);
                         match tokio::task::spawn_blocking(move || {
                             let _admission = worker_admission;
+                            let _topology = st.topology_guard.read();
                             let cluster = st.cluster.read();
                             cluster.gc_orphan_slots(&handle)
                         })
                         .await
                         {
                             Ok(Ok(gc)) => {
-                                if !gc.dropped.is_empty() || !gc.is_clean() {
+                                if !gc.dropped.is_empty() || !gc.is_complete() {
                                     info!(
                                         dropped = gc.dropped.len(),
+                                        pending_disk_cleanup = gc.pending_disk_cleanup.len(),
                                         kept_live_routed = gc.kept_live_routed.len(),
                                         skipped_unassigned = gc.skipped_unassigned.len(),
                                         failed = gc.failed.len(),
@@ -140,7 +142,7 @@ pub(crate) fn spawn_reconcile_loop(
                                         "orphan-slot GC sweep"
                                     );
                                 }
-                                if !gc.is_clean() || !gc.skipped_nodes.is_empty() {
+                                if !gc.is_complete() {
                                     fully_done = false;
                                 }
                             }

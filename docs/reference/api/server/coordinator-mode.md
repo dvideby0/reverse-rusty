@@ -53,8 +53,10 @@ Topology-changing data movement requires a resolve-only coordinator after the in
 `--route-by-assignments`, `--control-endpoint`, the committed `--shards` count, and no
 `--shard-endpoint`. `--reconcile-interval-secs` is accepted only in this mode; its optional
 `--reconcile-max-parallel` width and `--reconcile-gc-orphans` epilogue share one admission slot with
-manual `POST /_cluster/reconcile`. See the [reconcile API](../cluster/reconcile.md) for safety and
-shutdown semantics.
+manual `POST /_cluster/reconcile` and `POST /_cluster/gc`. One-shot GC also works during the initial
+CLI-seeded assignment-routed boot because it does not change the map. See the
+[reconcile](../cluster/reconcile.md) and [GC](../cluster/gc.md) API contracts for safety and shutdown
+semantics.
 
 Behavior deltas from single-node mode (all deliberate, none silent):
 

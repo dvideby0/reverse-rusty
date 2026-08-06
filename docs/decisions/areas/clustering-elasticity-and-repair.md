@@ -20,6 +20,7 @@ Allocation, handoff, autoscaling, resize, reconciliation, and repair after parti
 | [170](../adr-170-cluster-handoff-api-contract.md) | Cluster-handoff REST API contract | Attests the live source, requires explicit uncommitted intent, bounds start admission, and supervises terminal handoff completion. | Accepted |
 | [171](../adr-171-cluster-reassign-api-contract.md) | Cluster-reassign REST API contract | Attests live authority, reconciles without stale recopy, bounds start admission, and reports durable state truthfully. | Accepted |
 | [172](../adr-172-cluster-reconcile-api-contract.md) | Cluster-reconcile REST API contract | Makes desired-placement convergence strict, resolve-only, singly admitted, supervised, and terminally attested. | Accepted |
+| [173](../adr-173-cluster-gc-api-contract.md) | Cluster-GC REST API contract | Makes orphan cleanup strict, assignment-routed, shared-admission, disconnect-safe, and truthful about incomplete work. | Accepted |
 
 ---
 

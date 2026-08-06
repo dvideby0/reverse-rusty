@@ -15,7 +15,7 @@ Elasticsearch/OpenSearch semantics where the underlying control model differs.
 | [`POST /_cluster/handoff`](cluster/handoff.md) | Explicitly uncommitted, raw-endpoint live-routing handoff for low-level deployment tests. | Distributed build |
 | [`POST /_cluster/reassign`](cluster/reassign.md) | Attest the live owner, move one position when needed, then commit or reconcile the assignment. | Distributed resolve-only authoritative coordinator |
 | [`POST /_cluster/reconcile`](cluster/reconcile.md) | Run one resumable desired-placement reconciliation pass. | Distributed resolve-only authoritative coordinator |
-| [`POST /_cluster/gc`](cluster/gc.md) | Reclaim fenced, unrouted orphan slots without dropping live or unassigned data. | Distributed authoritative coordinator |
+| [`POST /_cluster/gc`](cluster/gc.md) | Reclaim fenced, unrouted orphan slots without dropping durable, live, or unassigned data. | Distributed assignment-routed coordinator |
 
 Read-only control state is documented under
 [`GET|HEAD /_cluster/state`](observability/cluster-state.md). Logical shard counts are documented

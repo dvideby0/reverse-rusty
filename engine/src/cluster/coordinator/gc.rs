@@ -59,8 +59,14 @@ pub struct OrphanSlot {
 /// re-run finishes (idempotent — dropped slots are simply absent next time).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GcReport {
-    /// Orphans dropped: removed from the node's slot map, their `shard_<id>/` dir reclaimed.
+    /// Orphans dropped from the node's slot map and renamed out of the serving directory
+    /// namespace. A subset may also appear in [`Self::pending_disk_cleanup`] when the final trash
+    /// deletion did not finish.
     pub dropped: Vec<OrphanSlot>,
+    /// Dropped slots whose directory was atomically renamed out of the serving namespace but whose
+    /// best-effort trash deletion did not finish. They cannot reattach on restart; the node's next
+    /// boot retries the physical disk cleanup.
+    pub pending_disk_cleanup: Vec<OrphanSlot>,
     /// Hosted-but-unassigned slots KEPT because the coordinator's live routing still reaches that
     /// node for that position (a raw handoff flip / an uncommitted move) — the map alone would
     /// have called them orphans.
@@ -77,10 +83,19 @@ pub struct GcReport {
 }
 
 impl GcReport {
-    /// Did the sweep leave every reachable node fully reclaimed (nothing failed)? Skipped nodes /
-    /// unassigned positions are not failures — they are reported so an operator can look.
+    /// Did the sweep classify every node and slot and finish both logical and physical cleanup?
+    /// Live-routed slots are intentionally kept and do not make a pass incomplete. An unassigned
+    /// slot, skipped node, failed drop, or deferred trash deletion requires operator attention.
+    pub fn is_complete(&self) -> bool {
+        self.pending_disk_cleanup.is_empty()
+            && self.skipped_unassigned.is_empty()
+            && self.failed.is_empty()
+            && self.skipped_nodes.is_empty()
+    }
+
+    /// Compatibility spelling for [`Self::is_complete`].
     pub fn is_clean(&self) -> bool {
-        self.failed.is_empty()
+        self.is_complete()
     }
 }
 
@@ -210,7 +225,13 @@ impl ClusterEngine {
                     SlotClass::Unassigned => report.skipped_unassigned.push(slot),
                     SlotClass::LiveRouted => report.kept_live_routed.push(slot),
                     SlotClass::Orphan => match self.drop_orphan(&addr, s, handle) {
-                        Ok(()) => report.dropped.push(slot),
+                        Ok(DropOrphanOutcome::Absent) => {}
+                        Ok(DropOrphanOutcome::Dropped { dir_removed }) => {
+                            report.dropped.push(slot.clone());
+                            if !dir_removed {
+                                report.pending_disk_cleanup.push(slot);
+                            }
+                        }
                         Err(e) => report.failed.push((slot, e.to_string())),
                     },
                 }
@@ -228,7 +249,7 @@ impl ClusterEngine {
         addr: &str,
         listing: &crate::cluster::proto::ShardListing,
         handle: &Handle,
-    ) -> Result<(), ShardError> {
+    ) -> Result<DropOrphanOutcome, ShardError> {
         let client = RemoteShard::connect_for_coordinator_with_security(
             addr,
             handle.clone(),
@@ -253,7 +274,7 @@ impl ClusterEngine {
         if !reply.dropped {
             // Absent already (an idempotent overlap with an earlier sweep) — nothing reclaimed,
             // nothing wrong.
-            return Ok(());
+            return Ok(DropOrphanOutcome::Absent);
         }
         if !reply.dir_removed {
             // Renamed-to-trash but the delete did not finish; the node's next boot sweeps it.
@@ -268,8 +289,16 @@ impl ClusterEngine {
                 error: "dir_removed = false".into(),
             });
         }
-        Ok(())
+        Ok(DropOrphanOutcome::Dropped {
+            dir_removed: reply.dir_removed,
+        })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropOrphanOutcome {
+    Absent,
+    Dropped { dir_removed: bool },
 }
 
 #[cfg(test)]
@@ -362,6 +391,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn completion_requires_every_node_slot_and_disk_cleanup_to_finish() {
+        let slot = OrphanSlot {
+            node: NodeId(2),
+            shard_id: 0,
+            num_queries: 3,
+        };
+        let mut report = GcReport::default();
+        assert!(report.is_complete());
+        report.kept_live_routed.push(slot.clone());
+        assert!(
+            report.is_complete(),
+            "a live keep is an intentional terminal outcome"
+        );
+        report.pending_disk_cleanup.push(slot.clone());
+        assert!(!report.is_complete());
+        report.pending_disk_cleanup.clear();
+        report.skipped_unassigned.push(slot.clone());
+        assert!(!report.is_complete());
+        report.skipped_unassigned.clear();
+        report.failed.push((slot, "drop failed".to_string()));
+        assert!(!report.is_complete());
+        report.failed.clear();
+        report
+            .skipped_nodes
+            .push((NodeId(2), "node unavailable".to_string()));
+        assert!(!report.is_complete());
+    }
+
     /// The in-process / genesis sweep is a clean no-op: no addr'd data nodes ⇒ the empty report,
     /// nothing contacted, epoch invariant (the byte-identical-default guard at the unit level).
     #[test]
@@ -382,6 +440,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let report = cluster.gc_orphan_slots(rt.handle()).expect("no-op sweep");
         assert_eq!(report, GcReport::default(), "clean empty report");
+        assert!(report.is_complete());
         assert!(report.is_clean());
         assert_eq!(
             cluster.control_state().expect("state").epoch,
