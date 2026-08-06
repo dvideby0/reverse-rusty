@@ -375,7 +375,7 @@ fn finish_cluster_gc_worker(
                 .map(|slot| GcPendingDiskCleanupResponse {
                     slot: slot.into(),
                     warning: "the slot left the serving namespace but physical trash deletion is \
-                              pending until node restart cleanup",
+                              pending; a later sweep or node restart will retry it",
                 })
                 .collect();
             let skipped_unassigned = success

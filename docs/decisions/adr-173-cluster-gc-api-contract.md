@@ -47,10 +47,12 @@ admission/start meaning maps exactly. Do not add a `/_dangling` alias or accept
 - Run the synchronous RPC sweep on an independently supervised OS thread. The worker retains
   admission after HTTP disconnect, and graceful shutdown joins the shared slot before durability
   cleanup. Keep detailed slot/node failures in server logs.
-- Add `GcReport::pending_disk_cleanup`. A drop that left the serving namespace but did not finish
-  trash deletion remains visible and incomplete until node boot cleanup. Define completion as no
-  pending disk cleanup, unassigned skip, per-slot failure, or skipped node; a live-routed keep is an
-  intentional terminal outcome. Keep `is_clean` as a compatibility spelling of this stronger rule.
+- Make durable quarantine part of the node's slot-map transaction: a live-directory rename failure
+  restores the fence, keeps the slot hosted, and fails the drop. GC wire protocol v2 exposes
+  trash-renamed directories through `ListShards`, which retries deletion and carries any survivors
+  into later reports. Add `GcReport::pending_disk_cleanup`; completion requires no pending disk
+  cleanup, unassigned skip, per-slot failure, or skipped node. A live-routed keep is terminal.
+  Refuse older ambiguous GC replies, and keep `is_clean` as a compatibility spelling.
 - Return HTTP 200 for a terminal partial report, with `acknowledged == completed`, final control
   `version`, `took`/`took_ms`, stable sanitized partial reasons, `Cache-Control: no-store`, and fixed
   `cluster_gc` request/duration telemetry.
@@ -58,9 +60,10 @@ admission/start meaning maps exactly. Do not add a `/_dangling` alias or accept
 ## Consequences
 
 The route no longer claims whole-cluster success when any node or slot was unclassified or when
-disk reclaim remains pending. Operators can retry safe partial work without receiving internal
-mesh details, and an HTTP disconnect cannot make deletion look cancelled while it continues. Manual
-GC cannot overlap or queue behind the loop's reconcile/GC maintenance pass.
+disk reclaim remains pending, including across repeated sweeps. A failed rename cannot remove a
+slot from memory while leaving its restart-visible directory behind. Operators can retry safe
+partial work without receiving internal mesh details, and an HTTP disconnect cannot make deletion
+look cancelled while it continues. Manual GC cannot overlap or queue behind the loop's pass.
 
 The endpoint remains intentionally native. Clients that require ES/OpenSearch dangling-index UUID
 selection or explicit data-loss deletion cannot treat it as that API. Cross-coordinator destructive
@@ -71,7 +74,8 @@ serialization remains bounded by the v1 single-active-coordinator posture record
 The ADR-096 gRPC oracles continue to prove relocation cleanup, co-located sibling preservation,
 flip-without-commit keeps, restarted-unfenced orphan removal, idempotence, durable restart behavior,
 and zero false negatives. Core tests cover all classification classes and the stronger completion
-predicate. HTTP tests cover strict method/query/body handling, 64 KiB and 250 ms transport bounds,
+predicate. Node regressions cover transactional rename failure and persistent trash inventory.
+HTTP tests cover strict method/query/body handling, 64 KiB and 250 ms transport bounds,
 feature/topology gating, zero/positive/closed admission, terminal timing/version, no-store metrics,
 and sanitized partial reports. The supervisor regression proves receiver disconnect cannot cancel a
 started worker.

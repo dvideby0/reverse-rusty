@@ -28,8 +28,9 @@
 //! `clear_stale_fence` trick), anything holding an unexpired retention lease (an in-flight
 //! recovery's pinned source), and any divergent dict/tag space; the fence is re-checked under the
 //! slot-map write lock at removal (CAS). Disk reclaim is rename-to-trash then delete — an
-//! interrupted delete is invisible to a restart and swept at boot; an in-place delete could brick
-//! a restart (a live-named dir whose sidecar lists deleted segments fails the reopen loud).
+//! interrupted delete is invisible to a restart and retried by later inventory and at boot; an
+//! in-place delete could brick a restart (a live-named dir whose sidecar lists deleted segments
+//! fails the reopen loud).
 //!
 //! Per-slot failures are recorded and the sweep CONTINUES (the reconcile posture); a second sweep
 //! is idempotent (dropped slots list as absent). `distributed`-gated; the in-process/default path
@@ -64,8 +65,8 @@ pub struct GcReport {
     /// deletion did not finish.
     pub dropped: Vec<OrphanSlot>,
     /// Dropped slots whose directory was atomically renamed out of the serving namespace but whose
-    /// best-effort trash deletion did not finish. They cannot reattach on restart; the node's next
-    /// boot retries the physical disk cleanup.
+    /// best-effort trash deletion did not finish. They cannot reattach on restart; later inventory
+    /// and node boot both retry the physical disk cleanup.
     pub pending_disk_cleanup: Vec<OrphanSlot>,
     /// Hosted-but-unassigned slots KEPT because the coordinator's live routing still reaches that
     /// node for that position (a raw handoff flip / an uncommitted move) — the map alone would
@@ -77,8 +78,9 @@ pub struct GcReport {
     /// Per-slot drop failures `(slot, error)` — e.g. a lease held by an in-flight recovery, a
     /// fence CAS lost to a concurrent handoff. Retried by the next sweep.
     pub failed: Vec<(OrphanSlot, String)>,
-    /// Nodes the sweep could not classify at all `(node, reason)`: unreachable, a pre-ADR-096
-    /// server (`Unimplemented`), or a divergent dict/tag fingerprint. Nothing on them is touched.
+    /// Nodes the sweep could not classify at all `(node, reason)`: missing/unreachable endpoint,
+    /// incompatible GC protocol, pre-ADR-096 server, or divergent fingerprints. Nothing on them
+    /// is touched.
     pub skipped_nodes: Vec<(NodeId, String)>,
 }
 
@@ -143,21 +145,31 @@ pub(in crate::cluster::coordinator) fn classify_slot(
 }
 
 impl ClusterEngine {
-    /// Sweep every addr'd data node for orphan slots and reclaim them (ADR-096) — see the module
+    /// Sweep every registered data node for orphan slots and reclaim them (ADR-096) — see the module
     /// docs for the keep-set and the drop's guard ladder. Holds a whole-sweep busy-endpoint
     /// ledger reservation (no move or raw handoff interleaves); per-slot failures land in the
     /// report and the sweep continues. An in-process / genesis cluster (no addr'd data nodes)
     /// returns the clean empty report.
     pub fn gc_orphan_slots(&self, handle: &Handle) -> Result<GcReport, ShardError> {
         let state = self.control_state()?;
-        let data_nodes: Vec<(NodeId, String)> = state
+        let mut report = GcReport::default();
+        let mut data_nodes = Vec::new();
+        for node in state
             .nodes
             .iter()
-            .filter(|n| n.role == NodeRole::Data)
-            .filter_map(|n| n.addr.clone().map(|a| (n.id, a)))
-            .collect();
+            .filter(|node| node.role == NodeRole::Data)
+        {
+            match &node.addr {
+                Some(addr) => data_nodes.push((node.id, addr.clone())),
+                None => report.skipped_nodes.push((
+                    node.id,
+                    "registered data node has no endpoint; its slots cannot be classified"
+                        .to_string(),
+                )),
+            }
+        }
         if data_nodes.is_empty() {
-            return Ok(GcReport::default());
+            return Ok(report);
         }
         // Reserve EVERY data node for the whole sweep (ADR-095): strictly coarser than any move's
         // footprint, so no move-then-commit — and no raw handoff — can interleave a fence/recover
@@ -173,7 +185,6 @@ impl ClusterEngine {
 
         let expected = self.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
-        let mut report = GcReport::default();
         for (node, addr) in data_nodes {
             // A node-level client (slot binding irrelevant for the LISTING; drops connect their
             // own per-slot client below). Connect refuses a divergent dict — exactly the identity
@@ -201,6 +212,17 @@ impl ClusterEngine {
                     continue;
                 }
             };
+            if listing.gc_protocol_version != crate::cluster::GC_PROTOCOL_VERSION {
+                report.skipped_nodes.push((
+                    node,
+                    format!(
+                        "node GC protocol {} is incompatible with required version {}",
+                        listing.gc_protocol_version,
+                        crate::cluster::GC_PROTOCOL_VERSION
+                    ),
+                ));
+                continue;
+            }
             if listing.dict_fingerprint != expected || listing.tag_dict_fingerprint != expected_tag
             {
                 report.skipped_nodes.push((
@@ -213,6 +235,20 @@ impl ClusterEngine {
                 ));
                 continue;
             }
+            report
+                .pending_disk_cleanup
+                .extend(
+                    listing
+                        .pending_disk_cleanup_shards
+                        .iter()
+                        .map(|&shard_id| OrphanSlot {
+                            node,
+                            shard_id,
+                            // No hosted slot remains, so a later durable-trash observation has no live
+                            // count to report. Zero explicitly means "not available" for this carryover.
+                            num_queries: 0,
+                        }),
+                );
             for s in &listing.shards {
                 let slot = OrphanSlot {
                     node,
@@ -277,13 +313,14 @@ impl ClusterEngine {
             return Ok(DropOrphanOutcome::Absent);
         }
         if !reply.dir_removed {
-            // Renamed-to-trash but the delete did not finish; the node's next boot sweeps it.
+            // Renamed-to-trash but the delete did not finish; later inventory or node boot retries
+            // it.
             // Surface as an event, not a failure — the slot is gone from serving either way.
             self.emit(crate::events::EngineEvent::DurabilityFailure {
                 op: crate::events::DurabilityOp::ReplicaDesync,
                 detail: format!(
                     "orphan-slot GC dropped shard {} on {} but the dir delete was incomplete \
-                     (trash-renamed); the node's next restart sweeps it",
+                     (trash-renamed); a later sweep or node restart retries it",
                     listing.shard_id, addr
                 ),
                 error: "dir_removed = false".into(),
@@ -446,6 +483,34 @@ mod tests {
             cluster.control_state().expect("state").epoch,
             epoch_before,
             "a no-op sweep commits nothing"
+        );
+    }
+
+    #[test]
+    fn addrless_data_node_makes_the_sweep_incomplete() {
+        use crate::cluster::coordinator::{ClusterConfig, ClusterEngine};
+        use crate::normalize::Normalizer;
+
+        let cluster = ClusterEngine::build(
+            Normalizer::default_vocab().expect("vocab"),
+            &ClusterConfig::default(),
+            &[],
+        )
+        .expect("cluster");
+        cluster
+            .register_node(NodeDescriptor {
+                id: NodeId(7),
+                addr: None,
+                role: NodeRole::Data,
+            })
+            .expect("register incomplete descriptor");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let report = cluster.gc_orphan_slots(rt.handle()).expect("report");
+        assert_eq!(report.skipped_nodes.len(), 1, "{report:?}");
+        assert_eq!(report.skipped_nodes[0].0, NodeId(7));
+        assert!(
+            !report.is_complete(),
+            "unclassifiable data node is incomplete"
         );
     }
 }

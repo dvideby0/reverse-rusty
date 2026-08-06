@@ -9,8 +9,8 @@
 //! unexpired retention lease (an in-flight recovery's pinned source is never destroyed) → the
 //! fence is RE-CHECKED under the map write lock at removal (the CAS — an interleaving
 //! fence/unfence by a newer handoff fails the drop). Disk reclaim is rename-to-trash first
-//! (atomically invisible to a restart), then best-effort delete; the boot sweep finishes an
-//! interrupted delete.
+//! (atomically invisible to a restart), then best-effort delete; the next inventory or boot sweep
+//! retries an interrupted delete.
 
 use std::sync::atomic::Ordering;
 
@@ -19,7 +19,9 @@ use tonic::{Request, Response, Status};
 use crate::cluster::proto;
 use crate::cluster::shard::Shard;
 
-use super::super::durable::reclaim_slot_dir;
+use super::super::durable::{
+    quarantine_slot_dir, retry_pending_dropped_trash, sync_slot_quarantine_parent,
+};
 use super::super::ShardServer;
 
 /// Body of [`ShardService::list_shards`](crate::cluster::proto::shard_service_server::ShardService::list_shards).
@@ -33,6 +35,15 @@ pub(super) fn list_shards(
     let (dict_fingerprint, tag_dict_fingerprint) = match server.node_dict.load_full() {
         Some(space) => (space.dict.fingerprint(), space.tag_dict.fingerprint()),
         None => (0, 0),
+    };
+    let pending_disk_cleanup_shards = match &server.data_dir {
+        None => Vec::new(),
+        Some(root) => retry_pending_dropped_trash(root).map_err(|source| {
+            Status::internal(format!(
+                "ListShards: cannot inspect pending GC trash in {}: {source}",
+                root.display()
+            ))
+        })?,
     };
     // Snapshot the slot `Arc`s under the read lock, then introspect lock-free (the handlers'
     // usual discipline — never hold the map lock across engine reads).
@@ -67,6 +78,8 @@ pub(super) fn list_shards(
         shards,
         dict_fingerprint,
         tag_dict_fingerprint,
+        pending_disk_cleanup_shards,
+        gc_protocol_version: crate::cluster::GC_PROTOCOL_VERSION,
     }))
 }
 
@@ -140,23 +153,38 @@ pub(super) fn drop_shard(
         }
         None => 0,
     };
-    // Remove from the map, re-checking the fence under the WRITE lock (the CAS).
-    if server
-        .remove_slot_if_fenced_at(req.shard_id, req.expected_fence_generation)?
-        .is_none()
-    {
+    // Re-check the fence under the map WRITE lock, then atomically quarantine the durable dir
+    // before removing the slot. A rename failure restores the fence and leaves the slot hosted.
+    let trash = server.remove_slot_if_fenced_at_with(
+        req.shard_id,
+        req.expected_fence_generation,
+        || match &server.data_dir {
+            None => Ok(None),
+            Some(root) => quarantine_slot_dir(root, req.shard_id).map_err(|source| {
+                Status::internal(format!(
+                    "DropShard: cannot quarantine shard {} in {}: {source}",
+                    req.shard_id,
+                    root.display()
+                ))
+            }),
+        },
+    )?;
+    let Some(trash) = trash else {
         // Raced an earlier drop between guard 3 and here — idempotent.
         return Ok(Response::new(proto::DropShardReply {
             dropped: false,
             num_queries: 0,
             dir_removed: true,
         }));
-    }
-    // Disk reclaim (durable nodes): rename-to-trash, then best-effort delete.
-    let dir_removed = match &server.data_dir {
-        None => true,
-        Some(root) => reclaim_slot_dir(root, req.shard_id),
     };
+    // The rename is complete and the map write guard has been released. Synchronize its parent
+    // here so slow storage cannot stall unrelated co-located shards behind the shared map lock.
+    if let (Some(_), Some(root)) = (&trash, &server.data_dir) {
+        sync_slot_quarantine_parent(root);
+    }
+    // The slot and live-named dir are now gone. Final trash deletion is best-effort and remains
+    // durably observable through the next ListShards response when it fails.
+    let dir_removed = trash.is_none_or(|path| std::fs::remove_dir_all(path).is_ok());
     Ok(Response::new(proto::DropShardReply {
         dropped: true,
         num_queries,

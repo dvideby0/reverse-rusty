@@ -44,10 +44,17 @@ The request is bodyless. A complete response is HTTP 200:
 ```
 
 `dropped` lists slots removed from the node's serving map and atomically renamed out of the
-`shard_<id>/` namespace. `num_queries` is the listing-time live count and is observational. A
-successful rename makes the slot impossible to reattach on restart. The final trash-directory
-delete is best-effort; if it does not finish, the slot also appears in `pending_disk_cleanup`, the
-response is incomplete, and the node's next boot retries physical deletion.
+`shard_<id>/` namespace. `num_queries` is the listing-time live count and is observational. The
+rename is transactional with map removal: if it fails, the node restores the fence, keeps the slot
+hosted, and the drop appears in `failed`. A successful rename makes the slot impossible to reattach
+on restart. The final trash-directory delete is best-effort; if it does not finish, the slot also
+appears in `pending_disk_cleanup` and the response is incomplete.
+
+Every later node inventory retries pending trash deletion and reports any survivors, so a second
+sweep cannot acknowledge completion merely because the slot already left the serving map. The
+node's next boot uses the same retry. A carried-over pending entry has `num_queries: 0` because no
+hosted slot remains from which to recover the earlier observational count. GC wire protocol v2
+provides this distinction and inventory; an older ambiguous node is placed in `skipped_nodes`.
 
 `kept_live_routed` is an intentional terminal outcome. It identifies a slot not named for that node
 by the durable map but still reached by current live routing, such as a raw handoff or an
@@ -72,7 +79,7 @@ successful drops are final and the operation is safely resumable:
       "node": 11,
       "shard": 3,
       "num_queries": 4200,
-      "warning": "the slot left the serving namespace but physical trash deletion is pending until node restart cleanup"
+      "warning": "the slot left the serving namespace but physical trash deletion is pending; a later sweep or node restart will retry it"
     }
   ],
   "kept_live_routed": [],

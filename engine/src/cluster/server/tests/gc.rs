@@ -104,6 +104,45 @@ fn drop_shard_guards_refuse_unarmed_mismatched_and_divergent() {
     assert_eq!(count, 0);
 }
 
+/// Durable quarantine is part of the slot-map transaction: if the live directory cannot be
+/// renamed, the tombstone is rolled back and the slot remains hosted for a later idempotent retry.
+#[test]
+fn failed_durable_quarantine_restores_the_fence_and_keeps_the_slot() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let n = norm();
+    let d = frozen_dict(&["pro"], &n);
+    let fp = d.fingerprint();
+    let tag_fp = {
+        let mut td = TagDict::new();
+        td.mark_finalized();
+        td.fingerprint()
+    };
+    let srv = ShardServer::new(Arc::clone(&n), Arc::new(d), EngineConfig::default());
+    rt.block_on(srv.fence(Request::new(proto::FenceRequest {
+        generation: 4,
+        dict_fingerprint: fp,
+        tag_dict_fingerprint: tag_fp,
+        shard_id: 0,
+        placement_generation: 1,
+        num_shards: 1,
+    })))
+    .expect("fence");
+
+    let error = srv
+        .remove_slot_if_fenced_at_with(0, 4, || -> Result<(), tonic::Status> {
+            Err(tonic::Status::internal("injected rename failure"))
+        })
+        .expect_err("failed quarantine must reject the drop");
+    assert_eq!(error.code(), Code::Internal, "{error:?}");
+    let slot = srv.slot(0).expect("slot remains hosted");
+    assert_eq!(
+        slot.fenced_at_generation
+            .load(std::sync::atomic::Ordering::Acquire),
+        4,
+        "the pre-drop fence is restored"
+    );
+}
+
 /// A slot pinned by an UNEXPIRED retention lease (an in-flight recovery's source) is never
 /// dropped; releasing the lease unblocks the drop.
 #[test]

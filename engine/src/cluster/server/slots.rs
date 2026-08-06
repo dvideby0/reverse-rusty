@@ -103,16 +103,17 @@ impl ShardServer {
     /// the slot was already absent (an idempotent re-run); `Err` ⇒ the fence changed. In-flight
     /// RPCs holding the old `Arc` complete against it (serve-then-drop at micro scale); memory
     /// frees when the last `Arc` drops.
-    pub(in crate::cluster::server) fn remove_slot_if_fenced_at(
+    pub(in crate::cluster::server) fn remove_slot_if_fenced_at_with<T>(
         &self,
         shard_id: u32,
         expected_generation: u64,
-    ) -> Result<Option<Arc<ShardSlot>>, Status> {
+        persist_removal: impl FnOnce() -> Result<T, Status>,
+    ) -> Result<Option<T>, Status> {
         let mut map = self
             .shards
             .write()
             .map_err(|_| Status::internal("shard map lock poisoned"))?;
-        let Some(slot) = map.get(&shard_id) else {
+        let Some(slot) = map.get(&shard_id).cloned() else {
             return Ok(None);
         };
         if let Err(now) = slot.fenced_at_generation.compare_exchange(
@@ -123,10 +124,32 @@ impl ShardServer {
         ) {
             return Err(Status::failed_precondition(format!(
                 "DropShard: shard {shard_id}'s fence generation changed under the drop \
-                 ({now} != expected {expected_generation}); re-plan"
+                ({now} != expected {expected_generation}); re-plan"
             )));
         }
-        Ok(map.remove(&shard_id))
+        let persisted = match persist_removal() {
+            Ok(persisted) => persisted,
+            Err(source) => {
+                if slot
+                    .fenced_at_generation
+                    .compare_exchange(
+                        DROPPED_TOMBSTONE,
+                        expected_generation,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    return Err(Status::internal(format!(
+                        "DropShard: failed to restore shard {shard_id}'s fence after durable \
+                         quarantine failed"
+                    )));
+                }
+                return Err(source);
+            }
+        };
+        map.remove(&shard_id);
+        Ok(Some(persisted))
     }
 
     /// Whether ANY hosted slot currently holds ≥1 query (ADR-093). The `AdoptDict` divergence guard:
